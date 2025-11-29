@@ -1,0 +1,85 @@
+# ==================================
+# General ignores for IDEs and OS
+# ==================================
+.DS_Store
+*.swp
+*.swo
+*~
+*.bak
+*.tmp
+
+# ==================================
+# Visual Studio / VS Code
+# ==================================
+.vs/
+*.VC.db
+*.suo
+*.user
+*.vcxproj.user
+*.sln.docstates
+ipch/
+*.aps
+*.ncb
+*.opensdf
+*.sdf
+*.cache
+
+# ==================================
+# CMake generated files
+# ==================================
+# 通常我们会把所有构建文件都放在一个 build 目录里
+build/
+Build/
+[Bb]uild/
+[Cc]make-[Bb]uild/
+*.cmake.user
+
+# 如果不在 build 目录里构建，需要忽略这些
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+install_manifest.txt
+Makefile
+*.cbp
+
+# ==================================
+# Compiled output
+# ==================================
+# 可执行文件、库文件、对象文件等
+*.exe
+*.dll
+*.lib
+*.a
+*.so
+*.obj
+*.o
+*.pdb
+*.ilk
+*.manifest
+
+# ==================================
+# Packaged artifacts
+# ==================================
+# GitHub Actions 或手动打包的产物
+artifacts/
+*.zip
+*.tar.gz
+*.7z
+
+# ==================================
+# Vendor submodules
+# ==================================
+# 我们只跟踪子模块的 commit ID，不跟踪子模块的内容
+# 除非你想把 vendor 目录也作为项目的一部分提交
+# vendor/
+
+# ==================================
+# Project specific ignores
+# ==================================
+# 忽略本地对日志配置的修改
+/config/logging.ini
+
+vendor/ctpl/
+vendor/spdlog/
+vendor/proc_utils/
+vendor/lfs/

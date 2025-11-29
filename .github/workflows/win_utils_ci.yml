@@ -1,0 +1,115 @@
+name: Win-Utils CI
+
+on:
+  push:
+    branches: ["main", "master", "FFI"]
+    paths:
+      - 'win-utils/**'
+      - '**'
+      - '.github/workflows/win_utils_ci.yml'
+  pull_request:
+    branches: ["main", "master"]
+  workflow_dispatch:
+
+jobs:
+  test-suite:
+    name: Full Test Suite (Windows)
+    runs-on: windows-latest
+    
+    env:
+      LUAJIT_BIN_DIR: ${{ github.workspace }}\.luajit
+      
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # [NEW] 缓存 LuaJIT 构建产物
+      - name: Cache LuaJIT Build
+        id: cache-luajit
+        uses: actions/cache@v3
+        with:
+          path: ${{ env.LUAJIT_BIN_DIR }}
+          # 使用 luajit.h 的哈希作为缓存键，版本变动时自动失效
+          key: ${{ runner.os }}-luajit-${{ hashFiles('vendor/luajit/src/luajit.h') }}
+          restore-keys: |
+            ${{ runner.os }}-luajit-
+
+      # [MODIFIED] 仅当缓存未命中时才设置 MSVC
+      - name: Setup MSVC
+        if: steps.cache-luajit.outputs.cache-hit != 'true'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      # [MODIFIED] 仅当缓存未命中时才构建 LuaJIT
+      - name: Build LuaJIT
+        if: steps.cache-luajit.outputs.cache-hit != 'true'
+        shell: cmd
+        run: |
+          cd vendor/luajit/src
+          call msvcbuild.bat gc64
+          if %errorlevel% neq 0 exit /b %errorlevel%
+          
+          mkdir "%LUAJIT_BIN_DIR%\bin"
+          copy luajit.exe "%LUAJIT_BIN_DIR%\bin\"
+          copy lua51.dll "%LUAJIT_BIN_DIR%\bin\"
+          
+          mkdir "%LUAJIT_BIN_DIR%\jit"
+          copy jit\*.lua "%LUAJIT_BIN_DIR%\jit\"
+
+      - name: Assemble Test Environment
+        shell: pwsh
+        run: |
+          $stage = New-Item -ItemType Directory -Path "stage" -Force
+          $bin   = New-Item -ItemType Directory -Path "stage/bin"
+          $lua   = New-Item -ItemType Directory -Path "stage/lua"
+          
+          # 1. Binaries
+          Copy-Item "${{ env.LUAJIT_BIN_DIR }}\bin\*" $bin
+          
+          # 2. Lua Libs
+          
+          # A. win-utils (Target)
+          $pkgDest = New-Item -ItemType Directory -Path "$lua/win-utils" -Force
+          
+          if (Test-Path "win-utils\init.lua") {
+              Write-Host "Detected subdirectory structure."
+              Copy-Item "win-utils\*" $pkgDest -Recurse
+          } elseif (Test-Path "init.lua") {
+              Write-Host "Detected root directory structure."
+              Get-ChildItem -Path . -Exclude ".git", ".github", "stage", ".luajit", "vendor", "test_sandbox" | Copy-Item -Destination $pkgDest -Recurse
+          } else {
+              Write-Error "Could not find init.lua in '.' or './win-utils'. Layout unknown."
+              exit 1
+          }
+          
+          # B. lua-ffi-bindings
+          $ffiDest = New-Item -ItemType Directory -Path "$lua/ffi" -Force
+          if (Test-Path "vendor/lua-ffi-bindings") {
+             Copy-Item "vendor/lua-ffi-bindings/*" "$lua/ffi" -Recurse -Exclude ".git"
+          } else {
+             Write-Warning "vendor/lua-ffi-bindings not found."
+          }
+          
+          # C. lua-ext
+          if (Test-Path "vendor/lua-ext") {
+             Copy-Item "vendor/lua-ext" "$lua/ext" -Recurse -Exclude ".git","vendor"
+          }
+
+          # D. LuaUnit
+          Invoke-WebRequest -Uri "https://raw.githubusercontent.com/bluebird75/luaunit/master/luaunit.lua" -OutFile "$lua/luaunit.lua"
+
+          # E. JIT Libs
+          Copy-Item "${{ env.LUAJIT_BIN_DIR }}\jit" "$lua/jit" -Recurse
+
+          # Save Path
+          echo "TEST_STAGE=$($stage.FullName)" >> $env:GITHUB_ENV
+
+      # [FIXED] 使用 pwsh 运行测试，防止 proc.lua 测试中的 kill('cmd.exe') 杀死 CI Runner 本身
+      - name: Run Tests
+        shell: pwsh
+        env:
+          LUA_PATH: ${{ env.TEST_STAGE }}\lua\?.lua;${{ env.TEST_STAGE }}\lua\?\init.lua;;
+        run: |
+          Write-Host "Running tests in staged environment (PowerShell)..."
+          & "${{ env.TEST_STAGE }}\bin\luajit.exe" "${{ env.TEST_STAGE }}\lua\win-utils\tests\run_tests.lua" -v
