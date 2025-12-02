@@ -1,4 +1,4 @@
-# **System Protocol: LuaJIT FFI & C++ Interop Core Guidelines (v3.1)**
+# **System Protocol: LuaJIT FFI & C++ Interop Core Guidelines (v3.2)**
 
 **Context:** 本文档定义了 LuaJIT (v2.1) + C/C++ 混合架构的最高代码准则。
 **Environment:**
@@ -48,7 +48,7 @@
 ### **❌ 严禁使用的特性 (Lua 5.3+ Hallucinations)**
 | 错误写法 (Trap)    | ✅ 修正写法                | 原因                     |
 | :----------------- | :------------------------ | :----------------------- |
-| `val = a           | b`                        | `val = bit.bor(a, b)`    | 不支持 5.3 运算符 |
+| `val = a | b`      | `val = bit.bor(a, b)`    | 不支持 5.3 运算符 |
 | `val = a << 1`     | `val = bit.lshift(a, 1)`  | 同上                     |
 | `val = a // b`     | `val = math.floor(a / b)` | 不支持整除符号           |
 | `local _ENV = ...` | `setfenv(1, env)`         | **LuaJIT 不支持 `_ENV`** |
@@ -230,8 +230,34 @@ void HandlePtr(lua_State* L, int idx) {
 ### **3. 禁止隐式类型 (No Implicit Types)**
 *   **机制:** FFI 环境是裸环境，没有标准库头文件。
 *   **Rule:** 不要假设 `SIZE_T`, `WCHAR`, `HMODULE` 等类型存在，除非显式 `typedef` 过。
-*   **Action:** 在 `cdef` 顶部显式定义所有非基础类型：
-    ```lua
-    typedef size_t SIZE_T;
-    typedef unsigned short WCHAR;
+*   **Action:** 在 `cdef` 顶部显式定义所有非基础类型。
+
+---
+
+## **指令十一：FFI 类型定义与解析器陷阱 (Type Definitions & Parser Pitfalls)**
+
+**Context:** 针对 Windows FFI 绑定的常见错误总结。
+
+### **1. Windows 扩展类型完备性 (Complete Type Specs)**
+*   **错误:** 使用 `PCHAR`, `PHANDLE`, `PDEVINST`, `SC_HANDLE`, `UINT8` 等类型时报错。
+*   **Rule:** FFI 默认不包含任何 Windows 扩展类型。
+*   **Action:** 必须在基础定义文件（如 `minwindef.lua`）中**显式定义**所有指针别名（`P-`前缀）和定长类型（`UINT8`, `INT32` 等）。
+    ```c
+    typedef char *PCHAR;
+    typedef void *SC_HANDLE;
+    typedef unsigned char UINT8;
     ```
+
+### **2. 避免结构体重复定义 (No Duplicate Structs)**
+*   **错误:** `attempt to redefine 'STRUCT_NAME'`.
+*   **Rule:** 如果两个模块（如 `kernel32` 和 `ntdll`）都需要同一个结构体（如 `IO_COUNTERS`），必须将其移动到**公共基础模块**（如 `minwindef`），并在上层模块中通过 `require` 引入，严禁重复定义。
+
+### **3. 常量表达式限制 (Constant Expression Limits)**
+*   **错误:** `invalid C type` at `static const SOCKET = (SOCKET)(~0)`.
+*   **Rule:** FFI 的 `cdef` 解析器不支持在 `static const` 初始化中使用复杂的类型转换。
+*   **Action:** 遇到复杂常量（尤其是 `-1` 或位取反），必须使用 `enum` 替代，或简化表达式。
+    *   **❌ 错误:** `static const SOCKET INVALID = (SOCKET)(~0);`
+    *   **✅ 正确:** `enum { INVALID = -1 };`
+
+### **4. COM 接口定义链 (COM Chain)**
+*   **Rule:** 定义 COM 接口时，必须先定义基类 `IUnknown` 及其 `Vtbl`，不能只做前向声明。

@@ -16,7 +16,6 @@ end
 local kernel32             = require 'ffi.req' 'Windows.sdk.kernel32'
 local psapi                = require 'ffi.req' 'Windows.sdk.psapi'
 local advapi32             = require 'ffi.req' 'Windows.sdk.advapi32'
--- [REMOVED] wtsapi32, userenv (Useless in PE/SYSTEM environment)
 local ntdll                = require 'ffi.req' 'Windows.sdk.ntdll'
 local user32               = require 'ffi.req' 'Windows.sdk.user32'
 
@@ -46,57 +45,31 @@ local _wait, _waitClose, _waitForExit, _setProcessPriority
 local enable_debug_privilege
 local _terminateProcessGracefully
 
--- [REFACTOR] Enhanced list using Native API with Thread support
+-- [REFACTOR] Use Toolhelp32Snapshot for robust Process enumeration
+-- NtQuerySystemInformation structure definitions can be unstable/misaligned on different OS versions
 function M.list()
-    -- SystemProcessInformation = 5
-    local buf, size = native.query_system_info(5)
-    if not buf then return {} end
-
-    local processes = {}
-    local offset = 0
+    local hSnap = kernel32.CreateToolhelp32Snapshot(C.TH32CS_SNAPPROCESS, 0)
+    if hSnap == INVALID_HANDLE_VALUE then return {} end
     
-    while true do
-        local p_info = ffi.cast("SYSTEM_PROCESS_INFORMATION*", buf + offset)
-        
-        local pid = tonumber(ffi.cast("uintptr_t", p_info.UniqueProcessId))
-        local name = native.u_str(p_info.ImageName)
-        
-        if pid == 0 then name = "System Idle Process" end
-        if pid == 4 and name == "" then name = "System" end
-        
-        local thread_count = tonumber(p_info.NumberOfThreads)
-        local threads = {}
-        
-        local thread_ptr = p_info.Threads 
-        
-        for i = 0, thread_count - 1 do
-            local t = thread_ptr[i]
-            table.insert(threads, {
-                tid = tonumber(ffi.cast("uintptr_t", t.ClientId.UniqueThread)),
-                priority = tonumber(t.Priority),
-                state = tonumber(t.ThreadState),
-                wait_reason = tonumber(t.WaitReason),
-                context_switches = tonumber(t.ContextSwitches)
+    local pe = ffi.new("PROCESSENTRY32W")
+    pe.dwSize = ffi.sizeof(pe)
+    
+    local processes = {}
+    
+    if kernel32.Process32FirstW(hSnap, pe) ~= 0 then
+        repeat
+            table.insert(processes, {
+                pid = tonumber(pe.th32ProcessID),
+                name = util.from_wide(pe.szExeFile),
+                parent_pid = tonumber(pe.th32ParentProcessID),
+                thread_count = tonumber(pe.cntThreads),
+                -- Toolhelp does not provide detailed memory/IO stats in one go
+                -- For those, specific queries via GetProcessMemoryInfo are needed
             })
-        end
-
-        table.insert(processes, {
-            pid = pid,
-            name = name,
-            parent_pid = tonumber(ffi.cast("uintptr_t", p_info.InheritedFromUniqueProcessId)),
-            handle_count = tonumber(p_info.HandleCount),
-            thread_count = thread_count,
-            working_set = tonumber(p_info.VirtualMemoryCounters.WorkingSetSize),
-            private_bytes = tonumber(p_info.VirtualMemoryCounters.PagefileUsage),
-            read_transfer = tonumber(p_info.IoCounters.ReadTransferCount),
-            write_transfer = tonumber(p_info.IoCounters.WriteTransferCount),
-            threads = threads
-        })
-
-        if p_info.NextEntryOffset == 0 then break end
-        offset = offset + p_info.NextEntryOffset
+        until kernel32.Process32NextW(hSnap, pe) == 0
     end
     
+    kernel32.CloseHandle(hSnap)
     return processes
 end
 
@@ -468,7 +441,6 @@ function Process:terminate(exit_code)
     return true
 end
 
--- [NEW] OOP Suspend
 function Process:suspend()
     if self:is_valid() then
         -- Try with existing handle if it has rights (unlikely if opened generic)
@@ -479,7 +451,6 @@ function Process:suspend()
     return _suspendProcess(self.pid)
 end
 
--- [NEW] OOP Resume
 function Process:resume()
     if self:is_valid() then
         local status = ntdll.NtResumeProcess(self._handle)
@@ -528,7 +499,6 @@ function M.terminate_by_pid(p, e) return _terminateProcessByPid(p, e or 0) end
 
 function M.terminate_gracefully(p, t) return _terminateProcessGracefully(p, t) end
 
--- [NEW] Module Exports
 function M.suspend(pid) return _suspendProcess(pid) end
 function M.resume(pid) return _resumeProcess(pid) end
 
