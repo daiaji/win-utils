@@ -1,9 +1,9 @@
--- win-utils/tests/core_spec.lua
-package.path = package.path .. ';./?.lua;./vendor/luaunit/?.lua;../?.lua;../vendor/luaunit/?.lua'
-
 local lu = require('luaunit')
 local win = require('win-utils')
 local ffi = require('ffi')
+
+-- [Fix] Removing manual package.path manipulation. 
+-- Environment should be set up via LUA_PATH in CI/Wrapper script.
 
 TestWinUtilsCore = {}
 

@@ -25,23 +25,19 @@ jobs:
         with:
           submodules: recursive
 
-      # [NEW] 缓存 LuaJIT 构建产物
       - name: Cache LuaJIT Build
         id: cache-luajit
         uses: actions/cache@v3
         with:
           path: ${{ env.LUAJIT_BIN_DIR }}
-          # 使用 luajit.h 的哈希作为缓存键，版本变动时自动失效
           key: ${{ runner.os }}-luajit-${{ hashFiles('vendor/luajit/src/luajit.h') }}
           restore-keys: |
             ${{ runner.os }}-luajit-
 
-      # [MODIFIED] 仅当缓存未命中时才设置 MSVC
       - name: Setup MSVC
         if: steps.cache-luajit.outputs.cache-hit != 'true'
         uses: ilammy/msvc-dev-cmd@v1
 
-      # [MODIFIED] 仅当缓存未命中时才构建 LuaJIT
       - name: Build LuaJIT
         if: steps.cache-luajit.outputs.cache-hit != 'true'
         shell: cmd
@@ -63,21 +59,33 @@ jobs:
           $stage = New-Item -ItemType Directory -Path "stage" -Force
           $bin   = New-Item -ItemType Directory -Path "stage/bin"
           $lua   = New-Item -ItemType Directory -Path "stage/lua"
+          $tests = New-Item -ItemType Directory -Path "stage/tests"
           
           # 1. Binaries
           Copy-Item "${{ env.LUAJIT_BIN_DIR }}\bin\*" $bin
           
           # 2. Lua Libs
           
-          # A. win-utils (Target)
+          # A. win-utils (Library code only)
           $pkgDest = New-Item -ItemType Directory -Path "$lua/win-utils" -Force
           
           if (Test-Path "win-utils\init.lua") {
               Write-Host "Detected subdirectory structure."
-              Copy-Item "win-utils\*" $pkgDest -Recurse
+              # Copy library code, excluding tests if they are inside
+              Copy-Item "win-utils\*" $pkgDest -Recurse -Exclude "tests"
+              
+              # Copy tests to stage/tests
+              if (Test-Path "win-utils\tests") {
+                  Copy-Item "win-utils\tests\*" $tests -Recurse
+              }
           } elseif (Test-Path "init.lua") {
               Write-Host "Detected root directory structure."
-              Get-ChildItem -Path . -Exclude ".git", ".github", "stage", ".luajit", "vendor", "test_sandbox" | Copy-Item -Destination $pkgDest -Recurse
+              Get-ChildItem -Path . -Exclude ".git", ".github", "stage", ".luajit", "vendor", "test_sandbox", "tests" | Copy-Item -Destination $pkgDest -Recurse
+              
+              # Copy tests to stage/tests
+              if (Test-Path "tests") {
+                  Copy-Item "tests\*" $tests -Recurse
+              }
           } else {
               Write-Error "Could not find init.lua in '.' or './win-utils'. Layout unknown."
               exit 1
@@ -105,11 +113,13 @@ jobs:
           # Save Path
           echo "TEST_STAGE=$($stage.FullName)" >> $env:GITHUB_ENV
 
-      # [FIXED] 使用 pwsh 运行测试，防止 proc.lua 测试中的 kill('cmd.exe') 杀死 CI Runner 本身
       - name: Run Tests
         shell: pwsh
         env:
+          # [CHANGED] Add stage/tests to path so run_tests.lua can find specs if needed (though dofile handles absolute)
+          # Add stage/lua to path for library resolution
           LUA_PATH: ${{ env.TEST_STAGE }}\lua\?.lua;${{ env.TEST_STAGE }}\lua\?\init.lua;;
         run: |
           Write-Host "Running tests in staged environment (PowerShell)..."
-          & "${{ env.TEST_STAGE }}\bin\luajit.exe" "${{ env.TEST_STAGE }}\lua\win-utils\tests\run_tests.lua" -v
+          # Run the test runner located in stage/tests/
+          & "${{ env.TEST_STAGE }}\bin\luajit.exe" "${{ env.TEST_STAGE }}\tests\run_tests.lua" -v

@@ -1,26 +1,12 @@
--- tests/process_spec.lua (renamed from proc_spec.lua)
--- Unit tests for win-utils.process (formerly proc_utils_ffi.lua)
--- [REFACTOR] Tests updated for the new module structure and require paths
+-- tests/process_spec.lua
+-- Unit tests for win-utils.process
 
--- 1. Configure path
-package.path = package.path .. ';./?.lua;./vendor/luaunit/?.lua;../?.lua;../vendor/luaunit/?.lua'
+-- [Fix] Removing manual package.path manipulation. 
+-- Environment should be set up via LUA_PATH in CI/Wrapper script.
 
-local status, lu = pcall(require, 'luaunit')
-if not status then
-    print("[ERROR] Could not find 'luaunit'.")
-    os.exit(1)
-end
-
+local lu = require('luaunit')
 local ffi = require("ffi")
-
--- 2. Load the library under test
--- [CHANGED] Updated require path
-local proc_status, proc = pcall(require, 'win-utils.process')
-if not proc_status then
-    print("[ERROR] Could not find 'win-utils.process'.")
-    print("  Error: " .. tostring(proc))
-    os.exit(1)
-end
+local proc = require('win-utils.process')
 
 if not proc._OS_SUPPORT then
     print("Skipping tests: win-utils.process only supports Windows.")
@@ -33,7 +19,6 @@ local function table_isempty(t)
 end
 
 -- 4. Test Suite Definition
--- [CHANGED] Updated test suite name
 TestProcessUtils = {}
 
 -- [MODIFIED] Use cmd.exe to wrap ping and redirect stdout to NUL to suppress CI logs
