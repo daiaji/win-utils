@@ -4,10 +4,6 @@ local advapi32 = require 'ffi.req' 'Windows.sdk.advapi32'
 local kernel32 = require 'ffi.req' 'Windows.sdk.kernel32'
 local util = require 'win-utils.util'
 
--- [FIX] minwindef already defines these constants via ffi.C,
--- but we can use local aliases for clarity if needed, or just rely on ffi.C.
--- For safety and performance in LuaJIT, local consts are fine,
--- but let's align with the bindings.
 local C = ffi.C
 
 local RegKey = {}
@@ -27,25 +23,19 @@ function RegKey:read(value_name, options)
 
     local t = type_ptr[0]
 
-    -- [CHANGED] Use Constants from minwindef (ffi.C)
     if t == C.REG_SZ or t == C.REG_EXPAND_SZ then
-        -- [FIX] Use explicit length to safety read buffer
-        -- size_ptr is bytes, wchar_t is 2 bytes
         local char_count = size_ptr[0] / 2
         local val = util.from_wide(ffi.cast("wchar_t*", buf), char_count)
 
-        -- Remove trailing nulls which are typically included in REG_SZ
         if val then val = val:gsub("%z+$", "") end
 
         if t == C.REG_EXPAND_SZ and (not options or options.expand ~= false) then
-            -- For expand, we need to convert back to wide, expand, and back to multi
-            -- This is slightly inefficient but safe.
             local wstr = util.to_wide(val)
             local needed = kernel32.ExpandEnvironmentStringsW(wstr, nil, 0)
             if needed > 0 then
                 local exbuf = ffi.new("wchar_t[?]", needed)
                 kernel32.ExpandEnvironmentStringsW(wstr, exbuf, needed)
-                val = util.from_wide(exbuf) -- implicit -1 is fine here as API guarantees null term
+                val = util.from_wide(exbuf) 
                 if val then val = val:gsub("%z+$", "") end
             end
         end
@@ -66,7 +56,6 @@ function RegKey:read(value_name, options)
         local offset = 0
         local max_bytes = size_ptr[0]
         while offset * 2 < max_bytes do
-            -- [FIX] from_wide default behavior (-1) reads until null, which is correct for MULTI_SZ parts
             local str = util.from_wide(wptr + offset)
             if str == "" then break end
             table.insert(res_tab, str)
@@ -81,6 +70,8 @@ function RegKey:read(value_name, options)
 end
 
 -- Dispatch table for write operations
+-- [FIX] Handlers now return the 'anchor' object (4th return value)
+-- to ensure the cdata stays alive in the calling scope.
 local write_handlers = {}
 
 write_handlers["string"] = function(v)
@@ -88,23 +79,25 @@ write_handlers["string"] = function(v)
     local wlen = 0
     while wval[wlen] ~= 0 do wlen = wlen + 1 end
     wlen = wlen + 1
-    return ffi.cast("const uint8_t*", wval), wlen * 2, C.REG_SZ
+    -- Return: pointer, size, type, ANCHOR
+    return ffi.cast("const uint8_t*", wval), wlen * 2, C.REG_SZ, wval
 end
 write_handlers["REG_SZ"] = write_handlers["string"]
 
 write_handlers["dword"] = function(v)
     local tmp = ffi.new("DWORD[1]", v)
-    return ffi.cast("const uint8_t*", tmp), 4, C.REG_DWORD
+    return ffi.cast("const uint8_t*", tmp), 4, C.REG_DWORD, tmp
 end
 write_handlers["REG_DWORD"] = write_handlers["dword"]
 
 write_handlers["qword"] = function(v)
     local tmp = ffi.new("uint64_t[1]", v)
-    return ffi.cast("const uint8_t*", tmp), 8, C.REG_QWORD
+    return ffi.cast("const uint8_t*", tmp), 8, C.REG_QWORD, tmp
 end
 
 write_handlers["binary"] = function(v)
-    return ffi.cast("const uint8_t*", v), #v, C.REG_BINARY
+    -- Lua strings are safe to cast if held in 'v'
+    return ffi.cast("const uint8_t*", v), #v, C.REG_BINARY, v
 end
 
 write_handlers["multi_sz"] = function(v)
@@ -121,7 +114,7 @@ write_handlers["multi_sz"] = function(v)
 
     table.insert(blob, "\0\0")
     local raw_data = table.concat(blob)
-    return ffi.cast("const uint8_t*", raw_data), #raw_data, C.REG_MULTI_SZ
+    return ffi.cast("const uint8_t*", raw_data), #raw_data, C.REG_MULTI_SZ, raw_data
 end
 write_handlers["REG_MULTI_SZ"] = write_handlers["multi_sz"]
 
@@ -141,11 +134,14 @@ function RegKey:write(value_name, value, type_str)
     local handler = write_handlers[type_str]
     if not handler then return nil, "Unsupported type for write" end
 
-    local data, size, dwType = handler(value)
+    -- [FIX] Capture the anchor variable to prevent GC
+    local data, size, dwType, anchor = handler(value)
 
     if advapi32.RegSetValueExW(self.hkey, lpValue, 0, dwType, data, size) ~= 0 then
         return false, "RegSetValueExW failed"
     end
+    
+    -- anchor stays alive until here
     return true
 end
 

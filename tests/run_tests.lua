@@ -5,8 +5,8 @@ io.stdout:setvbuf('no')
 
 -- List of spec modules to run
 local specs = {
-    "win-utils.tests.core_spec", -- [ACTIVATED] Now checking FS, Registry, Disk, etc.
-    "win-utils.tests.proc_spec",
+    "win-utils.tests.core_spec",
+    "win-utils.tests.process_spec", -- [CHANGED] Renamed from proc_spec
 }
 
 print("=== Running Win-Utils Test Suite ===")

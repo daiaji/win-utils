@@ -7,56 +7,50 @@ local M = {}
 local CP_UTF8 = 65001
 
 -- [OPTIMIZATION] Scratch Buffer for temporary wide string conversions
--- 用于避免在短字符串转换（如路径处理、API调用）时频繁分配小块内存
+-- Used to avoid frequent small allocations for path conversions/API calls
 local MAX_PATH_W = 32768
 local scratch_buf = ffi.new("wchar_t[?]", MAX_PATH_W)
--- 注意：LuaJIT 是单线程的（Per-VM），只要不跨协程交错使用或持久化引用，
--- 在单次 FFI 调用中使用 scratch buffer 是安全的。
+-- Note: LuaJIT is single-threaded (Per-VM), so using a static scratch buffer
+-- for immediate FFI calls is safe as long as not interleaved across coroutines holding state.
 
---- 将 Lua 字符串 (UTF-8) 转换为 Windows 宽字符 (UTF-16)
--- @param str string: Lua 字符串
--- @param use_scratch boolean: 是否使用内部缓存区（仅当结果不需要持久保存时设为 true）
--- @return cdata: wchar_t* 指针
+--- Convert Lua string (UTF-8) to Windows Wide String (UTF-16)
+-- @param str string: Lua string
+-- @param use_scratch boolean: Use internal scratch buffer (result must not be persisted)
+-- @return cdata: wchar_t* pointer
 function M.to_wide(str, use_scratch)
     if not str then return nil end
     local len = #str
 
-    -- [OPTIMIZATION] 尝试使用 Scratch Buffer
-    if use_scratch and len < (MAX_PATH_W / 4) then -- 保守估计，UTF8->UTF16 膨胀率极低
+    -- [OPTIMIZATION] Try using Scratch Buffer
+    if use_scratch and len < (MAX_PATH_W / 4) then 
         local req_size = kernel32.MultiByteToWideChar(CP_UTF8, 0, str, len, scratch_buf, MAX_PATH_W)
         if req_size > 0 then
             scratch_buf[req_size] = 0 -- Ensure Null Terminate
             return scratch_buf
         end
-        -- Fallback if conversion fails or truncated (unlikely given check)
     end
 
-    -- 获取缓冲区所需大小（字符数）。
-    -- 注意：不传 -1，而是传 len，这样 Windows 不会在结果中自动计算并包含结尾的 NULL。
-    -- 我们稍后通过 ffi.new 的自动归零特性来保证结尾的安全性。
+    -- Get required buffer size (in characters)
     local req_size = kernel32.MultiByteToWideChar(CP_UTF8, 0, str, len, nil, 0)
     if req_size == 0 then return nil end
 
-    -- 分配内存：req_size + 1。
-    -- ffi.new 返回的内存会自动归零 (Zero-initialized)。
-    -- 这保证了即使原字符串没有 NULL 结尾，结果也是安全的宽字符串。
+    -- Allocate memory: req_size + 1. ffi.new zero-initializes.
     local buf = ffi.new("wchar_t[?]", req_size + 1)
 
     kernel32.MultiByteToWideChar(CP_UTF8, 0, str, len, buf, req_size)
     return buf
 end
 
---- 将 Windows 宽字符 (UTF-16) 转换为 Lua 字符串 (UTF-8)
--- @param wstr cdata: wchar_t* 指针
--- @param wlen number|nil: 宽字符长度（不包含 NULL）。如果为 nil 或 -1，则自动扫描 NULL 结尾。
--- @return string: Lua 字符串
+--- Convert Windows Wide String (UTF-16) to Lua String (UTF-8)
+-- @param wstr cdata: wchar_t* pointer
+-- @param wlen number|nil: Length (excl. null). If nil/-1, auto-scan null.
+-- @return string: Lua string
 function M.from_wide(wstr, wlen)
     if wstr == nil then return nil end
     if ffi.cast("void*", wstr) == nil then return nil end
 
     local cch = wlen or -1
 
-    -- 获取缓冲区所需字节数，传入 -1 让 API 自动扫描宽字符的结尾
     local len = kernel32.WideCharToMultiByte(CP_UTF8, 0, wstr, cch, nil, 0, nil, nil)
     if len <= 0 then return nil end
 
@@ -64,19 +58,17 @@ function M.from_wide(wstr, wlen)
     kernel32.WideCharToMultiByte(CP_UTF8, 0, wstr, cch, buf, len, nil, nil)
 
     if cch == -1 then
-        -- len 包含结尾的 NULL 字节，ffi.string(ptr, size) 不需要包含该字节
+        -- len includes null terminator, ffi.string does not need it
         return ffi.string(buf, len - 1)
     else
-        -- 显式长度时，返回全部转换后的字节（可能包含 NULL，取决于源数据）
         return ffi.string(buf, len)
     end
 end
 
---- 格式化 Windows 系统错误代码为可读字符串
--- 关键修复：使用 ffi.gc 替代手动 LocalFree，防止 Heap Corruption
--- @param err_code number|nil: 错误代码，如果为 nil 则调用 GetLastError()
--- @return string: 错误描述
--- @return number: 错误代码
+--- Format Windows System Error Code
+-- @param err_code number|nil: Error code, defaults to GetLastError()
+-- @return string: Error description
+-- @return number: Error code
 function M.format_error(err_code)
     local code = err_code or kernel32.GetLastError()
     if code == 0 then return "Success", 0 end
@@ -90,22 +82,39 @@ function M.format_error(err_code)
     local msg = "Unknown Error (" .. tostring(code) .. ")"
     if len > 0 and buf_ptr[0] ~= nil then
         local ptr = buf_ptr[0]
-
-        -- [CRITICAL FIX]
-        -- Windows 分配了内存 (LocalAlloc)，我们必须释放它。
-        -- 以前手动调用 kernel32.LocalFree(ptr) 可能会因为 LuaJIT 的时序问题导致双重释放或访问违规。
-        -- 使用 ffi.gc 绑定 LocalFree 是最安全的做法。
+        -- [CRITICAL] Use ffi.gc to bind LocalFree to prevent heap corruption
         local safe_ptr = ffi.gc(ptr, kernel32.LocalFree)
-
         msg = M.from_wide(safe_ptr)
-
-        -- 去除 Windows 错误消息末尾常见的换行符 (CRLF)
         msg = msg:gsub("[\r\n]+$", "")
-
-        -- safe_ptr 离开作用域后，LuaJIT 会在合适的时候调用 LocalFree
     end
 
     return msg, code
+end
+
+--- Parse a standard GUID string "{XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX}" into a GUID cdata
+-- @param str string: GUID string
+-- @return cdata: GUID struct (ffi.new("GUID"))
+function M.guid_from_str(str)
+    local guid = ffi.new("GUID")
+    if not str then return guid end
+    
+    local d1, d2, d3, d4, d5, d6, d7, d8, d9, d10, d11 = 
+        str:match("{?(%x%x%x%x%x%x%x%x)-(%x%x%x%x)-(%x%x%x%x)-(%x%x)(%x%x)-(%x%x)(%x%x)(%x%x)(%x%x)(%x%x)(%x%x)}?")
+        
+    if d1 then
+        guid.Data1 = tonumber(d1, 16)
+        guid.Data2 = tonumber(d2, 16)
+        guid.Data3 = tonumber(d3, 16)
+        guid.Data4[0] = tonumber(d4, 16)
+        guid.Data4[1] = tonumber(d5, 16)
+        guid.Data4[2] = tonumber(d6, 16)
+        guid.Data4[3] = tonumber(d7, 16)
+        guid.Data4[4] = tonumber(d8, 16)
+        guid.Data4[5] = tonumber(d9, 16)
+        guid.Data4[6] = tonumber(d10, 16)
+        guid.Data4[7] = tonumber(d11, 16)
+    end
+    return guid
 end
 
 return M

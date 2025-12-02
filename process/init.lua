@@ -8,7 +8,7 @@ if ffi.os ~= "Windows" then
     return {
         _VERSION = "3.5.4",
         _OS_SUPPORT = false,
-        error = "win-utils.proc only supports Windows"
+        error = "win-utils.process only supports Windows"
     }
 end
 
@@ -49,7 +49,6 @@ local enable_debug_privilege
 local _terminateProcessGracefully
 
 -- [OPTIMIZATION] Pre-compile struct type for repeated use
--- LuaJIT Docs: "if you want to create many objects of one kind ... get its ctype with ffi.typeof()"
 local PROCESSENTRY32W_T    = ffi.typeof("PROCESSENTRY32W")
 
 local function create_snapshot()
@@ -70,7 +69,6 @@ findProcess = function(name_or_pid)
     local h_snap = create_snapshot()
     if not h_snap then return 0 end
 
-    -- [OPTIMIZATION] Use the pre-compiled ctype constructor
     local pe = PROCESSENTRY32W_T()
     pe.dwSize = ffi.sizeof(pe)
 
@@ -84,7 +82,6 @@ findProcess = function(name_or_pid)
                     break
                 end
             elseif target_w then
-                -- [CHANGED] Use kernel32.lstrcmpiW (now defined in bindings)
                 if kernel32.lstrcmpiW(pe.szExeFile, target_w) == 0 then
                     found_pid = pe.th32ProcessID
                     break
@@ -244,7 +241,6 @@ terminateProcessTree = function(pid)
     local children = {}
     local h_snap = create_snapshot()
     if h_snap then
-        -- [OPTIMIZATION] Use pre-compiled ctype
         local pe = PROCESSENTRY32W_T()
         pe.dwSize = ffi.sizeof(pe)
         if kernel32.Process32FirstW(h_snap, pe) ~= 0 then
@@ -282,12 +278,10 @@ _findAllProcesses = function(process_name, out_pids, pids_array_size)
     if not h_snap then return -1 end
 
     local found_count, stored_count = 0, 0
-    -- [OPTIMIZATION] Use pre-compiled ctype
     local pe = PROCESSENTRY32W_T()
     pe.dwSize = ffi.sizeof(pe)
     if kernel32.Process32FirstW(h_snap, pe) ~= 0 then
         repeat
-            -- [CHANGED] Use kernel32.lstrcmpiW
             if kernel32.lstrcmpiW(pe.szExeFile, target_w) == 0 then
                 if out_pids and stored_count < pids_array_size then
                     out_pids[stored_count] = pe.th32ProcessID
@@ -304,10 +298,18 @@ end
 _createProcess = function(command, working_dir, show_mode, desktop_name)
     local si = ffi.new("STARTUPINFOW"); si.cb = ffi.sizeof(si)
     si.dwFlags, si.wShowWindow = C.STARTF_USESHOWWINDOW, show_mode or M.constants.SW_SHOW
-    if desktop_name and desktop_name ~= "" then si.lpDesktop = util.to_wide(desktop_name) end
+    
+    -- [FIX] GC Anchoring: Keep reference to desktop_name wide string
+    local desktop_w = nil
+    if desktop_name and desktop_name ~= "" then 
+        desktop_w = util.to_wide(desktop_name)
+        si.lpDesktop = desktop_w 
+    end
+    
     local pi = ffi.new("PROCESS_INFORMATION")
     local cmd_buffer_w = util.to_wide(command)
     local wd_wstr = util.to_wide(working_dir)
+    
     if kernel32.CreateProcessW(nil, cmd_buffer_w, nil, nil, false, 0, nil, wd_wstr, si, pi) == 0 then
         return nil, nil, kernel32.GetLastError()
     end
@@ -350,7 +352,11 @@ _createProcessAsSystem = function(command, working_dir, show_mode)
 
         local si = ffi.new("STARTUPINFOW"); si.cb = ffi.sizeof(si)
         si.dwFlags, si.wShowWindow = C.STARTF_USESHOWWINDOW, show_mode or M.constants.SW_SHOW
-        si.lpDesktop = util.to_wide("winsta0\\default")
+        
+        -- [FIX] GC Anchoring: default desktop string
+        local desktop_w = util.to_wide("winsta0\\default")
+        si.lpDesktop = desktop_w
+        
         local pi = ffi.new("PROCESS_INFORMATION")
         local cmd_buffer_w = util.to_wide(command)
         local wd_wstr = util.to_wide(working_dir)
@@ -382,7 +388,6 @@ _getProcessInfo = function(pid)
     local found = false
     local h_snap = create_snapshot()
     if h_snap then
-        -- [OPTIMIZATION] Use pre-compiled ctype
         local pe = PROCESSENTRY32W_T()
         pe.dwSize = ffi.sizeof(pe)
         if kernel32.Process32FirstW(h_snap, pe) ~= 0 then
@@ -465,7 +470,6 @@ _wait = function(process_name, timeout_ms)
     if not process_name or process_name == "" then
         kernel32.SetLastError(C.ERROR_INVALID_PARAMETER); return 0
     end
-    local target_w = util.to_wide(process_name, true)
     local start = ffi.C.GetTickCount64()
     timeout_ms = timeout_ms or -1
     while true do

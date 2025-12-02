@@ -12,17 +12,24 @@ local function sh_op(func, src, dest, flags)
     local sh = ffi.new("SHFILEOPSTRUCTW")
     sh.wFunc = func
 
-    -- [NOTE] SHFileOperation requires the path string to be Double-Null Terminated.
-    -- `util.to_wide(src .. "\0")` creates a wide string of `src` + `\0` + (implicit ffi.new `\0`)
-    -- Resulting in the required `path \0 \0` format safely.
-    sh.pFrom = util.to_wide(src .. "\0")
+    -- [FIX] GC Anchoring: Keep reference to the cdata arrays alive.
+    -- util.to_wide returns a cdata array. Assigning it to a struct field (pointer)
+    -- only copies the address. We must keep the Lua variable alive during the C call.
+    local src_w = util.to_wide(src .. "\0")
+    sh.pFrom = src_w
 
-    if dest then sh.pTo = util.to_wide(dest .. "\0") end
+    local dest_w = nil
+    if dest then 
+        dest_w = util.to_wide(dest .. "\0") 
+        sh.pTo = dest_w
+    end
 
     -- Default Flags: No Confirm, No UI, Silent
     local default_flags = bit.bor(C.FOF_NOCONFIRMATION, C.FOF_NOERRORUI, C.FOF_SILENT)
     sh.fFlags = flags or default_flags
 
+    -- The cdata objects (src_w, dest_w) are anchored by the local variables
+    -- until this function returns.
     return shell32.SHFileOperationW(sh) == 0
 end
 
@@ -49,8 +56,12 @@ function M.get_version(path)
 
     local verInfo = ffi.new("VS_FIXEDFILEINFO*[1]")
     local verLen = ffi.new("UINT[1]")
+    
+    -- [FIX] Anchor the query string
+    local root_block = util.to_wide("\\")
+    
     -- Query root block for fixed info
-    if version.VerQueryValueW(buf, util.to_wide("\\"), ffi.cast("void**", verInfo), verLen) == 0 then return nil end
+    if version.VerQueryValueW(buf, root_block, ffi.cast("void**", verInfo), verLen) == 0 then return nil end
 
     local vi = verInfo[0]
     return string.format("%d.%d.%d.%d",

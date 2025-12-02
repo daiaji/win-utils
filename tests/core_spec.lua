@@ -199,7 +199,6 @@ function TestWinUtilsCore:test_net_download_fail()
     lu.assertNotIsNil(err)
 end
 
--- [MODIFIED] Use a local Python HTTP server instead of file:// to bypass OS restrictions
 function TestWinUtilsCore:test_net_download_local()
     local src_content = "Network Simulation Test Content"
     local src_file = self.test_dir .. "\\net_src.txt"
@@ -211,13 +210,12 @@ function TestWinUtilsCore:test_net_download_local()
     f:close()
 
     -- 2. Start Python HTTP Server
-    -- We use win.proc to launch it. Port 54321.
-    -- python -m http.server 54321 --bind 127.0.0.1 --directory "test_sandbox"
+    -- [CHANGED] Use win.process.exec instead of win.proc.exec
     local port = 54321
     local cmd = string.format('python -m http.server %d --bind 127.0.0.1 --directory "%s"', port, self.test_dir)
 
     -- SW_HIDE = 0
-    self.server_p = win.proc.exec(cmd, nil, 0)
+    self.server_p = win.process.exec(cmd, nil, 0)
 
     if not self.server_p then
         print("Skipping net test (Python not found or failed to start)")

@@ -1,30 +1,29 @@
--- tests/proc_utils_spec.lua
--- Unit tests for proc_utils_ffi.lua using luaunit.
--- [REFACTOR] Tests updated for the pure OOP API with full feature coverage.
+-- tests/process_spec.lua (renamed from proc_spec.lua)
+-- Unit tests for win-utils.process (formerly proc_utils_ffi.lua)
+-- [REFACTOR] Tests updated for the new module structure and require paths
 
--- 1. Configure path to find 'proc_utils_ffi.lua' and 'luaunit.lua'
+-- 1. Configure path
 package.path = package.path .. ';./?.lua;./vendor/luaunit/?.lua;../?.lua;../vendor/luaunit/?.lua'
 
 local status, lu = pcall(require, 'luaunit')
 if not status then
     print("[ERROR] Could not find 'luaunit'.")
-    print("  Current package.path: " .. package.path)
-    print("  Ensure you have run: git submodule update --init --recursive")
     os.exit(1)
 end
 
 local ffi = require("ffi")
 
 -- 2. Load the library under test
-local proc_status, proc = pcall(require, 'win-utils.proc')
+-- [CHANGED] Updated require path
+local proc_status, proc = pcall(require, 'win-utils.process')
 if not proc_status then
-    print("[ERROR] Could not find 'win-utils.proc'.")
+    print("[ERROR] Could not find 'win-utils.process'.")
     print("  Error: " .. tostring(proc))
     os.exit(1)
 end
 
 if not proc._OS_SUPPORT then
-    print("Skipping tests: proc_utils-ffi only supports Windows.")
+    print("Skipping tests: win-utils.process only supports Windows.")
     os.exit(0)
 end
 
@@ -34,7 +33,8 @@ local function table_isempty(t)
 end
 
 -- 4. Test Suite Definition
-TestProcUtils = {}
+-- [CHANGED] Updated test suite name
+TestProcessUtils = {}
 
 -- [MODIFIED] Use cmd.exe to wrap ping and redirect stdout to NUL to suppress CI logs
 local TEST_PROC_NAME = "cmd.exe"
@@ -44,13 +44,13 @@ local TEST_COMMAND_WITH_ARGS = 'cmd.exe /c "ping -n 4 127.0.0.1 > NUL"'
 local CMD_PING_COMMAND = 'cmd.exe /c "ping -n 10 127.0.0.1 > NUL"'
 local UNICODE_FILENAME = "测试文件.txt"
 
-function TestProcUtils:setUp()
+function TestProcessUtils:setUp()
     print("\n[SETUP] Cleaning up environment before test...")
     self:tearDown()
     print("[SETUP] Cleanup complete.")
 end
 
-function TestProcUtils:tearDown()
+function TestProcessUtils:tearDown()
     local function kill_all_by_name(name)
         local pids = proc.find_all(name)
         if pids and not table_isempty(pids) then
@@ -62,6 +62,7 @@ function TestProcUtils:tearDown()
     end
 
     -- [MODIFIED] Cleanup matching the new TEST_PROC_NAME
+    -- Note: Be cautious in CI environments not to kill the runner's cmd.exe
     kill_all_by_name(TEST_PROC_NAME)
     kill_all_by_name("ping.exe")
     kill_all_by_name("whoami.exe")
@@ -74,7 +75,7 @@ end
 -- 1. OOP Wrapper & Static Function Tests
 -------------------------------------------------------------------------------
 
-function TestProcUtils:test_exec_and_exists()
+function TestProcessUtils:test_exec_and_exists()
     print("[RUNNING] test_exec_and_exists")
     local p = proc.exec(TEST_COMMAND, nil, proc.constants.SW_HIDE)
     lu.assertNotIsNil(p, "proc.exec should return a process object")
@@ -95,7 +96,7 @@ function TestProcUtils:test_exec_and_exists()
     print("[SUCCESS] test_exec_and_exists")
 end
 
-function TestProcUtils:test_open_and_wait()
+function TestProcessUtils:test_open_and_wait()
     print("[RUNNING] test_open_and_wait")
     local p_created = proc.exec(TEST_COMMAND, nil, proc.constants.SW_HIDE)
     lu.assertNotIsNil(p_created, "CreateProcess failed")
@@ -118,7 +119,7 @@ function TestProcUtils:test_open_and_wait()
     print("[SUCCESS] test_open_and_wait")
 end
 
-function TestProcUtils:test_terminate_and_wait_close()
+function TestProcessUtils:test_terminate_and_wait_close()
     print("[RUNNING] test_terminate_and_wait_close")
     local p = proc.exec(TEST_COMMAND, nil, proc.constants.SW_HIDE)
     lu.assertNotIsNil(p)
@@ -132,7 +133,7 @@ function TestProcUtils:test_terminate_and_wait_close()
     print("[SUCCESS] test_terminate_and_wait_close")
 end
 
-function TestProcUtils:test_wait_for_process_timeout_and_success()
+function TestProcessUtils:test_wait_for_process_timeout_and_success()
     print("[RUNNING] test_wait_for_process_timeout_and_success")
     -- 1. Test Timeout
     local start = ffi.C.GetTickCount64()
@@ -153,7 +154,7 @@ function TestProcUtils:test_wait_for_process_timeout_and_success()
     print("[SUCCESS] test_wait_for_process_timeout_and_success")
 end
 
-function TestProcUtils:test_get_path_and_command_line()
+function TestProcessUtils:test_get_path_and_command_line()
     print("[RUNNING] test_get_path_and_command_line")
     local p = proc.exec(TEST_COMMAND_WITH_ARGS, nil, proc.constants.SW_HIDE)
     lu.assertNotIsNil(p)
@@ -173,7 +174,7 @@ function TestProcUtils:test_get_path_and_command_line()
     print("[SUCCESS] test_get_path_and_command_line")
 end
 
-function TestProcUtils:test_set_priority()
+function TestProcessUtils:test_set_priority()
     print("[RUNNING] test_set_priority")
     local p = proc.exec(TEST_COMMAND, nil, proc.constants.SW_HIDE)
     lu.assertNotIsNil(p)
@@ -192,7 +193,7 @@ function TestProcUtils:test_set_priority()
     print("[SUCCESS] test_set_priority")
 end
 
-function TestProcUtils:test_get_parent_and_terminate_tree()
+function TestProcessUtils:test_get_parent_and_terminate_tree()
     print("[RUNNING] test_get_parent_and_terminate_tree")
     local parent_p = proc.exec(CMD_PING_COMMAND, nil, proc.constants.SW_HIDE)
     lu.assertNotIsNil(parent_p, "Parent process launch failed")
@@ -217,7 +218,7 @@ function TestProcUtils:test_get_parent_and_terminate_tree()
     print("[SUCCESS] test_get_parent_and_terminate_tree")
 end
 
-function TestProcUtils:test_find_all_processes()
+function TestProcessUtils:test_find_all_processes()
     print("[RUNNING] test_find_all_processes")
     local p1 = proc.exec(TEST_COMMAND, nil, proc.constants.SW_HIDE)
     local p2 = proc.exec(TEST_COMMAND, nil, proc.constants.SW_HIDE)
@@ -240,7 +241,7 @@ function TestProcUtils:test_find_all_processes()
     print("[SUCCESS] test_find_all_processes")
 end
 
-function TestProcUtils:test_get_full_process_info()
+function TestProcessUtils:test_get_full_process_info()
     print("[RUNNING] test_get_full_process_info")
     local p = proc.exec(TEST_COMMAND_WITH_ARGS, nil, proc.constants.SW_HIDE)
     lu.assertNotIsNil(p)
@@ -262,7 +263,7 @@ function TestProcUtils:test_get_full_process_info()
     print("[SUCCESS] test_get_full_process_info")
 end
 
-function TestProcUtils:test_create_as_system()
+function TestProcessUtils:test_create_as_system()
     print("[RUNNING] test_create_as_system")
     local p, err_code, err_msg = proc.exec_as_system("whoami.exe", nil, proc.constants.SW_HIDE)
 
@@ -281,7 +282,7 @@ function TestProcUtils:test_create_as_system()
     print("[SUCCESS] test_create_as_system")
 end
 
-function TestProcUtils:test_oop_unicode_support()
+function TestProcessUtils:test_oop_unicode_support()
     print("[RUNNING] test_oop_unicode_support")
     local unicode_arg = "arg_" .. UNICODE_FILENAME
     -- This command already redirects to NUL

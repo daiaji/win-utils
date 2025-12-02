@@ -10,7 +10,13 @@ function M.browse_folder(prompt)
     local bi = ffi.new("BROWSEINFOW")
     -- BIF_RETURNONLYFSDIRS (1) | BIF_NEWDIALOGSTYLE (0x40)
     bi.ulFlags = bit.bor(0x0001, 0x0040)
-    if prompt then bi.lpszTitle = util.to_wide(prompt) end
+    
+    -- [FIX] GC Anchoring: Keep prompt_w alive while the dialog is open
+    local prompt_w = nil
+    if prompt then 
+        prompt_w = util.to_wide(prompt)
+        bi.lpszTitle = prompt_w
+    end
 
     local pidl = shell32.SHBrowseForFolderW(bi)
     local result = nil
@@ -23,6 +29,7 @@ function M.browse_folder(prompt)
         shell32.CoTaskMemFree(pidl)
     end
 
+    -- prompt_w stays alive until here
     return result
 end
 
