@@ -4,11 +4,8 @@ local luaunit = require('luaunit')
 io.stdout:setvbuf('no')
 io.stderr:setvbuf('no')
 
--- [CHANGED] Simplified test runner:
--- 1. Relies on LUA_PATH being set correctly (via CI or dev environment)
--- 2. Uses 'require' instead of 'dofile' + path math
--- 3. Just lists modules to run
-
+-- List of spec modules to run
+-- Since we added stage/tests/?.lua to LUA_PATH, simple require works
 local specs = {
     "core_spec",
     "process_spec",

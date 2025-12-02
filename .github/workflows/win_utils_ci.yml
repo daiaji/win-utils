@@ -90,8 +90,7 @@ jobs:
               exit 1
           }
           
-          # B. lua-ffi-bindings (Fixed Copy Logic)
-          # We need stage/lua/ffi/req.lua
+          # B. lua-ffi-bindings
           if (Test-Path "vendor/lua-ffi-bindings/ffi") {
              # Copy the 'ffi' folder itself into stage/lua, creating stage/lua/ffi
              Copy-Item "vendor/lua-ffi-bindings/ffi" "$lua" -Recurse
@@ -103,14 +102,17 @@ jobs:
              Write-Warning "vendor/lua-ffi-bindings not found or structure unknown."
           }
           
-          # C. lua-ext
+          # C. lua-ext (Fixed Layout Logic)
+          # lua-ext repo is flat. We need to create 'ext' dir and put files in there, 
+          # then move 'ext.lua' out to root of $lua.
           if (Test-Path "vendor/lua-ext") {
-             # Need stage/lua/ext.lua and stage/lua/ext/
-             if (Test-Path "vendor/lua-ext/ext.lua") {
-                 Copy-Item "vendor/lua-ext/ext.lua" "$lua"
-             }
-             if (Test-Path "vendor/lua-ext/ext") {
-                 Copy-Item "vendor/lua-ext/ext" "$lua" -Recurse
+             $extDest = New-Item -ItemType Directory -Path "$lua/ext" -Force
+             # Copy everything to ext/ folder first
+             Copy-Item "vendor/lua-ext/*.lua" $extDest -Force
+             
+             # Move ext.lua up to stage/lua/ext.lua (so require 'ext' works)
+             if (Test-Path "$extDest/ext.lua") {
+                 Move-Item "$extDest/ext.lua" "$lua/" -Force
              }
           }
 
@@ -126,8 +128,7 @@ jobs:
       - name: Run Tests
         shell: pwsh
         env:
-          # [CHANGED] Added 'stage/tests/?.lua' to LUA_PATH to allow requiring spec files by name
-          # Also ensured stage/lua matches standard package structure
+          # Add stage/tests to path for specs, stage/lua for libs
           LUA_PATH: ${{ env.TEST_STAGE }}\tests\?.lua;${{ env.TEST_STAGE }}\lua\?.lua;${{ env.TEST_STAGE }}\lua\?\init.lua;;
         run: |
           Write-Host "Running tests in staged environment (PowerShell)..."
