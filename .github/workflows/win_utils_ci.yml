@@ -56,6 +56,9 @@ jobs:
       - name: Assemble Test Environment
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+          
+          # Create Directory Structure
           $stage = New-Item -ItemType Directory -Path "stage" -Force
           $bin   = New-Item -ItemType Directory -Path "stage/bin"
           $lua   = New-Item -ItemType Directory -Path "stage/lua"
@@ -71,17 +74,13 @@ jobs:
           
           if (Test-Path "win-utils\init.lua") {
               Write-Host "Detected subdirectory structure."
-              # Copy library code
               Copy-Item "win-utils\*" $pkgDest -Recurse -Exclude "tests"
-              
-              # Copy tests to stage/tests (flat)
               if (Test-Path "win-utils\tests") {
                   Copy-Item "win-utils\tests\*" $tests -Recurse
               }
           } elseif (Test-Path "init.lua") {
               Write-Host "Detected root directory structure."
               Get-ChildItem -Path . -Exclude ".git", ".github", "stage", ".luajit", "vendor", "test_sandbox", "tests" | Copy-Item -Destination $pkgDest -Recurse
-              
               if (Test-Path "tests") {
                   Copy-Item "tests\*" $tests -Recurse
               }
@@ -92,7 +91,7 @@ jobs:
           
           # B. lua-ffi-bindings
           if (Test-Path "vendor/lua-ffi-bindings/ffi") {
-             # Copy the 'ffi' folder itself into stage/lua, creating stage/lua/ffi
+             # Copy folder 'ffi' to stage/lua, resulting in stage/lua/ffi
              Copy-Item "vendor/lua-ffi-bindings/ffi" "$lua" -Recurse
           } elseif (Test-Path "vendor/lua-ffi-bindings/req.lua") {
              # Fallback: Flat repo structure
@@ -102,17 +101,18 @@ jobs:
              Write-Warning "vendor/lua-ffi-bindings not found or structure unknown."
           }
           
-          # C. lua-ext (Fixed Layout Logic)
-          # lua-ext repo is flat. We need to create 'ext' dir and put files in there, 
-          # then move 'ext.lua' out to root of $lua.
+          # C. lua-ext
+          # Correctly layout lua-ext: ext.lua at root, others in ext/
           if (Test-Path "vendor/lua-ext") {
-             $extDest = New-Item -ItemType Directory -Path "$lua/ext" -Force
-             # Copy everything to ext/ folder first
-             Copy-Item "vendor/lua-ext/*.lua" $extDest -Force
+             $extDir = New-Item -ItemType Directory -Path (Join-Path $lua.FullName "ext") -Force
              
-             # Move ext.lua up to stage/lua/ext.lua (so require 'ext' works)
-             if (Test-Path "$extDest/ext.lua") {
-                 Move-Item "$extDest/ext.lua" "$lua/" -Force
+             # Copy ALL files to stage/lua/ext/
+             Copy-Item "vendor/lua-ext/*.lua" -Destination $extDir.FullName -Force
+             
+             # Move stage/lua/ext/ext.lua -> stage/lua/ext.lua
+             $extLuaInside = Join-Path $extDir.FullName "ext.lua"
+             if (Test-Path $extLuaInside) {
+                 Move-Item -Path $extLuaInside -Destination $lua.FullName -Force
              }
           }
 
