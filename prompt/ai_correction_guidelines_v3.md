@@ -201,3 +201,37 @@ void HandlePtr(lua_State* L, int idx) {
         C.TryOpen(wpath)
     end
     ```
+
+---
+
+## **指令十：FFI 命名空间与类型依赖铁律 (Namespace & Dependency Laws)**
+
+**Context:** LuaJIT FFI 对命名空间和 C 声明顺序有严格要求，违背会导致 `nil` 错误或类型未定义崩溃。
+
+### **1. FFI 命名空间分离 (Separation of Concerns)**
+*   **机制:** `ffi.load` 返回的是 **库实例 (Library Instance)**，仅用于调用函数。`ffi.cdef` 定义的类型、枚举、常量全部挂载在全局 **`ffi.C`** 命名空间下。
+*   **❌ 错误:** `local lib = ffi.load("mylib"); local val = lib.MY_CONST` (库实例不包含 C 声明)。
+*   **✅ 正确:** `local lib = ffi.load("mylib"); local val = ffi.C.MY_CONST`。
+
+### **2. 声明顺序 (Top-Down Declaration)**
+*   **机制:** FFI 的 C 解析器是单遍的 (Single-pass)。
+*   **Rule:** 必须先定义被依赖的类型，再定义使用它的结构体。
+*   **❌ 错误:**
+    ```c
+    struct B { A member; }; // A 未定义，报错
+    typedef struct { int x; } A;
+    ```
+*   **✅ 正确:**
+    ```c
+    typedef struct { int x; } A;
+    struct B { A member; };
+    ```
+
+### **3. 禁止隐式类型 (No Implicit Types)**
+*   **机制:** FFI 环境是裸环境，没有标准库头文件。
+*   **Rule:** 不要假设 `SIZE_T`, `WCHAR`, `HMODULE` 等类型存在，除非显式 `typedef` 过。
+*   **Action:** 在 `cdef` 顶部显式定义所有非基础类型：
+    ```lua
+    typedef size_t SIZE_T;
+    typedef unsigned short WCHAR;
+    ```

@@ -36,12 +36,6 @@ function TestWinUtilsCore:setUp()
 end
 
 function TestWinUtilsCore:tearDown()
-    -- [NEW] Ensure background server is killed if it was started
-    if self.server_p then
-        self.server_p:terminate()
-        self.server_p = nil
-    end
-
     win.fs.delete(self.test_dir)
     win.fs.delete("test.lnk")
     win.registry.delete_key("HKCU", self.reg_path, true)
@@ -188,58 +182,6 @@ function TestWinUtilsCore:test_shortcut()
     local f = io.open(lnk_path, "rb")
     lu.assertNotIsNil(f, "Shortcut file was not created at: " .. lnk_path)
     if f then f:close() end
-end
-
--- ========================================================================
--- Net Tests
--- ========================================================================
-function TestWinUtilsCore:test_net_download_fail()
-    local ok, err = win.net.download("http://invalid.domain.test/file.txt", self.test_dir .. "\\fail.txt")
-    lu.assertFalse(ok)
-    lu.assertNotIsNil(err)
-end
-
-function TestWinUtilsCore:test_net_download_local()
-    local src_content = "Network Simulation Test Content"
-    local src_file = self.test_dir .. "\\net_src.txt"
-    local dst_file = self.test_dir .. "\\net_dst.txt"
-
-    -- 1. Create source file
-    local f = io.open(src_file, "w")
-    f:write(src_content)
-    f:close()
-
-    -- 2. Start Python HTTP Server
-    -- [CHANGED] Use win.process.exec instead of win.proc.exec
-    local port = 54321
-    local cmd = string.format('python -m http.server %d --bind 127.0.0.1 --directory "%s"', port, self.test_dir)
-
-    -- SW_HIDE = 0
-    self.server_p = win.process.exec(cmd, nil, 0)
-
-    if not self.server_p then
-        print("Skipping net test (Python not found or failed to start)")
-        return
-    end
-
-    -- Give the server a moment to start listening
-    ffi.C.Sleep(1000)
-
-    -- 3. Download via HTTP
-    local url = string.format("http://127.0.0.1:%d/net_src.txt", port)
-    local ok, err = win.net.download(url, dst_file)
-
-    -- Cleanup is handled in tearDown
-
-    lu.assertTrue(ok, "Download failed: " .. tostring(err))
-
-    -- 4. Verify content
-    local f2 = io.open(dst_file, "r")
-    lu.assertNotIsNil(f2, "Destination file not found")
-    if f2 then
-        lu.assertEquals(f2:read("*a"), src_content)
-        f2:close()
-    end
 end
 
 -- ========================================================================

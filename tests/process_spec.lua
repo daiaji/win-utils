@@ -263,25 +263,6 @@ function TestProcessUtils:test_get_full_process_info()
     print("[SUCCESS] test_get_full_process_info")
 end
 
-function TestProcessUtils:test_create_as_system()
-    print("[RUNNING] test_create_as_system")
-    local p, err_code, err_msg = proc.exec_as_system("whoami.exe", nil, proc.constants.SW_HIDE)
-
-    if p then
-        print("  [DEBUG] Admin Success. PID: " .. p.pid)
-        ffi.C.Sleep(500)
-        lu.assertEquals(proc.exists(p.pid), 0, "Process should have exited quickly")
-    else
-        print("  [DEBUG] Expected CI/User Fail. Error: " .. err_code .. " (" .. err_msg .. ")")
-        -- Known error codes for non-admin/no-session environments
-        local allowed = { [5] = true, [6] = true, [1314] = true, [1008] = true, [1157] = true }
-        if not allowed[err_code] then
-            lu.fail("Unexpected error code from exec_as_system: " .. err_code)
-        end
-    end
-    print("[SUCCESS] test_create_as_system")
-end
-
 function TestProcessUtils:test_oop_unicode_support()
     print("[RUNNING] test_oop_unicode_support")
     local unicode_arg = "arg_" .. UNICODE_FILENAME

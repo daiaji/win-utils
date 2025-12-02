@@ -2,6 +2,7 @@ local ffi = require("ffi")
 local bit = require("bit")
 local jit = require("jit")
 local util = require("win-utils.util")
+local native = require("win-utils.native")
 
 -- 0. OS Guard
 if ffi.os ~= "Windows" then
@@ -12,12 +13,10 @@ if ffi.os ~= "Windows" then
     }
 end
 
--- 1. Load Libraries via standard ffi.req
 local kernel32             = require 'ffi.req' 'Windows.sdk.kernel32'
 local psapi                = require 'ffi.req' 'Windows.sdk.psapi'
 local advapi32             = require 'ffi.req' 'Windows.sdk.advapi32'
-local wtsapi32             = require 'ffi.req' 'Windows.sdk.wtsapi32'
-local userenv              = require 'ffi.req' 'Windows.sdk.userenv'
+-- [REMOVED] wtsapi32, userenv (Useless in PE/SYSTEM environment)
 local ntdll                = require 'ffi.req' 'Windows.sdk.ntdll'
 local user32               = require 'ffi.req' 'Windows.sdk.user32'
 
@@ -29,7 +28,6 @@ local M                    = {
     _OS_SUPPORT = true,
 }
 
--- Public Constants
 M.constants                = {
     SW_HIDE                   = C.SW_HIDE,
     SW_SHOWNORMAL             = C.SW_SHOWNORMAL,
@@ -38,60 +36,86 @@ M.constants                = {
     PROCESS_TERMINATE         = C.PROCESS_TERMINATE,
     PROCESS_QUERY_INFORMATION = C.PROCESS_QUERY_INFORMATION,
     SYNCHRONIZE               = C.SYNCHRONIZE,
+    PROCESS_SUSPEND_RESUME    = 0x0800,
 }
 
--- Forward declarations
 local findProcess, getProcessPath, getProcessCommandLine, terminateProcessTree
-local _openProcessByPid, _terminateProcessByPid, _processExists, _findAllProcesses
-local _createProcess, _createProcessAsSystem, _getProcessInfo
+local _openProcessByPid, _terminateProcessByPid, _processExists
+local _createProcess, _getProcessInfo
 local _wait, _waitClose, _waitForExit, _setProcessPriority
 local enable_debug_privilege
 local _terminateProcessGracefully
 
--- [OPTIMIZATION] Pre-compile struct type for repeated use
-local PROCESSENTRY32W_T    = ffi.typeof("PROCESSENTRY32W")
+-- [REFACTOR] Enhanced list using Native API with Thread support
+function M.list()
+    -- SystemProcessInformation = 5
+    local buf, size = native.query_system_info(5)
+    if not buf then return {} end
 
-local function create_snapshot()
-    local h = kernel32.CreateToolhelp32Snapshot(C.TH32CS_SNAPPROCESS, 0)
-    if h == INVALID_HANDLE_VALUE then return nil end
-    return h
+    local processes = {}
+    local offset = 0
+    
+    while true do
+        local p_info = ffi.cast("SYSTEM_PROCESS_INFORMATION*", buf + offset)
+        
+        local pid = tonumber(ffi.cast("uintptr_t", p_info.UniqueProcessId))
+        local name = native.u_str(p_info.ImageName)
+        
+        if pid == 0 then name = "System Idle Process" end
+        if pid == 4 and name == "" then name = "System" end
+        
+        local thread_count = tonumber(p_info.NumberOfThreads)
+        local threads = {}
+        
+        local thread_ptr = p_info.Threads 
+        
+        for i = 0, thread_count - 1 do
+            local t = thread_ptr[i]
+            table.insert(threads, {
+                tid = tonumber(ffi.cast("uintptr_t", t.ClientId.UniqueThread)),
+                priority = tonumber(t.Priority),
+                state = tonumber(t.ThreadState),
+                wait_reason = tonumber(t.WaitReason),
+                context_switches = tonumber(t.ContextSwitches)
+            })
+        end
+
+        table.insert(processes, {
+            pid = pid,
+            name = name,
+            parent_pid = tonumber(ffi.cast("uintptr_t", p_info.InheritedFromUniqueProcessId)),
+            handle_count = tonumber(p_info.HandleCount),
+            thread_count = thread_count,
+            working_set = tonumber(p_info.VirtualMemoryCounters.WorkingSetSize),
+            private_bytes = tonumber(p_info.VirtualMemoryCounters.PagefileUsage),
+            read_transfer = tonumber(p_info.IoCounters.ReadTransferCount),
+            write_transfer = tonumber(p_info.IoCounters.WriteTransferCount),
+            threads = threads
+        })
+
+        if p_info.NextEntryOffset == 0 then break end
+        offset = offset + p_info.NextEntryOffset
+    end
+    
+    return processes
 end
 
 findProcess = function(name_or_pid)
     if not name_or_pid then return 0 end
     local target_pid = tonumber(name_or_pid)
-    local target_w = nil
-
-    if not target_pid then
-        target_w = util.to_wide(name_or_pid, true) -- Use scratch buffer
+    
+    local procs = M.list()
+    local target_lower = nil
+    if not target_pid then target_lower = name_or_pid:lower() end
+    
+    for _, p in ipairs(procs) do
+        if target_pid then
+            if p.pid == target_pid then return p.pid end
+        elseif target_lower then
+            if p.name:lower() == target_lower then return p.pid end
+        end
     end
-
-    local h_snap = create_snapshot()
-    if not h_snap then return 0 end
-
-    local pe = PROCESSENTRY32W_T()
-    pe.dwSize = ffi.sizeof(pe)
-
-    local found_pid = 0
-
-    if kernel32.Process32FirstW(h_snap, pe) ~= 0 then
-        repeat
-            if target_pid then
-                if pe.th32ProcessID == target_pid then
-                    found_pid = pe.th32ProcessID
-                    break
-                end
-            elseif target_w then
-                if kernel32.lstrcmpiW(pe.szExeFile, target_w) == 0 then
-                    found_pid = pe.th32ProcessID
-                    break
-                end
-            end
-        until kernel32.Process32NextW(h_snap, pe) == 0
-    end
-
-    kernel32.CloseHandle(h_snap)
-    return found_pid
+    return 0
 end
 
 getProcessPath = function(pid, buffer, buffer_size, process_handle)
@@ -136,15 +160,13 @@ getProcessCommandLine = function(pid, buffer, buffer_size)
 
     local peb = ffi.new("PEB")
     if kernel32.ReadProcessMemory(h_proc, pbi.PebBaseAddress, peb, ffi.sizeof(peb), nil) == 0 then
-        return
-            close_and_return(false)
+        return close_and_return(false)
     end
     if peb.ProcessParameters == nil then return close_and_return(false) end
 
     local params = ffi.new("RTL_USER_PROCESS_PARAMETERS")
     if kernel32.ReadProcessMemory(h_proc, peb.ProcessParameters, params, ffi.sizeof(params), nil) == 0 then
-        return
-            close_and_return(false)
+        return close_and_return(false)
     end
 
     if params.CommandLine.Length > 0 then
@@ -171,7 +193,6 @@ end
 
 _terminateProcessGracefully = function(pid, timeout_ms)
     timeout_ms = timeout_ms or 3000
-    -- [SAFETY] Manual JIT off for callback safety (per LuaJIT docs on callbacks)
     jit.off()
     local h_proc = kernel32.OpenProcess(bit.bor(C.SYNCHRONIZE, C.PROCESS_TERMINATE), false, pid)
     if not h_proc or h_proc == INVALID_HANDLE_VALUE then
@@ -188,11 +209,10 @@ _terminateProcessGracefully = function(pid, timeout_ms)
     end
 
     local cb = ffi.cast("WNDENUMPROC", enum_func)
-    -- [SAFETY] Anchor the callback
     local anchor = { cb }
     user32.EnumWindows(cb, 0)
     cb:free()
-    anchor = nil -- release anchor
+    anchor = nil
 
     local res = kernel32.WaitForSingleObject(h_proc, timeout_ms)
     local success = true
@@ -205,51 +225,22 @@ _terminateProcessGracefully = function(pid, timeout_ms)
 end
 
 enable_debug_privilege = function()
-    local hToken = ffi.new("HANDLE[1]")
-    local hProcess = ffi.cast("HANDLE", -1)
-
-    if advapi32.OpenProcessToken(hProcess, bit.bor(C.TOKEN_ADJUST_PRIVILEGES, C.TOKEN_QUERY), hToken) == 0 then
-        return false, kernel32.GetLastError()
-    end
-
-    local token_handle = hToken[0]
-    local luid = ffi.new("LUID")
-    local se_debug_name = util.to_wide("SeDebugPrivilege")
-
-    if advapi32.LookupPrivilegeValueW(nil, se_debug_name, luid) == 0 then
-        kernel32.CloseHandle(token_handle)
-        return false, kernel32.GetLastError()
-    end
-
-    local tp = ffi.new("TOKEN_PRIVILEGES")
-    tp.PrivilegeCount = 1
-    tp.Privileges[0].Luid = luid
-    tp.Privileges[0].Attributes = C.SE_PRIVILEGE_ENABLED
-
-    if advapi32.AdjustTokenPrivileges(token_handle, 0, tp, ffi.sizeof(tp), nil, nil) == 0 then
-        kernel32.CloseHandle(token_handle)
-        return false, kernel32.GetLastError()
-    end
-
-    kernel32.CloseHandle(token_handle)
-    if kernel32.GetLastError() == 1300 then return false, 1300 end
-    return true
+    local token_lib = require("win-utils.process.token")
+    return token_lib.enable_privilege("SeDebugPrivilege")
 end
 
 terminateProcessTree = function(pid)
     if not M._privilege_enabled then M._privilege_enabled = enable_debug_privilege() end
+    
+    local all_procs = M.list()
     local children = {}
-    local h_snap = create_snapshot()
-    if h_snap then
-        local pe = PROCESSENTRY32W_T()
-        pe.dwSize = ffi.sizeof(pe)
-        if kernel32.Process32FirstW(h_snap, pe) ~= 0 then
-            repeat
-                if pe.th32ParentProcessID == pid then table.insert(children, pe.th32ProcessID) end
-            until kernel32.Process32NextW(h_snap, pe) == 0
+    
+    for _, p in ipairs(all_procs) do
+        if p.parent_pid == pid then
+            table.insert(children, p.pid)
         end
-        kernel32.CloseHandle(h_snap)
     end
+    
     for _, child_pid in ipairs(children) do terminateProcessTree(child_pid) end
     _terminateProcessByPid(pid, 1)
 end
@@ -269,37 +260,23 @@ _processExists = function(process_name_or_pid)
     return findProcess(process_name_or_pid)
 end
 
-_findAllProcesses = function(process_name, out_pids, pids_array_size)
-    if not process_name or process_name == "" or (not out_pids and pids_array_size > 0) then
-        kernel32.SetLastError(C.ERROR_INVALID_PARAMETER); return -1
+local function _findAllProcesses(process_name)
+    local procs = M.list()
+    local pids = {}
+    local target_lower = process_name:lower()
+    
+    for _, p in ipairs(procs) do
+        if p.name:lower() == target_lower then
+            table.insert(pids, p.pid)
+        end
     end
-    local target_w = util.to_wide(process_name, true)
-    local h_snap = create_snapshot()
-    if not h_snap then return -1 end
-
-    local found_count, stored_count = 0, 0
-    local pe = PROCESSENTRY32W_T()
-    pe.dwSize = ffi.sizeof(pe)
-    if kernel32.Process32FirstW(h_snap, pe) ~= 0 then
-        repeat
-            if kernel32.lstrcmpiW(pe.szExeFile, target_w) == 0 then
-                if out_pids and stored_count < pids_array_size then
-                    out_pids[stored_count] = pe.th32ProcessID
-                    stored_count = stored_count + 1
-                end
-                found_count = found_count + 1
-            end
-        until kernel32.Process32NextW(h_snap, pe) == 0
-    end
-    kernel32.CloseHandle(h_snap)
-    return out_pids and stored_count or found_count
+    return pids
 end
 
 _createProcess = function(command, working_dir, show_mode, desktop_name)
     local si = ffi.new("STARTUPINFOW"); si.cb = ffi.sizeof(si)
     si.dwFlags, si.wShowWindow = C.STARTF_USESHOWWINDOW, show_mode or M.constants.SW_SHOW
     
-    -- [FIX] GC Anchoring: Keep reference to desktop_name wide string
     local desktop_w = nil
     if desktop_name and desktop_name ~= "" then 
         desktop_w = util.to_wide(desktop_name)
@@ -317,66 +294,6 @@ _createProcess = function(command, working_dir, show_mode, desktop_name)
     return pi.dwProcessId, pi.hProcess, 0
 end
 
-_createProcessAsSystem = function(command, working_dir, show_mode)
-    local last_error
-    local pid, proc_handle = nil, nil
-    repeat
-        if not command or command == "" then
-            last_error = C.ERROR_INVALID_PARAMETER; break
-        end
-
-        local session_id = kernel32.WTSGetActiveConsoleSessionId()
-        if session_id == 0xFFFFFFFF then
-            last_error = kernel32.GetLastError(); if last_error == 0 then last_error = 1008 end; break
-        end
-
-        local user_token_ptr = ffi.new("HANDLE[1]")
-        if wtsapi32.WTSQueryUserToken(session_id, user_token_ptr) == 0 then
-            last_error = kernel32.GetLastError(); if last_error == 0 then last_error = 1008 end; break
-        end
-        local user_token = user_token_ptr[0]
-
-        local primary_token_ptr = ffi.new("HANDLE[1]")
-        if advapi32.DuplicateTokenEx(user_token, C.MAXIMUM_ALLOWED, nil, 1, 1, primary_token_ptr) == 0 then
-            last_error = kernel32.GetLastError(); if last_error == 0 then last_error = 5 end; kernel32.CloseHandle(
-                user_token); break
-        end
-        local primary_token = primary_token_ptr[0]
-
-        local env_block_ptr = ffi.new("PVOID[1]")
-        if userenv.CreateEnvironmentBlock(env_block_ptr, primary_token, false) == 0 then
-            last_error = kernel32.GetLastError(); if last_error == 0 then last_error = 1157 end; kernel32.CloseHandle(
-                primary_token); kernel32.CloseHandle(user_token); break
-        end
-        local env_block = env_block_ptr[0]
-
-        local si = ffi.new("STARTUPINFOW"); si.cb = ffi.sizeof(si)
-        si.dwFlags, si.wShowWindow = C.STARTF_USESHOWWINDOW, show_mode or M.constants.SW_SHOW
-        
-        -- [FIX] GC Anchoring: default desktop string
-        local desktop_w = util.to_wide("winsta0\\default")
-        si.lpDesktop = desktop_w
-        
-        local pi = ffi.new("PROCESS_INFORMATION")
-        local cmd_buffer_w = util.to_wide(command)
-        local wd_wstr = util.to_wide(working_dir)
-
-        if advapi32.CreateProcessAsUserW(primary_token, nil, cmd_buffer_w, nil, nil, false, C.CREATE_UNICODE_ENVIRONMENT, env_block, wd_wstr, si, pi) == 0 then
-            last_error = kernel32.GetLastError(); if last_error == 0 then last_error = 1157 end
-        else
-            kernel32.CloseHandle(pi.hThread)
-            pid, proc_handle, last_error = pi.dwProcessId, pi.hProcess, 0
-        end
-
-        userenv.DestroyEnvironmentBlock(env_block)
-        kernel32.CloseHandle(primary_token)
-        kernel32.CloseHandle(user_token)
-    until true
-
-    if last_error and last_error ~= 0 then kernel32.SetLastError(last_error) end
-    return pid, proc_handle, last_error
-end
-
 _getProcessInfo = function(pid)
     if pid == 0 then
         kernel32.SetLastError(C.ERROR_INVALID_PARAMETER); return nil
@@ -386,22 +303,15 @@ _getProcessInfo = function(pid)
     if not h_proc or h_proc == INVALID_HANDLE_VALUE then return nil end
 
     local found = false
-    local h_snap = create_snapshot()
-    if h_snap then
-        local pe = PROCESSENTRY32W_T()
-        pe.dwSize = ffi.sizeof(pe)
-        if kernel32.Process32FirstW(h_snap, pe) ~= 0 then
-            repeat
-                if pe.th32ProcessID == pid then
-                    out_info.parent_pid = pe.th32ParentProcessID
-                    out_info.thread_count = pe.cntThreads
-                    found = true
-                    break
-                end
-            until kernel32.Process32NextW(h_snap, pe) == 0
+    local exit_code = ffi.new("DWORD[1]")
+    if kernel32.GetExitCodeProcess(h_proc, exit_code) ~= 0 and exit_code[0] == 259 then
+        found = true
+        local pbi = ffi.new("PROCESS_BASIC_INFORMATION")
+        if ntdll.NtQueryInformationProcess(h_proc, 0, pbi, ffi.sizeof(pbi), nil) == 0 then
+            out_info.parent_pid = tonumber(pbi.InheritedFromUniqueProcessId)
         end
-        kernel32.CloseHandle(h_snap)
     end
+    
     if not found then
         kernel32.CloseHandle(h_proc); return nil
     end
@@ -410,8 +320,7 @@ _getProcessInfo = function(pid)
     if kernel32.ProcessIdToSessionId(pid, session_id_ptr) ~= 0 then out_info.session_id = session_id_ptr[0] else out_info.session_id = -1 end
     local pmc = ffi.new("PROCESS_MEMORY_COUNTERS_EX"); pmc.cb = ffi.sizeof(pmc)
     if psapi.GetProcessMemoryInfo(h_proc, pmc, ffi.sizeof(pmc)) ~= 0 then
-        out_info.memory_usage_bytes = tonumber(pmc
-            .WorkingSetSize)
+        out_info.memory_usage_bytes = tonumber(pmc.WorkingSetSize)
     else
         out_info.memory_usage_bytes = 0
     end
@@ -419,15 +328,13 @@ _getProcessInfo = function(pid)
     if getProcessPath(pid, path_buf, 260, h_proc) > 0 then
         out_info.exe_path = util.from_wide(path_buf)
     else
-        out_info.exe_path =
-        ""
+        out_info.exe_path = ""
     end
     local cmd_buf = ffi.new("WCHAR[2048]")
     if getProcessCommandLine(pid, cmd_buf, 2048) then
         out_info.command_line = util.from_wide(cmd_buf)
     else
-        out_info.command_line =
-        ""
+        out_info.command_line = ""
     end
     kernel32.CloseHandle(h_proc)
     return out_info
@@ -447,8 +354,7 @@ _setProcessPriority = function(pid, priority)
         L = C.IDLE_PRIORITY_CLASS,
         B = C.BELOW_NORMAL_PRIORITY_CLASS,
         N = C.NORMAL_PRIORITY_CLASS,
-        A = C
-            .ABOVE_NORMAL_PRIORITY_CLASS,
+        A = C.ABOVE_NORMAL_PRIORITY_CLASS,
         H = C.HIGH_PRIORITY_CLASS,
         R = C.REALTIME_PRIORITY_CLASS
     }
@@ -464,6 +370,37 @@ _setProcessPriority = function(pid, priority)
     local res = kernel32.SetPriorityClass(h_proc, pclass)
     kernel32.CloseHandle(h_proc)
     return res ~= 0
+end
+
+-- [NEW] Native Suspend Helper
+local function _suspendProcess(pid)
+    if pid == 0 then return false, "Invalid PID" end
+    -- Need PROCESS_SUSPEND_RESUME access
+    local h_proc = kernel32.OpenProcess(M.constants.PROCESS_SUSPEND_RESUME, false, pid)
+    if not h_proc or h_proc == INVALID_HANDLE_VALUE then 
+        return false, util.format_error() 
+    end
+    
+    local status = ntdll.NtSuspendProcess(h_proc)
+    kernel32.CloseHandle(h_proc)
+    
+    if status < 0 then return false, string.format("NtSuspendProcess failed: 0x%X", status) end
+    return true
+end
+
+-- [NEW] Native Resume Helper
+local function _resumeProcess(pid)
+    if pid == 0 then return false, "Invalid PID" end
+    local h_proc = kernel32.OpenProcess(M.constants.PROCESS_SUSPEND_RESUME, false, pid)
+    if not h_proc or h_proc == INVALID_HANDLE_VALUE then 
+        return false, util.format_error() 
+    end
+    
+    local status = ntdll.NtResumeProcess(h_proc)
+    kernel32.CloseHandle(h_proc)
+    
+    if status < 0 then return false, string.format("NtResumeProcess failed: 0x%X", status) end
+    return true
 end
 
 _wait = function(process_name, timeout_ms)
@@ -500,31 +437,20 @@ end
 
 function M.exec(command, working_dir, show_mode, desktop_name)
     local pid, handle, err = _createProcess(command, working_dir, show_mode, desktop_name); if pid and pid > 0 then
-        return
-            new_process(pid, handle)
-    end
-    return nil, err, util.format_error(err)
-end
-
-function M.exec_as_system(command, working_dir, show_mode)
-    local pid, handle, err = _createProcessAsSystem(command, working_dir, show_mode); if pid and pid > 0 then
-        return
-            new_process(pid, handle)
+        return new_process(pid, handle)
     end
     return nil, err, util.format_error(err)
 end
 
 function M.open_by_pid(pid, access)
     access = access or M.constants.PROCESS_ALL_ACCESS; local handle = _openProcessByPid(pid, access); if handle then
-        return
-            new_process(pid, handle)
+        return new_process(pid, handle)
     end; local err = kernel32.GetLastError(); return nil, err, util.format_error(err)
 end
 
 function M.open_by_name(name, access)
     access = access or M.constants.PROCESS_ALL_ACCESS; local pid = _processExists(name); if pid > 0 then
-        return M
-            .open_by_pid(pid, access)
+        return M.open_by_pid(pid, access)
     end; local err = kernel32.GetLastError(); if err == 0 then err = C.ERROR_NOT_FOUND end; return
         nil, err, util.format_error(err)
 end
@@ -540,6 +466,26 @@ function Process:terminate(exit_code)
         local err = kernel32.GetLastError(); return nil, err, util.format_error(err)
     end
     return true
+end
+
+-- [NEW] OOP Suspend
+function Process:suspend()
+    if self:is_valid() then
+        -- Try with existing handle if it has rights (unlikely if opened generic)
+        local status = ntdll.NtSuspendProcess(self._handle)
+        if status >= 0 then return true end
+    end
+    -- Fallback to opening new handle with specific rights
+    return _suspendProcess(self.pid)
+end
+
+-- [NEW] OOP Resume
+function Process:resume()
+    if self:is_valid() then
+        local status = ntdll.NtResumeProcess(self._handle)
+        if status >= 0 then return true end
+    end
+    return _resumeProcess(self.pid)
 end
 
 function Process:terminate_tree()
@@ -571,13 +517,9 @@ function Process:set_priority(p)
 end
 
 function M.find_all(n)
-    local c = _findAllProcesses(n, nil, 0); if c < 0 then
-        local e = kernel32.GetLastError(); return nil, e, util.format_error(e)
-    end; if c == 0 then return {} end; local b = ffi.new("DWORD[?]", c); local s = _findAllProcesses(n, b, c); local p = {}; for i = 0, s - 1 do
-        p[i + 1] =
-            b[i]
-    end
-    return p
+    local pids = _findAllProcesses(n); 
+    if not pids or #pids == 0 then return {} end
+    return pids
 end
 
 function M.exists(n) return _processExists(n) end
@@ -586,10 +528,13 @@ function M.terminate_by_pid(p, e) return _terminateProcessByPid(p, e or 0) end
 
 function M.terminate_gracefully(p, t) return _terminateProcessGracefully(p, t) end
 
+-- [NEW] Module Exports
+function M.suspend(pid) return _suspendProcess(pid) end
+function M.resume(pid) return _resumeProcess(pid) end
+
 function M.wait(n, t)
     local p = _wait(n, t); if p > 0 then return p end; local e = kernel32.GetLastError(); if e == 0 then
-        e = C
-            .WAIT_TIMEOUT
+        e = C.WAIT_TIMEOUT
     end; return nil, e, util.format_error(e)
 end
 
