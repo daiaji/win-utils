@@ -1,9 +1,10 @@
+-- win-utils/tests/core_spec.lua
+-- [Fix] Clean environment: removed package.path hacks. 
+-- Relies entirely on CI-provided LUA_PATH.
+
 local lu = require('luaunit')
 local win = require('win-utils')
 local ffi = require('ffi')
-
--- [Fix] Removing manual package.path manipulation. 
--- Environment should be set up via LUA_PATH in CI/Wrapper script.
 
 TestWinUtilsCore = {}
 

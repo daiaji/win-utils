@@ -71,10 +71,10 @@ jobs:
           
           if (Test-Path "win-utils\init.lua") {
               Write-Host "Detected subdirectory structure."
-              # Copy library code, excluding tests if they are inside
+              # Copy library code
               Copy-Item "win-utils\*" $pkgDest -Recurse -Exclude "tests"
               
-              # Copy tests to stage/tests
+              # Copy tests to stage/tests (flat)
               if (Test-Path "win-utils\tests") {
                   Copy-Item "win-utils\tests\*" $tests -Recurse
               }
@@ -82,7 +82,6 @@ jobs:
               Write-Host "Detected root directory structure."
               Get-ChildItem -Path . -Exclude ".git", ".github", "stage", ".luajit", "vendor", "test_sandbox", "tests" | Copy-Item -Destination $pkgDest -Recurse
               
-              # Copy tests to stage/tests
               if (Test-Path "tests") {
                   Copy-Item "tests\*" $tests -Recurse
               }
@@ -91,17 +90,28 @@ jobs:
               exit 1
           }
           
-          # B. lua-ffi-bindings
-          $ffiDest = New-Item -ItemType Directory -Path "$lua/ffi" -Force
-          if (Test-Path "vendor/lua-ffi-bindings") {
-             Copy-Item "vendor/lua-ffi-bindings/*" "$lua/ffi" -Recurse -Exclude ".git"
+          # B. lua-ffi-bindings (Fixed Copy Logic)
+          # We need stage/lua/ffi/req.lua
+          if (Test-Path "vendor/lua-ffi-bindings/ffi") {
+             # Copy the 'ffi' folder itself into stage/lua, creating stage/lua/ffi
+             Copy-Item "vendor/lua-ffi-bindings/ffi" "$lua" -Recurse
+          } elseif (Test-Path "vendor/lua-ffi-bindings/req.lua") {
+             # Fallback: Flat repo structure
+             $ffiDest = New-Item -ItemType Directory -Path "$lua/ffi" -Force
+             Copy-Item "vendor/lua-ffi-bindings/*" "$ffiDest" -Recurse -Exclude ".git"
           } else {
-             Write-Warning "vendor/lua-ffi-bindings not found."
+             Write-Warning "vendor/lua-ffi-bindings not found or structure unknown."
           }
           
           # C. lua-ext
           if (Test-Path "vendor/lua-ext") {
-             Copy-Item "vendor/lua-ext" "$lua/ext" -Recurse -Exclude ".git","vendor"
+             # Need stage/lua/ext.lua and stage/lua/ext/
+             if (Test-Path "vendor/lua-ext/ext.lua") {
+                 Copy-Item "vendor/lua-ext/ext.lua" "$lua"
+             }
+             if (Test-Path "vendor/lua-ext/ext") {
+                 Copy-Item "vendor/lua-ext/ext" "$lua" -Recurse
+             }
           }
 
           # D. LuaUnit
@@ -116,10 +126,9 @@ jobs:
       - name: Run Tests
         shell: pwsh
         env:
-          # [CHANGED] Add stage/tests to path so run_tests.lua can find specs if needed (though dofile handles absolute)
-          # Add stage/lua to path for library resolution
-          LUA_PATH: ${{ env.TEST_STAGE }}\lua\?.lua;${{ env.TEST_STAGE }}\lua\?\init.lua;;
+          # [CHANGED] Added 'stage/tests/?.lua' to LUA_PATH to allow requiring spec files by name
+          # Also ensured stage/lua matches standard package structure
+          LUA_PATH: ${{ env.TEST_STAGE }}\tests\?.lua;${{ env.TEST_STAGE }}\lua\?.lua;${{ env.TEST_STAGE }}\lua\?\init.lua;;
         run: |
           Write-Host "Running tests in staged environment (PowerShell)..."
-          # Run the test runner located in stage/tests/
           & "${{ env.TEST_STAGE }}\bin\luajit.exe" "${{ env.TEST_STAGE }}\tests\run_tests.lua" -v

@@ -1,8 +1,6 @@
--- tests/process_spec.lua
--- Unit tests for win-utils.process
-
--- [Fix] Removing manual package.path manipulation. 
--- Environment should be set up via LUA_PATH in CI/Wrapper script.
+-- win-utils/tests/process_spec.lua
+-- [Fix] Clean environment: removed package.path hacks.
+-- Relies entirely on CI-provided LUA_PATH.
 
 local lu = require('luaunit')
 local ffi = require("ffi")
