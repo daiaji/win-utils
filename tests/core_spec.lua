@@ -2,14 +2,16 @@ local lu = require('luaunit')
 local win = require('win-utils')
 local ffi = require('ffi')
 
-print("[DEBUG] core_spec loaded. win-utils available.")
+io.write("[DEBUG] core_spec loaded. win-utils available.\n")
+io.stdout:flush()
 
 TestCore = {}
 
 function TestCore:setUp()
     -- 1. 准备沙盒目录
     self.test_dir = "test_sandbox_" .. os.time()
-    print("[TEST] Setting up sandbox: " .. self.test_dir)
+    io.write("[TEST] Setting up sandbox: " .. self.test_dir .. "\n")
+    io.stdout:flush()
     local k32 = ffi.load("kernel32")
     k32.CreateDirectoryW(require('win-utils.util').to_wide(self.test_dir), nil)
     
@@ -20,7 +22,8 @@ function TestCore:setUp()
 end
 
 function TestCore:tearDown()
-    print("[TEST] Tearing down...")
+    io.write("[TEST] Tearing down...\n")
+    io.stdout:flush()
     -- 清理文件
     if win.fs then win.fs.delete(self.test_dir) end
     if win.fs then win.fs.delete("test.lnk") end
@@ -59,34 +62,41 @@ end
 -- 文件系统 (FS) 测试
 -- ========================================================================
 function TestCore:test_FS_BasicOps()
-    print("[TEST] Starting FS_BasicOps...")
+    io.write("[TEST] Starting FS_BasicOps...\n")
+    io.stdout:flush()
     local src = self.test_dir .. "\\src.txt"
     local dst = self.test_dir .. "\\dst.txt"
     local moved = self.test_dir .. "\\moved.txt"
     
     -- Create
-    print("[TEST] Creating file: " .. src)
+    io.write("[TEST] Creating file: " .. src .. "\n")
+    io.stdout:flush()
     local f = io.open(src, "w"); f:write("test"); f:close()
     
     -- Copy
-    print("[TEST] Copying to: " .. dst)
+    io.write("[TEST] Copying to: " .. dst .. "\n")
+    io.stdout:flush()
     local ok_copy = win.fs.copy(src, dst)
-    print("[TEST] Copy result: " .. tostring(ok_copy))
+    io.write("[TEST] Copy result: " .. tostring(ok_copy) .. "\n")
+    io.stdout:flush()
     lu.assertTrue(ok_copy, "Copy failed")
     
     local f2 = io.open(dst, "r"); lu.assertNotIsNil(f2, "Target missing"); f2:close()
     
     -- Move (补回)
-    print("[TEST] Moving to: " .. moved)
+    io.write("[TEST] Moving to: " .. moved .. "\n")
+    io.stdout:flush()
     local ok_move = win.fs.move(dst, moved)
-    print("[TEST] Move result: " .. tostring(ok_move))
+    io.write("[TEST] Move result: " .. tostring(ok_move) .. "\n")
+    io.stdout:flush()
     lu.assertTrue(ok_move, "Move failed")
     
     local f3 = io.open(dst, "r"); lu.assertNil(f3, "Source should be gone")
     local f4 = io.open(moved, "r"); lu.assertNotIsNil(f4, "Moved file missing"); f4:close()
     
     -- Native Force Delete
-    print("[TEST] Force Deleting: " .. moved)
+    io.write("[TEST] Force Deleting: " .. moved .. "\n")
+    io.stdout:flush()
     
     -- [DEBUG] Wrap in pcall to catch hidden errors
     local status, ok_del, err_msg = pcall(function() 
@@ -94,15 +104,18 @@ function TestCore:test_FS_BasicOps()
     end)
     
     if not status then
-        print("[TEST] CRASH/ERROR in force_delete: " .. tostring(ok_del))
+        io.write("[TEST] CRASH/ERROR in force_delete: " .. tostring(ok_del) .. "\n")
+        io.stdout:flush()
         lu.fail("force_delete crashed: " .. tostring(ok_del))
     end
     
-    print("[TEST] Delete result: " .. tostring(ok_del) .. " (Msg: " .. tostring(err_msg) .. ")")
+    io.write("[TEST] Delete result: " .. tostring(ok_del) .. " (Msg: " .. tostring(err_msg) .. ")\n")
+    io.stdout:flush()
     lu.assertTrue(ok_del, "Force delete failed: " .. tostring(err_msg))
     
     local f5 = io.open(moved, "r"); lu.assertNil(f5)
-    print("[TEST] FS_BasicOps Done.")
+    io.write("[TEST] FS_BasicOps Done.\n")
+    io.stdout:flush()
 end
 
 function TestCore:test_FS_Recycle()
@@ -126,7 +139,7 @@ function TestCore:test_FS_Version()
     if ver then
         lu.assertStrMatches(ver, "%d+%.%d+%.%d+%.%d+")
     else
-        print("Skipping version test: kernel32.dll not accessible")
+        io.write("Skipping version test: kernel32.dll not accessible\n")
     end
 end
 
@@ -170,12 +183,13 @@ end
 -- 磁盘 (Disk) 测试
 -- ========================================================================
 function TestCore:test_Disk_ListAndInfo()
-    print("[TEST] calling win.disk.list_drives()...")
+    io.write("[TEST] calling win.disk.list_drives()...\n")
+    io.stdout:flush()
     if not win.disk.list_drives then
-        print("[TEST] ERROR: win.disk.list_drives is nil!")
+        io.write("[TEST] ERROR: win.disk.list_drives is nil!\n")
         -- Fallback check
         if win.disk.info and win.disk.info.list_physical_drives then
-             print("[TEST] BUT win.disk.info.list_physical_drives exists.")
+             io.write("[TEST] BUT win.disk.info.list_physical_drives exists.\n")
         end
     end
 
@@ -183,7 +197,8 @@ function TestCore:test_Disk_ListAndInfo()
     
     -- 如果是在 CI 的无头/无磁盘环境，drives 可能为空，但不能崩溃
     lu.assertIsTable(drives)
-    print(string.format("[TEST] Found %d physical drives.", #drives))
+    io.write(string.format("[TEST] Found %d physical drives.\n", #drives))
+    io.stdout:flush()
     
     if #drives > 0 then
         lu.assertIsNumber(drives[1].index)
@@ -233,7 +248,7 @@ function TestCore:test_Hotkey()
         lu.assertIsNumber(id)
         lu.assertTrue(win.hotkey.unregister(id))
     else
-        print("Skipping hotkey test (RegisterHotKey failed, likely headless env)")
+        io.write("Skipping hotkey test (RegisterHotKey failed, likely headless env)\n")
     end
 end
 
