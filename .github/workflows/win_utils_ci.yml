@@ -69,18 +69,22 @@ jobs:
           
           # 2. Lua Libs
           
-          # A. win-utils (Library code only)
+          # A. win-utils (Library code + Tests)
+          # [Fix] Tests must be included in the library path so require 'win-utils.tests.xxx' works
           $pkgDest = New-Item -ItemType Directory -Path "$lua/win-utils" -Force
           
           if (Test-Path "win-utils\init.lua") {
               Write-Host "Detected subdirectory structure."
-              Copy-Item "win-utils\*" $pkgDest -Recurse -Exclude "tests"
+              # Changed: Removed -Exclude "tests" to ensure require resolution works
+              Copy-Item "win-utils\*" $pkgDest -Recurse 
               if (Test-Path "win-utils\tests") {
+                  # Also copy to stage/tests for runner entry point
                   Copy-Item "win-utils\tests\*" $tests -Recurse
               }
           } elseif (Test-Path "init.lua") {
               Write-Host "Detected root directory structure."
-              Get-ChildItem -Path . -Exclude ".git", ".github", "stage", ".luajit", "vendor", "test_sandbox", "tests" | Copy-Item -Destination $pkgDest -Recurse
+              # Changed: Removed "tests" from Exclude list
+              Get-ChildItem -Path . -Exclude ".git", ".github", "stage", ".luajit", "vendor", "test_sandbox" | Copy-Item -Destination $pkgDest -Recurse
               if (Test-Path "tests") {
                   Copy-Item "tests\*" $tests -Recurse
               }
