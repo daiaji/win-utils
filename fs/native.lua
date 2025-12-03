@@ -11,9 +11,9 @@ local token = require 'win-utils.process.token'
 local M = {}
 local C = ffi.C
 
--- [DEBUG] Helper
+-- [DEBUG] Force flush
 local function log(msg)
-    io.write(msg .. "\n")
+    io.write(tostring(msg) .. "\n")
     io.stdout:flush()
 end
 
@@ -25,28 +25,47 @@ ffi.cdef [[
     } FILE_DISPOSITION_INFORMATION;
 ]]
 
--- [FIX] Define constants locally to ensure stability regardless of SDK bindings
+-- [FIX] Define constants locally to ensure stability
 local FILE_DISPOSITION_DELETE = 0x00000001
 local FILE_DISPOSITION_POSIX_SEMANTICS = 0x00000002
 local FILE_DISPOSITION_IGNORE_READONLY_ATTRIBUTE = 0x00000010
 
--- [DEBUG] Local safe to_wide implementation to isolate util.lua issues
+-- [DEBUG] Local safe to_wide implementation
 local function safe_to_wide(str)
+    log("[SAFE_TO_WIDE] Entry. Str type: " .. type(str))
     if not str then return nil end
     local len = #str
+    log("[SAFE_TO_WIDE] Len: " .. len)
+    
+    -- Check kernel32 binding
+    if not kernel32 then log("[SAFE_TO_WIDE] FATAL: kernel32 is nil") return nil end
+    if not kernel32.MultiByteToWideChar then log("[SAFE_TO_WIDE] FATAL: MultiByteToWideChar is nil") return nil end
+    
+    log("[SAFE_TO_WIDE] Calling MultiByteToWideChar (Calc Len)...")
     -- CP_UTF8 = 65001
     local req = kernel32.MultiByteToWideChar(65001, 0, str, len, nil, 0)
-    if req == 0 then return nil end
+    log("[SAFE_TO_WIDE] Req size: " .. tostring(req))
+    
+    if req == 0 then 
+        log("[SAFE_TO_WIDE] Failed to calc len. Err: " .. kernel32.GetLastError())
+        return nil 
+    end
+    
+    log("[SAFE_TO_WIDE] Allocating buffer...")
     local buf = ffi.new("wchar_t[?]", req + 1)
+    
+    log("[SAFE_TO_WIDE] Calling MultiByteToWideChar (Write)...")
     kernel32.MultiByteToWideChar(65001, 0, str, len, buf, req)
     buf[req] = 0
+    
+    log("[SAFE_TO_WIDE] Success.")
     return buf
 end
 
 local function open_file_native(path, access)
     log("[NATIVE] Opening: " .. tostring(path))
     
-    -- [DEBUG] Use local safe_to_wide and wrap in pcall
+    -- [DEBUG] Call safe_to_wide directly with logs
     local status, wpath = pcall(safe_to_wide, path)
     
     if not status then
@@ -55,7 +74,7 @@ local function open_file_native(path, access)
     end
     
     if not wpath then 
-        log("[NATIVE] safe_to_wide failed")
+        log("[NATIVE] safe_to_wide returned nil")
         return nil, "Invalid path encoding" 
     end
     
