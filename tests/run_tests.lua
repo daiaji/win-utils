@@ -1,20 +1,25 @@
 local luaunit = require('luaunit')
+local ffi = require 'ffi'
 
--- Force flush stdout to ensure logs appear in CI immediately
+-- 强制刷新缓冲区，确保 CI 日志实时输出
 io.stdout:setvbuf('no')
 io.stderr:setvbuf('no')
 
--- List of spec modules to run
--- Since we added stage/tests/?.lua to LUA_PATH, simple require works
-local specs = {
-    "core_spec",
-    "process_spec",
-}
+print("=== Win-Utils Test Suite (Complete Coverage) ===")
+print("OS: " .. ffi.os)
+print("Arch: " .. ffi.arch)
 
-print("=== Running Win-Utils Test Suite ===")
-for _, spec in ipairs(specs) do
-    print("Loading spec module: " .. spec)
-    require(spec)
-end
+-- 1. 加载核心测试 (FS, Registry, Disk, Handle)
+print("Loading: core_spec")
+require 'win-utils.tests.core_spec'
 
+-- 2. 加载进程测试 (Process, Token, Service, NetStat)
+print("Loading: process_spec")
+require 'win-utils.tests.process_spec'
+
+-- 3. 加载扩展测试 (Network, Job, WIM, VHD, Desktop)
+print("Loading: extra_spec")
+require 'win-utils.tests.extra_spec'
+
+-- 运行
 os.exit(luaunit.LuaUnit.run())

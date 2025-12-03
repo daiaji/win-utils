@@ -1,66 +1,41 @@
-local M          = {}
+local M = {}
 
--- 1. Base Utilities
-M.util           = require 'win-utils.util'
-M.error          = require 'win-utils.error'
-M.handle         = require 'win-utils.handle'
-M.native         = require 'win-utils.native'
+-- 1. 核心模块 (立即加载)
+M.util   = require 'win-utils.util'
+M.handle = require 'win-utils.handle'
+M.native = require 'win-utils.native'
 
--- 2. System APIs
-M.registry       = require 'win-utils.registry'
-M.shortcut       = require 'win-utils.shortcut'
-M.fs             = require 'win-utils.fs'
-M.shell          = require 'win-utils.shell'
-M.hotkey         = require 'win-utils.hotkey'
-M.service        = require 'win-utils.service'
+-- 2. 惰性加载映射
+local lazy_modules = {
+    registry = 'win-utils.registry',
+    shortcut = 'win-utils.shortcut',
+    fs       = 'win-utils.fs',
+    shell    = 'win-utils.shell',
+    hotkey   = 'win-utils.hotkey',
+    service  = 'win-utils.service',
+    display  = 'win-utils.display',
+    desktop  = 'win-utils.desktop',
+    driver   = 'win-utils.driver',
+    pagefile = 'win-utils.system.pagefile',
+    wim      = 'win-utils.wim',
+    net      = 'win-utils.net',
+    process  = 'win-utils.process',
+    device   = 'win-utils.device',
+    disk     = 'win-utils.disk',
+    power    = 'win-utils.power',
+    scope    = 'win-utils.scope'
+}
 
-M.display        = require 'win-utils.display'
-M.desktop        = require 'win-utils.desktop'
-M.driver         = require 'win-utils.driver'
-
--- [NEW] System & Memory
-M.pagefile       = require 'win-utils.system.pagefile'
-
--- [NEW] WIM Imaging Support (MOUN)
-M.wim            = require 'win-utils.wim'
-
--- Network Submodule
-M.net            = require 'win-utils.net' 
-
--- 3. Process Management
-M.process        = require 'win-utils.process'
-M.process.handle = require 'win-utils.process.handle'
-M.process.token  = require 'win-utils.process.token'
-M.process.memory = require 'win-utils.process.memory'
-M.process.job    = require 'win-utils.process.job'
-M.process.module = require 'win-utils.process.module'
-
--- 4. Device & Hardware
-M.device         = require 'win-utils.device'
-
--- 5. Enhanced DiskPart (Core Logic)
-M.disk           = require 'win-utils.disk'
-
--- Export Submodules
-M.disk.physical  = require 'win-utils.disk.physical'
-M.disk.volume    = require 'win-utils.disk.volume'
-M.disk.layout    = require 'win-utils.disk.layout'
-M.disk.vds       = require 'win-utils.disk.vds'
-M.disk.vhd       = require 'win-utils.disk.vhd'
-M.disk.types     = require 'win-utils.disk.types'
-
--- [NEW] Disk Extensions
-M.disk.subst     = require 'win-utils.disk.subst'
-
--- [NEW] FS Extensions
-M.fs.native      = require 'win-utils.fs.native'
-
--- Enhanced Operations
-M.disk.op        = require 'win-utils.disk.operation'
-M.disk.esp       = require 'win-utils.disk.esp'
-M.disk.badblocks = require 'win-utils.disk.badblocks'
-
--- Alias for legacy compatibility
-M.get_last_error = M.util.format_error
+setmetatable(M, {
+    __index = function(t, k)
+        local path = lazy_modules[k]
+        if path then
+            local mod = require(path)
+            rawset(t, k, mod)
+            return mod
+        end
+        return nil
+    end
+})
 
 return M

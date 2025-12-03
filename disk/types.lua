@@ -67,18 +67,16 @@ M.GPT = {
     -- General
     BIOS_BOOT                   = "{21686148-6449-6E6F-744E-656564454649}", -- BIOS Boot Partition (GRUB)
     UNUSED                      = "{00000000-0000-0000-0000-000000000000}",
+}
 
-    -- Data Attributes (Bitmask)
-    -- [CHANGED] Use ULL suffix to prevent precision loss in Lua numbers (doubles).
-    -- Standard Lua numbers only maintain 53 bits of integer precision.
-    FLAGS = {
-        PLATFORM_REQUIRED       = 0x0000000000000001ULL,
-        IGNORE                  = 0x0000000000000002ULL,
-        LEGACY_BIOS_BOOT        = 0x0000000000000004ULL,
-        READ_ONLY               = 0x1000000000000000ULL,
-        HIDDEN                  = 0x4000000000000000ULL,
-        NO_DRIVE_LETTER         = 0x8000000000000000ULL
-    }
+-- 使用 ULL 后缀防止 LuaJIT 精度丢失
+M.GPT_FLAGS = {
+    REQUIRED                    = 0x0000000000000001ULL,
+    NO_BLOCK_IO                 = 0x0000000000000002ULL,
+    LEGACY_BIOS_BOOT            = 0x0000000000000004ULL,
+    READ_ONLY                   = 0x1000000000000000ULL,
+    HIDDEN                      = 0x4000000000000000ULL,
+    NO_DRIVE_LETTER             = 0x8000000000000000ULL
 }
 
 M.MBR = {
@@ -89,7 +87,7 @@ M.MBR = {
     FAT16_SMALL = 0x04,
     EXTENDED    = 0x05,
     FAT16       = 0x06,
-    NTFS        = 0x07, -- Also exFAT, IFS
+    NTFS        = 0x07, -- Also exFAT, IFS, ReFS
     AIX         = 0x08,
     AIX_BOOT    = 0x09,
     OS2_BOOT    = 0x0A,

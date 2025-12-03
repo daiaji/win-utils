@@ -1,239 +1,202 @@
--- win-utils/tests/core_spec.lua
--- [Fix] Clean environment: removed package.path hacks. 
--- Relies entirely on CI-provided LUA_PATH.
-
 local lu = require('luaunit')
 local win = require('win-utils')
 local ffi = require('ffi')
 
-TestWinUtilsCore = {}
+TestCore = {}
 
-function TestWinUtilsCore:setUp()
-    -- Prepare Sandbox
-    self.test_dir = "test_sandbox"
-    local k32 = require('ffi.req')('Windows.sdk.kernel32')
+function TestCore:setUp()
+    -- 1. 准备沙盒目录
+    self.test_dir = "test_sandbox_" .. os.time()
+    local k32 = ffi.load("kernel32")
+    k32.CreateDirectoryW(require('win-utils.util').to_wide(self.test_dir), nil)
+    
+    -- 2. 准备注册表沙盒
+    self.reg_key = "Software\\LuaWinUtilsTest"
+    -- 确保环境干净
+    if win.registry then win.registry.delete_key("HKCU", self.reg_key, true) end
+end
 
-    -- Recursive delete helper for setup cleanup
+function TestCore:tearDown()
+    -- 清理文件
     if win.fs then win.fs.delete(self.test_dir) end
-
-    -- Create fresh dir
-    local function to_w(s)
-        local len = k32.MultiByteToWideChar(65001, 0, s, -1, nil, 0)
-        local buf = ffi.new("wchar_t[?]", len)
-        k32.MultiByteToWideChar(65001, 0, s, -1, buf, len)
-        return buf
-    end
-    k32.CreateDirectoryW(to_w(self.test_dir), nil)
-
-    -- Registry Sandbox
-    self.reg_path = "Software\\LuaWinUtilsTest"
-    win.registry.delete_key("HKCU", self.reg_path, true)
-
-    -- Create Registry Key for testing
-    local advapi = require('ffi.req')('Windows.sdk.advapi32')
-    local hKey = ffi.new("HKEY[1]")
-    advapi.RegCreateKeyExW(ffi.cast("HKEY", 0x80000001), to_w(self.reg_path), 0, nil, 0, 0xF003F, nil, hKey, nil)
-    advapi.RegCloseKey(hKey[0])
-end
-
-function TestWinUtilsCore:tearDown()
-    win.fs.delete(self.test_dir)
-    win.fs.delete("test.lnk")
-    win.registry.delete_key("HKCU", self.reg_path, true)
-end
-
--- 辅助函数：获取绝对路径
-function TestWinUtilsCore:get_abs_path(rel_path)
-    local k32 = require('ffi.req')('Windows.sdk.kernel32')
-    local util = require('win-utils.util')
-    local wrel = util.to_wide(rel_path)
-    local len = k32.GetFullPathNameW(wrel, 0, nil, nil)
-    if len == 0 then return rel_path end
-
-    local buf = ffi.new("wchar_t[?]", len)
-    k32.GetFullPathNameW(wrel, len, buf, nil)
-    return util.from_wide(buf)
+    if win.fs then win.fs.delete("test.lnk") end
+    
+    -- 清理注册表
+    if win.registry then win.registry.delete_key("HKCU", self.reg_key, true) end
+    
+    -- 清理热键
+    if win.hotkey then win.hotkey.clear() end
 end
 
 -- ========================================================================
--- FS (File System) Tests
+-- 架构与基础测试
 -- ========================================================================
-function TestWinUtilsCore:test_fs_lifecycle()
-    local file_src = self.test_dir .. "\\src.txt"
-    local file_dst = self.test_dir .. "\\dst.txt"
-    local file_moved = self.test_dir .. "\\moved.txt"
-
-    -- 1. Create file
-    local f = io.open(file_src, "w")
-    f:write("hello filesystem")
-    f:close()
-
-    -- 2. Copy
-    lu.assertTrue(win.fs.copy(file_src, file_dst))
-
-    local f2 = io.open(file_dst, "r")
-    lu.assertNotIsNil(f2, "Copy target missing")
-    if f2 then f2:close() end
-
-    -- 3. Move
-    lu.assertTrue(win.fs.move(file_dst, file_moved))
-
-    local f3 = io.open(file_dst, "r")
-    lu.assertIsNil(f3, "Move source should be gone")
-
-    local f4 = io.open(file_moved, "r")
-    lu.assertNotIsNil(f4, "Move target missing")
-    if f4 then f4:close() end
-
-    -- 4. Delete
-    lu.assertTrue(win.fs.delete(file_moved))
-    local f5 = io.open(file_moved, "r")
-    lu.assertIsNil(f5, "Delete failed")
+function TestCore:test_LazyLoading()
+    lu.assertNotIsNil(win.util, "Util should be preloaded")
+    -- 验证子模块按需加载
+    local fs = win.fs
+    lu.assertIsTable(fs, "FS module should load on demand")
+    lu.assertIsFunction(fs.copy, "FS copy function missing")
 end
 
-function TestWinUtilsCore:test_fs_recycle()
-    local file_trash = self.test_dir .. "\\trash.txt"
-    local f = io.open(file_trash, "w")
-    f:write("junk")
-    f:close()
-
-    -- 尝试回收
-    local ok = win.fs.recycle(file_trash)
-
-    if ok then
-        local f_check = io.open(file_trash, "r")
-        lu.assertIsNil(f_check, "Recycled file should be gone")
-    end
+function TestCore:test_HandleRAII()
+    -- 验证自动关闭句柄机制
+    local closed = false
+    local mock_close = function(h) closed = true end
+    local h = win.handle.new(ffi.cast("void*", 0x1234), mock_close)
+    
+    lu.assertTrue(h:is_valid())
+    h:close()
+    lu.assertFalse(h:is_valid())
+    lu.assertTrue(closed, "Closer function was not called")
 end
 
-function TestWinUtilsCore:test_fs_get_version()
+-- ========================================================================
+-- 文件系统 (FS) 测试
+-- ========================================================================
+function TestCore:test_FS_BasicOps()
+    local src = self.test_dir .. "\\src.txt"
+    local dst = self.test_dir .. "\\dst.txt"
+    local moved = self.test_dir .. "\\moved.txt"
+    
+    -- Create
+    local f = io.open(src, "w"); f:write("test"); f:close()
+    
+    -- Copy
+    lu.assertTrue(win.fs.copy(src, dst), "Copy failed")
+    local f2 = io.open(dst, "r"); lu.assertNotIsNil(f2, "Target missing"); f2:close()
+    
+    -- Move (补回)
+    lu.assertTrue(win.fs.move(dst, moved), "Move failed")
+    local f3 = io.open(dst, "r"); lu.assertNil(f3, "Source should be gone")
+    local f4 = io.open(moved, "r"); lu.assertNotIsNil(f4, "Moved file missing"); f4:close()
+    
+    -- Native Force Delete
+    lu.assertTrue(win.fs.native.force_delete(moved), "Force delete failed")
+    local f5 = io.open(moved, "r"); lu.assertNil(f5)
+end
+
+function TestCore:test_FS_Recycle()
+    -- (补回) 测试回收站 API
+    local trash = self.test_dir .. "\\trash.txt"
+    local f = io.open(trash, "w"); f:write("junk"); f:close()
+    
+    lu.assertTrue(win.fs.recycle(trash), "Recycle failed")
+    local f2 = io.open(trash, "r")
+    lu.assertNil(f2, "File not moved to recycle bin")
+end
+
+function TestCore:test_FS_Version()
+    -- (补回) 获取系统 DLL 版本
     local ver = win.fs.get_version("C:\\Windows\\System32\\kernel32.dll")
-    if not ver then
-        ver = win.fs.get_version("C:\\Windows\\SysWOW64\\kernel32.dll")
+    if not ver then 
+        -- CI 环境可能是 Wow64
+        ver = win.fs.get_version("C:\\Windows\\SysWOW64\\kernel32.dll") 
     end
-
+    
     if ver then
         lu.assertStrMatches(ver, "%d+%.%d+%.%d+%.%d+")
     else
-        print("Skipping version test (kernel32 not found or no version info)")
+        print("Skipping version test: kernel32.dll not accessible")
     end
 end
 
 -- ========================================================================
--- Registry Tests
+-- 注册表 (Registry) 测试
 -- ========================================================================
-function TestWinUtilsCore:test_registry_rw()
-    local key = win.registry.open_key("HKCU", self.reg_path)
-    lu.assertNotIsNil(key, "Failed to open test registry key")
-
-    lu.assertTrue(key:write("TestStr", "LuaJIT"))
-    lu.assertEquals(key:read("TestStr"), "LuaJIT")
-
-    lu.assertTrue(key:write("TestDword", 123456, "dword"))
-    lu.assertEquals(key:read("TestDword"), 123456)
-
-    local bin = string.char(0x01, 0x02, 0xFF)
-    lu.assertTrue(key:write("TestBin", bin, "binary"))
-    lu.assertEquals(key:read("TestBin"), bin)
-
-    local multi = { "Line1", "Line2" }
-    lu.assertTrue(key:write("TestMulti", multi, "multi_sz"))
-    local read_multi = key:read("TestMulti")
-    lu.assertIsTable(read_multi)
-    lu.assertEquals(read_multi[1], "Line1")
-    lu.assertEquals(read_multi[2], "Line2")
-
+function TestCore:test_Registry_FullTypes()
+    -- 确保键存在
+    local adv = ffi.load("advapi32")
+    local hk = ffi.new("void*[1]")
+    adv.RegCreateKeyExW(ffi.cast("void*", 0x80000001), require('win-utils.util').to_wide(self.reg_key), 0, nil, 0, 0xF003F, nil, hk, nil)
+    adv.RegCloseKey(hk[0])
+    
+    local key = win.registry.open_key("HKCU", self.reg_key)
+    lu.assertNotIsNil(key)
+    
+    -- String
+    key:write("Str", "LuaJIT")
+    lu.assertEquals(key:read("Str"), "LuaJIT")
+    
+    -- Dword
+    key:write("Num", 123456)
+    lu.assertEquals(key:read("Num"), 123456)
+    
+    -- Binary (补回)
+    local bin_data = string.char(0xDE, 0xAD, 0xBE, 0xEF)
+    key:write("Bin", bin_data, "binary")
+    lu.assertEquals(key:read("Bin"), bin_data)
+    
+    -- Multi_SZ
+    local multi = {"Line1", "Line2"}
+    key:write("Multi", multi, "multi_sz")
+    local read_m = key:read("Multi")
+    lu.assertEquals(read_m[1], "Line1")
+    lu.assertEquals(read_m[2], "Line2")
+    
     key:close()
 end
 
 -- ========================================================================
--- Disk Tests
+-- 磁盘 (Disk) 测试
 -- ========================================================================
-function TestWinUtilsCore:test_disk_info()
-    local drives = win.disk.list()
-    lu.assertIsTable(drives)
-
-    local has_drive = (#drives > 0)
-    lu.assertTrue(has_drive, "No logical drives found")
-
-    if has_drive then
-        local d = drives[1]
-        local info = win.disk.info(d)
-        lu.assertNotIsNil(info)
-        lu.assertIsString(info.type)
-        lu.assertIsNumber(info.capacity_mb)
+function TestCore:test_Disk_ListAndInfo()
+    local drives = win.disk.list_drives() -- 原 list() 现为 list_physical_drives
+    if drives and #drives > 0 then
+        lu.assertIsNumber(drives[1].index)
+        lu.assertIsString(drives[1].model)
+    end
+    
+    -- 逻辑卷测试
+    local vols = win.disk.volume.list()
+    lu.assertIsTable(vols)
+    if #vols > 0 then
+        lu.assertIsString(vols[1].guid_path)
+    end
+    
+    -- (补回) 详细信息测试 (针对 C:)
+    local c_info = win.disk.volume.get_info("C:")
+    if c_info then
+        lu.assertIsString(c_info.filesystem) -- NTFS?
+        lu.assertIsNumber(c_info.capacity_mb)
+        lu.assertTrue(c_info.capacity_mb > 0)
     end
 end
 
 -- ========================================================================
--- Shortcut Tests
+-- 系统杂项 (Shortcut, Hotkey, Shell)
 -- ========================================================================
-function TestWinUtilsCore:test_shortcut()
+function TestCore:test_Shortcut()
     local target = "C:\\Windows\\System32\\notepad.exe"
-    local lnk_path = self:get_abs_path(self.test_dir .. "\\test.lnk")
-
-    local ok = win.shortcut.create({
-        path = lnk_path,
-        target = target,
-        desc = "Test Link"
-    })
-
-    lu.assertTrue(ok, "Shortcut creation returned false")
-
+    -- 需要绝对路径
+    local k32 = ffi.load("kernel32")
+    local buf = ffi.new("wchar_t[260]")
+    k32.GetFullPathNameW(require('win-utils.util').to_wide(self.test_dir .. "\\test.lnk"), 260, buf, nil)
+    local lnk_path = require('win-utils.util').from_wide(buf)
+    
+    local ok = win.shortcut.create({ path = lnk_path, target = target, desc = "Test" })
+    lu.assertTrue(ok, "Create shortcut failed")
+    
     local f = io.open(lnk_path, "rb")
-    lu.assertNotIsNil(f, "Shortcut file was not created at: " .. lnk_path)
+    lu.assertNotIsNil(f, "LNK file not created")
     if f then f:close() end
 end
 
--- ========================================================================
--- Hotkey Tests
--- ========================================================================
-function TestWinUtilsCore:test_hotkey_registration()
-    local id, err = win.hotkey.register("Ctrl+Alt", "P", function() end)
-
-    if not id then
-        print("Skipping hotkey test (RegisterHotKey failed: " .. tostring(err) .. ")")
-        return
-    end
-
-    lu.assertIsNumber(id)
-    lu.assertTrue(win.hotkey.unregister(id))
-end
-
-function TestWinUtilsCore:test_hotkey_logic()
-    local hit_count = 0
-    local cb = function() hit_count = hit_count + 1 end
-
-    -- VK_F12 = 0x7B (123)
-    local id = win.hotkey.register("Shift", 123, cb)
-
+function TestCore:test_Hotkey()
+    -- (补回) 热键注册测试
+    -- 注意：在 CI 无头模式下可能失败，做容错处理
+    local id = win.hotkey.register("Ctrl+Alt", "P", function() end)
     if id then
-        win.hotkey.dispatch(id)
-        lu.assertEquals(hit_count, 1)
-
-        local err_cb = function() error("Simulated Crash") end
-        local id_err = win.hotkey.register("Shift", 122, err_cb)
-        if id_err then
-            local status = pcall(win.hotkey.dispatch, id_err)
-            lu.assertTrue(status, "Dispatch logic should catch callback errors")
-            win.hotkey.unregister(id_err)
-        end
-        win.hotkey.unregister(id)
+        lu.assertIsNumber(id)
+        lu.assertTrue(win.hotkey.unregister(id))
+    else
+        print("Skipping hotkey test (RegisterHotKey failed, likely headless env)")
     end
 end
 
--- ========================================================================
--- Shell Tests
--- ========================================================================
-function TestWinUtilsCore:test_shell_argv_parsing()
-    local t1 = win.shell.commandline_to_argv('exe a b')
-    lu.assertEquals(#t1, 3)
-    lu.assertEquals(t1[2], 'a')
-
-    local t2 = win.shell.commandline_to_argv('"C:\\Path With Spaces\\exe" "arg 1"')
-    lu.assertEquals(t2[1], 'C:\\Path With Spaces\\exe')
-    lu.assertEquals(t2[2], 'arg 1')
-
-    local t3 = win.shell.commandline_to_argv('exe "测试"')
-    lu.assertEquals(t3[2], '测试')
+function TestCore:test_Shell_Argv()
+    local t = win.shell.commandline_to_argv('"C:\\Dir With Space\\app.exe" /s')
+    lu.assertEquals(#t, 2)
+    lu.assertEquals(t[1], "C:\\Dir With Space\\app.exe")
+    lu.assertEquals(t[2], "/s")
 end

@@ -1,401 +1,208 @@
 local ffi = require 'ffi'
 local bit = require 'bit'
-local util = require 'win-utils.util'
-local Handle = require 'win-utils.handle'
 local ole32 = require 'ffi.req' 'Windows.sdk.ole32'
 local vds_sdk = require 'ffi.req' 'Windows.sdk.vds'
 local kernel32 = require 'ffi.req' 'Windows.sdk.kernel32'
+local util = require 'win-utils.util'
+local class = require 'win-utils.deps'.class
 local volume_lib = require 'win-utils.disk.volume'
 
 local M = {}
 local C = ffi.C
 
-local function release(obj)
-    if obj ~= nil and obj ~= ffi.NULL then
-        obj.lpVtbl.Release(obj)
-    end
-end
+local function release(o) if o and o ~= ffi.NULL then o.lpVtbl.Release(o) end end
 
-local function init_com()
-    local flags = bit.bor(ole32.C.COINIT_APARTMENTTHREADED, ole32.C.COINIT_DISABLE_OLE1DDE)
-    local hr = ole32.CoInitializeEx(nil, flags)
-    return hr >= 0
-end
+local VdsContext = class()
 
-local function uninit_com()
-    ole32.CoUninitialize()
-end
-
-local VdsContext = {}
-VdsContext.__index = VdsContext
-
-function M.create_context()
-    if not init_com() then return nil, "CoInitializeEx failed" end
-    
-    local ctx = setmetatable({
-        loader = nil,
-        service = nil
-    }, VdsContext)
-    
-    local ppLoader = ffi.new("void*[1]")
-    local ctx_flags = bit.bor(ole32.C.CLSCTX_LOCAL_SERVER, ole32.C.CLSCTX_REMOTE_SERVER)
-    
-    local hr = ole32.CoCreateInstance(vds_sdk.CLSID_VdsLoader, nil, 
-        ctx_flags, 
-        vds_sdk.IID_IVdsServiceLoader, ppLoader)
-        
-    if hr < 0 then 
-        uninit_com()
-        return nil, "CoCreateInstance(VdsLoader) failed" 
+function VdsContext:init()
+    ole32.CoInitializeEx(nil, 0)
+    local ld = ffi.new("void*[1]")
+    if ole32.CoCreateInstance(vds_sdk.CLSID_VdsLoader, nil, 0x17, vds_sdk.IID_IVdsServiceLoader, ld) >= 0 then
+        self.loader = ffi.cast("IVdsServiceLoader*", ld[0])
+        local svc = ffi.new("IVdsService*[1]")
+        if self.loader.lpVtbl.LoadService(self.loader, nil, svc) >= 0 then
+            self.service = svc[0]
+            self.service.lpVtbl.WaitForServiceReady(self.service)
+        end
     end
-    ctx.loader = ffi.cast("IVdsServiceLoader*", ppLoader[0])
-    
-    local ppService = ffi.new("IVdsService*[1]")
-    hr = ctx.loader.lpVtbl.LoadService(ctx.loader, nil, ppService)
-    if hr < 0 then 
-        ctx:close()
-        return nil, "LoadService failed" 
-    end
-    ctx.service = ppService[0]
-    
-    hr = ctx.service.lpVtbl.WaitForServiceReady(ctx.service)
-    if hr < 0 then
-        ctx:close()
-        return nil, "VDS Service not ready"
-    end
-    
-    return ctx
 end
 
 function VdsContext:close()
     if self.service then release(self.service); self.service = nil end
     if self.loader then release(self.loader); self.loader = nil end
-    uninit_com()
+    ole32.CoUninitialize()
 end
 
-function VdsContext:get_disk(drive_index)
-    local target_path = string.format("\\\\?\\PhysicalDrive%d", drive_index)
-    local w_target_path = util.to_wide(target_path)
+function VdsContext:get_disk(idx)
+    if not self.service then return nil end
+    local target = util.to_wide(string.format("\\\\?\\PhysicalDrive%d", idx))
+    local enum = ffi.new("IEnumVdsObject*[1]")
+    if self.service.lpVtbl.QueryProviders(self.service, 1, enum) < 0 then return nil end
     
-    local enum_ptr = ffi.new("IEnumVdsObject*[1]")
-    local hr = self.service.lpVtbl.QueryProviders(self.service, vds_sdk.C.VDS_QUERY_SOFTWARE_PROVIDERS, enum_ptr)
-    if hr < 0 then return nil, "QueryProviders failed" end
-    local enum_prov = enum_ptr[0]
+    local found = nil
+    local unk = ffi.new("IUnknown*[1]")
+    local n = ffi.new("ULONG[1]")
     
-    local found_disk = nil
-    local unk_ptr = ffi.new("IUnknown*[1]")
-    local fetched = ffi.new("ULONG[1]")
-    
-    while enum_prov.lpVtbl.Next(enum_prov, 1, unk_ptr, fetched) == 0 and fetched[0] > 0 do
-        local unk = unk_ptr[0]
-        local prov_ptr = ffi.new("IVdsProvider*[1]")
-        
-        if unk.lpVtbl.QueryInterface(unk, vds_sdk.IID_IVdsProvider, ffi.cast("void**", prov_ptr)) == 0 then
-            local prov = prov_ptr[0]
-            local sw_prov_ptr = ffi.new("IVdsSwProvider*[1]")
-            
-            if prov.lpVtbl.QueryInterface(prov, vds_sdk.IID_IVdsSwProvider, ffi.cast("void**", sw_prov_ptr)) == 0 then
-                local sw_prov = sw_prov_ptr[0]
-                local enum_pack_ptr = ffi.new("IEnumVdsObject*[1]")
-                
-                if sw_prov.lpVtbl.QueryPacks(sw_prov, enum_pack_ptr) == 0 then
-                    local enum_pack = enum_pack_ptr[0]
-                    
-                    while found_disk == nil and enum_pack.lpVtbl.Next(enum_pack, 1, unk_ptr, fetched) == 0 and fetched[0] > 0 do
-                        local pack_unk = unk_ptr[0]
-                        local pack_ptr = ffi.new("IVdsPack*[1]")
-                        
-                        if pack_unk.lpVtbl.QueryInterface(pack_unk, vds_sdk.IID_IVdsPack, ffi.cast("void**", pack_ptr)) == 0 then
-                            local pack = pack_ptr[0]
-                            local enum_disk_ptr = ffi.new("IEnumVdsObject*[1]")
-                            
-                            if pack.lpVtbl.QueryDisks(pack, enum_disk_ptr) == 0 then
-                                local enum_disk = enum_disk_ptr[0]
-                                
-                                while found_disk == nil and enum_disk.lpVtbl.Next(enum_disk, 1, unk_ptr, fetched) == 0 and fetched[0] > 0 do
-                                    local disk_unk = unk_ptr[0]
-                                    local disk_ptr = ffi.new("IVdsDisk*[1]")
-                                    
-                                    if disk_unk.lpVtbl.QueryInterface(disk_unk, vds_sdk.IID_IVdsDisk, ffi.cast("void**", disk_ptr)) == 0 then
-                                        local disk = disk_ptr[0]
+    -- VDS Enumeration Hell (Simplified)
+    while not found and enum[0].lpVtbl.Next(enum[0], 1, unk, n) == 0 and n[0] > 0 do
+        local prov = ffi.new("IVdsProvider*[1]")
+        if unk[0].lpVtbl.QueryInterface(unk[0], vds_sdk.IID_IVdsProvider, ffi.cast("void**", prov)) == 0 then
+            local sw = ffi.new("IVdsSwProvider*[1]")
+            if prov[0].lpVtbl.QueryInterface(prov[0], vds_sdk.IID_IVdsSwProvider, ffi.cast("void**", sw)) == 0 then
+                local packs = ffi.new("IEnumVdsObject*[1]")
+                if sw[0].lpVtbl.QueryPacks(sw[0], packs) == 0 then
+                    while not found and packs[0].lpVtbl.Next(packs[0], 1, unk, n) == 0 and n[0] > 0 do
+                        local pack = ffi.new("IVdsPack*[1]")
+                        if unk[0].lpVtbl.QueryInterface(unk[0], vds_sdk.IID_IVdsPack, ffi.cast("void**", pack)) == 0 then
+                            local disks = ffi.new("IEnumVdsObject*[1]")
+                            if pack[0].lpVtbl.QueryDisks(pack[0], disks) == 0 then
+                                while not found and disks[0].lpVtbl.Next(disks[0], 1, unk, n) == 0 and n[0] > 0 do
+                                    local d = ffi.new("IVdsDisk*[1]")
+                                    if unk[0].lpVtbl.QueryInterface(unk[0], vds_sdk.IID_IVdsDisk, ffi.cast("void**", d)) == 0 then
                                         local prop = ffi.new("VDS_DISK_PROP")
-                                        
-                                        if disk.lpVtbl.GetProperties(disk, prop) == 0 then
-                                            if kernel32.lstrcmpiW(w_target_path, prop.pwszName) == 0 then
-                                                disk.lpVtbl.AddRef(disk)
-                                                found_disk = disk
+                                        if d[0].lpVtbl.GetProperties(d[0], prop) == 0 then
+                                            if kernel32.lstrcmpiW(target, prop.pwszName) == 0 then
+                                                d[0].lpVtbl.AddRef(d[0]); found = d[0]
                                             end
-                                            ole32.CoTaskMemFree(prop.pwszName)
-                                            ole32.CoTaskMemFree(prop.pwszAdaptorName)
-                                            ole32.CoTaskMemFree(prop.pwszDevicePath)
-                                            ole32.CoTaskMemFree(prop.pwszFriendlyName)
+                                            ole32.CoTaskMemFree(prop.pwszName); ole32.CoTaskMemFree(prop.pwszAdaptorName)
+                                            ole32.CoTaskMemFree(prop.pwszDevicePath); ole32.CoTaskMemFree(prop.pwszFriendlyName)
                                         end
-                                        release(disk)
+                                        release(d[0])
                                     end
-                                    release(disk_unk)
+                                    release(unk[0])
                                 end
-                                release(enum_disk)
+                                release(disks[0])
                             end
-                            release(pack)
+                            release(pack[0])
                         end
-                        release(pack_unk)
+                        release(unk[0])
                     end
-                    release(enum_pack)
+                    release(packs[0])
                 end
-                release(sw_prov)
+                release(sw[0])
             end
-            release(prov)
+            release(prov[0])
         end
-        release(unk)
-        if found_disk then break end
+        release(unk[0])
     end
-    release(enum_prov)
-    
-    return found_disk
+    release(enum[0])
+    return found
 end
 
-function M.clean(drive_index)
-    local ctx, err = M.create_context()
-    if not ctx then return false, err end
+function M.create_context() return VdsContext() end
+
+local function vds_op(idx, cb)
+    local ctx = VdsContext(); if not ctx.service then return false, "Init failed" end
+    local disk = ctx:get_disk(idx)
+    if not disk then ctx:close(); return false, "Disk not found" end
     
-    local disk = ctx:get_disk(drive_index)
-    if not disk then 
-        ctx:close()
-        return false, "Disk not found in VDS"
+    local adv = ffi.new("IVdsAdvancedDisk*[1]")
+    local ok, msg = false, "IVdsAdvancedDisk not supported"
+    
+    if disk.lpVtbl.QueryInterface(disk, vds_sdk.IID_IVdsAdvancedDisk, ffi.cast("void**", adv)) == 0 then
+        ok, msg = cb(adv[0])
+        release(adv[0])
     end
     
-    local adv_disk_ptr = ffi.new("IVdsAdvancedDisk*[1]")
-    local hr = disk.lpVtbl.QueryInterface(disk, vds_sdk.IID_IVdsAdvancedDisk, ffi.cast("void**", adv_disk_ptr))
-    local success = false
-    local msg = ""
-    
-    if hr >= 0 then
-        local adv_disk = adv_disk_ptr[0]
-        local async_ptr = ffi.new("IVdsAsync*[1]")
-        
-        hr = adv_disk.lpVtbl.Clean(adv_disk, 1, 1, 0, async_ptr)
-        if hr >= 0 then
-            local async = async_ptr[0]
-            local hr_res = ffi.new("HRESULT[1]")
-            local output = ffi.new("VDS_ASYNC_OUTPUT") 
-            hr = async.lpVtbl.Wait(async, hr_res, output)
-            if hr >= 0 and hr_res[0] >= 0 then
-                success = true
-            else
-                msg = string.format("Async Clean failed: 0x%08X", hr_res[0])
-            end
-            release(async)
-        else
-            msg = string.format("Clean call failed: 0x%08X", hr)
-        end
-        release(adv_disk)
-    else
-        msg = "IVdsAdvancedDisk not supported"
-    end
-    
-    release(disk)
-    ctx:close()
-    return success, msg
+    release(disk); ctx:close()
+    return ok, msg
 end
 
-function M.delete_partition(drive_index, offset, force)
-    local ctx, err = M.create_context()
-    if not ctx then return false, err end
-    
-    local disk = ctx:get_disk(drive_index)
-    if not disk then 
-        ctx:close()
-        return false, "Disk not found in VDS"
-    end
-    
-    local adv_disk_ptr = ffi.new("IVdsAdvancedDisk*[1]")
-    local hr = disk.lpVtbl.QueryInterface(disk, vds_sdk.IID_IVdsAdvancedDisk, ffi.cast("void**", adv_disk_ptr))
-    local success = false
-    local msg = ""
-    
-    if hr >= 0 then
-        local adv_disk = adv_disk_ptr[0]
-        hr = adv_disk.lpVtbl.DeletePartition(adv_disk, offset, force and 1 or 0, force and 1 or 0)
-        
-        if hr >= 0 then
-            success = true
-        else
-            msg = string.format("DeletePartition failed: 0x%08X", hr)
-        end
-        release(adv_disk)
-    else
-        msg = "IVdsAdvancedDisk not supported"
-    end
-    
-    release(disk)
-    ctx:close()
-    return success, msg
+function M.clean(idx)
+    return vds_op(idx, function(adv)
+        local async = ffi.new("IVdsAsync*[1]")
+        if adv.lpVtbl.Clean(adv, 1, 1, 0, async) ~= 0 then return false, "Clean call failed" end
+        local hr, out = ffi.new("HRESULT[1]"), ffi.new("VDS_ASYNC_OUTPUT")
+        async[0].lpVtbl.Wait(async[0], hr, out)
+        release(async[0])
+        return (hr[0] >= 0), string.format("0x%X", hr[0])
+    end)
 end
 
-function M.create_partition(drive_index, offset, size, params)
-    local ctx, err = M.create_context()
-    if not ctx then return false, err end
-    
-    local disk = ctx:get_disk(drive_index)
-    if not disk then 
-        ctx:close()
-        return false, "Disk not found in VDS" 
-    end
-    
-    local adv_disk_ptr = ffi.new("IVdsAdvancedDisk*[1]")
-    local hr = disk.lpVtbl.QueryInterface(disk, vds_sdk.IID_IVdsAdvancedDisk, ffi.cast("void**", adv_disk_ptr))
-    local success = false
-    local msg = ""
-    
-    if hr >= 0 then
-        local adv_disk = adv_disk_ptr[0]
-        local vds_params = ffi.new("CREATE_PARTITION_PARAMETERS")
-        
+function M.delete_partition(idx, offset, force)
+    return vds_op(idx, function(adv)
+        local hr = adv.lpVtbl.DeletePartition(adv, offset, force and 1 or 0, force and 1 or 0)
+        return (hr >= 0), string.format("0x%X", hr)
+    end)
+end
+
+function M.create_partition(idx, offset, size, params)
+    return vds_op(idx, function(adv)
+        local p = ffi.new("CREATE_PARTITION_PARAMETERS")
         if params.style == "MBR" then
-            vds_params.style = vds_sdk.C.VDS_PST_MBR
-            vds_params.Info.Mbr.PartitionType = params.type or 0x07
-            vds_params.Info.Mbr.BootIndicator = params.active and 1 or 0
+            p.style = 1 -- MBR
+            p.Info.Mbr.PartitionType = params.type or 0x07
+            p.Info.Mbr.BootIndicator = params.active and 1 or 0
         else
-            vds_params.style = vds_sdk.C.VDS_PST_GPT
-            vds_params.Info.Gpt.PartitionType = util.guid_from_str(params.type or "{EBD0A0A2-B9E5-4433-87C0-68B6B72699C7}")
-            if params.id then vds_params.Info.Gpt.PartitionId = util.guid_from_str(params.id) end
-            if params.attributes then vds_params.Info.Gpt.Attributes = params.attributes end
+            p.style = 2 -- GPT
+            p.Info.Gpt.PartitionType = util.guid_from_str(params.type or "{EBD0A0A2-B9E5-4433-87C0-68B6B72699C7}")
+            if params.id then p.Info.Gpt.PartitionId = util.guid_from_str(params.id) end
+            p.Info.Gpt.Attributes = params.attributes or 0
             if params.name then 
-                local wname = util.to_wide(params.name)
-                ffi.copy(vds_params.Info.Gpt.Name, wname, math.min(72, ffi.sizeof(wname)))
+                local w = util.to_wide(params.name)
+                ffi.copy(p.Info.Gpt.Name, w, math.min(72, ffi.sizeof(w)))
             end
         end
         
-        local async_ptr = ffi.new("IVdsAsync*[1]")
-        hr = adv_disk.lpVtbl.CreatePartition(adv_disk, offset, size, vds_params, async_ptr)
-        
-        if hr >= 0 then
-            local async = async_ptr[0]
-            local hr_res = ffi.new("HRESULT[1]")
-            local output = ffi.new("VDS_ASYNC_OUTPUT") 
-            hr = async.lpVtbl.Wait(async, hr_res, output)
-            if hr >= 0 and hr_res[0] >= 0 then
-                success = true
-                msg = "Partition created"
-            else
-                msg = string.format("Async CreatePartition failed: 0x%08X", hr_res[0])
-            end
-            release(async)
-        else
-            msg = string.format("CreatePartition call failed: 0x%08X", hr)
-        end
-        release(adv_disk)
-    else
-        msg = "IVdsAdvancedDisk not supported"
-    end
-    
-    release(disk)
-    ctx:close()
-    return success, msg
+        local async = ffi.new("IVdsAsync*[1]")
+        if adv.lpVtbl.CreatePartition(adv, offset, size, p, async) ~= 0 then return false, "Create call failed" end
+        local hr, out = ffi.new("HRESULT[1]"), ffi.new("VDS_ASYNC_OUTPUT")
+        async[0].lpVtbl.Wait(async[0], hr, out)
+        release(async[0])
+        return (hr[0] >= 0), string.format("0x%X", hr[0])
+    end)
 end
 
--- [ENHANCED] Added fs_revision parameter
--- fs_revision: Hex number (e.g. 0x201 for UDF 2.01). 0 = Default.
-function M.format(drive_index, partition_offset, fs_name, label, quick, cluster_size, fs_revision)
-    local target_guid_path = volume_lib.find_guid_by_partition(drive_index, partition_offset)
-    if not target_guid_path then 
-        return false, "Partition not found or volume not mounted (Check drive index and offset)" 
-    end
+function M.format(idx, offset, fs, label, quick, cluster, rev)
+    local guid = volume_lib.find_guid_by_partition(idx, offset)
+    if not guid then return false, "Volume not found" end
+    local wguid = util.to_wide(guid:sub(-1)=="\\" and guid or guid.."\\")
     
-    if target_guid_path:sub(-1) ~= "\\" then target_guid_path = target_guid_path .. "\\" end
-    local w_target_guid = util.to_wide(target_guid_path)
-
-    local ctx, err = M.create_context()
-    if not ctx then return false, err end
+    local ctx = VdsContext(); if not ctx.service then return false end
+    local disk = ctx:get_disk(idx)
+    if not disk then ctx:close(); return false end
     
-    local disk = ctx:get_disk(drive_index)
-    if not disk then 
-        ctx:close()
-        return false, "Disk not found in VDS" 
-    end
+    local pack = ffi.new("IVdsPack*[1]")
+    local ok, msg = false, "Vol not found"
     
-    local pack_ptr = ffi.new("IVdsPack*[1]")
-    local hr = disk.lpVtbl.GetPack(disk, pack_ptr)
-    local success = false
-    local msg = "Volume not found in VDS Pack"
-    
-    if hr >= 0 then
-        local pack = pack_ptr[0]
-        local enum_vol_ptr = ffi.new("IEnumVdsObject*[1]")
-        
-        if pack.lpVtbl.QueryVolumes(pack, enum_vol_ptr) == 0 then
-            local enum_vol = enum_vol_ptr[0]
-            local unk_ptr = ffi.new("IUnknown*[1]")
-            local fetched = ffi.new("ULONG[1]")
-            
-            while not success and enum_vol.lpVtbl.Next(enum_vol, 1, unk_ptr, fetched) == 0 and fetched[0] > 0 do
-                local vol_unk = unk_ptr[0]
-                local vol_ptr = ffi.new("IVdsVolume*[1]")
-                
-                if vol_unk.lpVtbl.QueryInterface(vol_unk, vds_sdk.IID_IVdsVolume, ffi.cast("void**", vol_ptr)) == 0 then
-                    local vol = vol_ptr[0]
-                    local mf3_ptr = ffi.new("IVdsVolumeMF3*[1]")
-                    
-                    if vol.lpVtbl.QueryInterface(vol, vds_sdk.IID_IVdsVolumeMF3, ffi.cast("void**", mf3_ptr)) == 0 then
-                        local mf3 = mf3_ptr[0]
-                        
-                        local paths_ptr = ffi.new("LPWSTR*[1]")
-                        local num_paths_ptr = ffi.new("ULONG[1]")
-                        
-                        if mf3.lpVtbl.QueryVolumeGuidPathnames(mf3, paths_ptr, num_paths_ptr) == 0 then
-                            local num_paths = num_paths_ptr[0]
-                            local paths = paths_ptr[0]
-                            local is_match = false
-                            
-                            for i = 0, num_paths - 1 do
-                                local path = paths[i] -- LPWSTR
-                                if kernel32.lstrcmpiW(path, w_target_guid) == 0 then
-                                    is_match = true
-                                end
-                                ole32.CoTaskMemFree(path)
-                            end
-                            ole32.CoTaskMemFree(paths)
-                            
-                            if is_match then
-                                local w_fs = util.to_wide(fs_name)
-                                local w_label = util.to_wide(label)
-                                local async_ptr = ffi.new("IVdsAsync*[1]")
-                                local options = quick and 1 or 0 
-                                
-                                -- [FIX] Pass fs_revision correctly
-                                hr = mf3.lpVtbl.FormatEx2(mf3, w_fs, fs_revision or 0, cluster_size or 0, w_label, options, async_ptr)
-                                
-                                if hr >= 0 then
-                                    local async = async_ptr[0]
-                                    local hr_res = ffi.new("HRESULT[1]")
-                                    local output = ffi.new("VDS_ASYNC_OUTPUT")
-                                    async.lpVtbl.Wait(async, hr_res, output)
-                                    if hr_res[0] >= 0 then
-                                        success = true
-                                        msg = "Success"
-                                    else
-                                        msg = string.format("VDS Format Failed: 0x%08X", hr_res[0])
+    if disk.lpVtbl.GetPack(disk, pack) == 0 then
+        local enum = ffi.new("IEnumVdsObject*[1]")
+        if pack[0].lpVtbl.QueryVolumes(pack[0], enum) == 0 then
+            local unk = ffi.new("IUnknown*[1]"); local n = ffi.new("ULONG[1]")
+            while not ok and enum[0].lpVtbl.Next(enum[0], 1, unk, n) == 0 and n[0] > 0 do
+                local vol = ffi.new("IVdsVolume*[1]")
+                if unk[0].lpVtbl.QueryInterface(unk[0], vds_sdk.IID_IVdsVolume, ffi.cast("void**", vol)) == 0 then
+                    local mf3 = ffi.new("IVdsVolumeMF3*[1]")
+                    if vol[0].lpVtbl.QueryInterface(vol[0], vds_sdk.IID_IVdsVolumeMF3, ffi.cast("void**", mf3)) == 0 then
+                        local paths = ffi.new("LPWSTR*[1]"); local np = ffi.new("ULONG[1]")
+                        if mf3[0].lpVtbl.QueryVolumeGuidPathnames(mf3[0], paths, np) == 0 then
+                            for i=0, np[0]-1 do
+                                if kernel32.lstrcmpiW(paths[0][i], wguid) == 0 then
+                                    local async = ffi.new("IVdsAsync*[1]")
+                                    if mf3[0].lpVtbl.FormatEx2(mf3[0], util.to_wide(fs), rev or 0, cluster or 0, util.to_wide(label), quick and 1 or 0, async) == 0 then
+                                        local hr = ffi.new("HRESULT[1]"); local out = ffi.new("VDS_ASYNC_OUTPUT")
+                                        async[0].lpVtbl.Wait(async[0], hr, out)
+                                        release(async[0])
+                                        ok = (hr[0] >= 0); msg = ok and "Success" or string.format("0x%X", hr[0])
                                     end
-                                    release(async)
-                                else
-                                    msg = string.format("FormatEx2 call failed: 0x%08X", hr)
                                 end
+                                ole32.CoTaskMemFree(paths[0][i])
                             end
+                            ole32.CoTaskMemFree(paths[0])
                         end
-                        release(mf3)
+                        release(mf3[0])
                     end
-                    release(vol)
+                    release(vol[0])
                 end
-                release(vol_unk)
+                release(unk[0])
             end
-            release(enum_vol)
+            release(enum[0])
         end
-        release(pack)
+        release(pack[0])
     end
     
-    release(disk)
-    ctx:close()
-    return success, msg
+    release(disk); ctx:close()
+    return ok, msg
 end
 
 return M

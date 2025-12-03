@@ -1,39 +1,48 @@
 local ffi = require 'ffi'
 local kernel32 = require 'ffi.req' 'Windows.sdk.kernel32'
+local class = require 'win-utils.deps'.class
 
-local M = {}
-local INVALID_HANDLE = ffi.cast("HANDLE", -1)
+local INVALID = ffi.cast("HANDLE", -1)
+local NULL_HANDLE = ffi.cast("HANDLE", 0)
 
--- RAII 包装器
--- @param handle: 原始句柄
--- @param closer: 关闭函数 (默认为 kernel32.CloseHandle)
--- @return: 附加了 __gc 的句柄 (cdata)，如果句柄无效则返回 nil
-function M.guard(handle, closer)
-    if handle == nil or handle == INVALID_HANDLE then return nil end
-    closer = closer or kernel32.CloseHandle
+local SafeHandle = class()
 
-    -- 使用 ffi.gc 绑定关闭函数
-    return ffi.gc(handle, function(h)
-        -- 再次检查防止 Double Free (尽管 ffi.gc 通常只调一次，但防御性编程更好)
-        if h ~= INVALID_HANDLE then
-            closer(h)
-        end
-    end)
-end
-
--- 显式关闭并解除 GC 锚定
--- @param handle: 由 guard 返回的句柄
--- @param closer: 关闭函数 (必须与 guard 时一致)
-function M.close(handle, closer)
-    if handle == nil then return end
-    closer = closer or kernel32.CloseHandle
-
-    -- 解除 GC 回调，避免 Double Free
-    ffi.gc(handle, nil)
-
-    if handle ~= INVALID_HANDLE then
-        closer(handle)
+function SafeHandle:init(handle, closer)
+    self.handle = handle
+    
+    -- [CRITICAL FIX] Capture closer in local scope to avoid 'self' capture in GC
+    local close_func = closer or kernel32.CloseHandle
+    self._closer = close_func -- Store for explicit close
+    
+    if self:is_valid() then
+        -- FFI GC Anchor
+        ffi.gc(self.handle, function(h)
+            -- Only use 'h' (the cdata itself) and 'close_func' (upvalue)
+            if h ~= INVALID and h ~= NULL_HANDLE then 
+                close_func(h) 
+            end
+        end)
     end
 end
 
-return M
+function SafeHandle:is_valid()
+    return self.handle ~= nil and self.handle ~= INVALID and self.handle ~= NULL_HANDLE
+end
+
+function SafeHandle:close()
+    if self:is_valid() then
+        ffi.gc(self.handle, nil) -- Detach GC
+        self._closer(self.handle)
+        self.handle = INVALID
+        return true
+    end
+    return false
+end
+
+function SafeHandle:get() return self.handle end
+
+-- Static Factories
+function SafeHandle.new(h, c) return SafeHandle(h, c) end
+function SafeHandle.guard(h, c) return SafeHandle(h, c) end
+
+return SafeHandle

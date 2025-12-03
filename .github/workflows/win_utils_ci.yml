@@ -89,7 +89,7 @@ jobs:
               exit 1
           }
           
-          # B. lua-ffi-bindings
+          # B. lua-ffi-bindings (Must exist for win-utils to work)
           if (Test-Path "vendor/lua-ffi-bindings/ffi") {
              # Copy folder 'ffi' to stage/lua, resulting in stage/lua/ffi
              Copy-Item "vendor/lua-ffi-bindings/ffi" "$lua" -Recurse
@@ -101,9 +101,10 @@ jobs:
              Write-Warning "vendor/lua-ffi-bindings not found or structure unknown."
           }
           
-          # C. lua-ext
-          # Correctly layout lua-ext: ext.lua at root, others in ext/
+          # C. lua-ext (Required by win-utils)
+          # Layout: stage/lua/ext.lua (root), stage/lua/ext/*.lua
           if (Test-Path "vendor/lua-ext") {
+             Write-Host "Installing lua-ext from vendor..."
              $extDir = New-Item -ItemType Directory -Path (Join-Path $lua.FullName "ext") -Force
              
              # Copy ALL files to stage/lua/ext/
@@ -114,10 +115,13 @@ jobs:
              if (Test-Path $extLuaInside) {
                  Move-Item -Path $extLuaInside -Destination $lua.FullName -Force
              }
+          } else {
+             Write-Warning "vendor/lua-ext not found. Tests may fail."
           }
 
-          # D. LuaUnit
+          # D. LuaUnit & lfs_ffi
           Invoke-WebRequest -Uri "https://raw.githubusercontent.com/bluebird75/luaunit/master/luaunit.lua" -OutFile "$lua/luaunit.lua"
+          Invoke-WebRequest -Uri "https://raw.githubusercontent.com/daiaji/luafilesystem/main/lfs_ffi.lua" -OutFile "$lua/lfs_ffi.lua"
 
           # E. JIT Libs
           Copy-Item "${{ env.LUAJIT_BIN_DIR }}\jit" "$lua/jit" -Recurse

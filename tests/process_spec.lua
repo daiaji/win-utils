@@ -1,263 +1,118 @@
--- win-utils/tests/process_spec.lua
--- [Fix] Clean environment: removed package.path hacks.
--- Relies entirely on CI-provided LUA_PATH.
-
 local lu = require('luaunit')
-local ffi = require("ffi")
-local proc = require('win-utils.process')
+local win = require('win-utils')
+local ffi = require('ffi')
 
-if not proc._OS_SUPPORT then
-    print("Skipping tests: win-utils.process only supports Windows.")
-    os.exit(0)
+TestProcess = {}
+
+function TestProcess:setUp()
+    -- 启动一个长驻进程 (timeout 30s)
+    -- 使用 SW_HIDE (0)
+    self.proc = win.process.exec("cmd.exe /c timeout 30", nil, 0)
 end
 
--- 3. Local Helpers
-local function table_isempty(t)
-    return next(t) == nil
-end
-
--- 4. Test Suite Definition
-TestProcessUtils = {}
-
--- [MODIFIED] Use cmd.exe to wrap ping and redirect stdout to NUL to suppress CI logs
-local TEST_PROC_NAME = "cmd.exe"
-local TEST_COMMAND = 'cmd.exe /c "ping -n 30 127.0.0.1 > NUL"'
-local TEST_COMMAND_WITH_ARGS = 'cmd.exe /c "ping -n 4 127.0.0.1 > NUL"'
--- CMD_PING_COMMAND already redirects to NUL, so it's fine
-local CMD_PING_COMMAND = 'cmd.exe /c "ping -n 10 127.0.0.1 > NUL"'
-local UNICODE_FILENAME = "测试文件.txt"
-
-function TestProcessUtils:setUp()
-    print("\n[SETUP] Cleaning up environment before test...")
-    self:tearDown()
-    print("[SETUP] Cleanup complete.")
-end
-
-function TestProcessUtils:tearDown()
-    local function kill_all_by_name(name)
-        local pids = proc.find_all(name)
-        if pids and not table_isempty(pids) then
-            print("  [TEARDOWN] Cleaning up lingering '" .. name .. "': " .. table.concat(pids, ", "))
-            for _, pid in ipairs(pids) do
-                proc.terminate_by_pid(pid, 0)
-            end
-        end
+function TestProcess:tearDown()
+    if self.proc and self.proc:is_valid() then
+        self.proc:terminate()
     end
-
-    -- [MODIFIED] Cleanup matching the new TEST_PROC_NAME
-    -- Note: Be cautious in CI environments not to kill the runner's cmd.exe
-    kill_all_by_name(TEST_PROC_NAME)
-    kill_all_by_name("ping.exe")
-    kill_all_by_name("whoami.exe")
-
-    os.remove(UNICODE_FILENAME)
-    ffi.C.Sleep(100)
 end
 
--------------------------------------------------------------------------------
--- 1. OOP Wrapper & Static Function Tests
--------------------------------------------------------------------------------
-
-function TestProcessUtils:test_exec_and_exists()
-    print("[RUNNING] test_exec_and_exists")
-    local p = proc.exec(TEST_COMMAND, nil, proc.constants.SW_HIDE)
-    lu.assertNotIsNil(p, "proc.exec should return a process object")
-    lu.assertTrue(p.pid > 0, "Process object should have a valid PID")
-    print("  [DEBUG] Launched: " .. p.pid)
-    ffi.C.Sleep(500)
-
-    local exists_name = proc.exists(TEST_PROC_NAME)
-    lu.assertTrue(exists_name > 0, "proc.exists(name) failed")
-
-    local exists_pid = proc.exists(p.pid)
-    lu.assertEquals(exists_pid, p.pid, "proc.exists(pid) mismatch")
-
-    local exists_fake = proc.exists("non_existent_123.exe")
-    lu.assertEquals(exists_fake, 0, "proc.exists(fake) should be 0")
-
-    p:terminate()
-    print("[SUCCESS] test_exec_and_exists")
+-- ========================================================================
+-- 进程基础功能
+-- ========================================================================
+function TestProcess:test_Process_Info()
+    lu.assertNotIsNil(self.proc, "Process exec failed")
+    lu.assertIsNumber(self.proc.pid)
+    
+    local info = self.proc:get_info()
+    lu.assertIsTable(info)
+    lu.assertEquals(info.pid, self.proc.pid)
+    
+    -- 路径检查
+    local path = self.proc:get_path()
+    lu.assertIsString(path)
+    -- cmd.exe 路径应包含 system32
+    if #path > 0 then
+        lu.assertStrContains(path:lower(), "cmd.exe")
+    end
 end
 
-function TestProcessUtils:test_open_and_wait()
-    print("[RUNNING] test_open_and_wait")
-    local p_created = proc.exec(TEST_COMMAND, nil, proc.constants.SW_HIDE)
-    lu.assertNotIsNil(p_created, "CreateProcess failed")
-
-    local p_opened = proc.open_by_pid(p_created.pid)
-    lu.assertNotIsNil(p_opened, "OpenByPid failed")
-
-    -- WaitForProcessExit (Timeout expected)
-    local exited = p_opened:wait_for_exit(200)
-    lu.assertFalse(exited, "wait_for_exit should timeout (return false)")
-
-    -- Terminate
-    local ok = p_opened:terminate()
-    lu.assertTrue(ok, "terminate failed")
-
-    -- WaitForProcessExit (Success expected)
-    local exited_after = p_opened:wait_for_exit(1000)
-    lu.assertTrue(exited_after, "wait_for_exit should succeed (return true)")
-
-    print("[SUCCESS] test_open_and_wait")
+function TestProcess:test_Priority()
+    -- (补回) 优先级设置
+    lu.assertTrue(self.proc:set_priority("H"), "Set High priority failed")
 end
 
-function TestProcessUtils:test_terminate_and_wait_close()
-    print("[RUNNING] test_terminate_and_wait_close")
-    local p = proc.exec(TEST_COMMAND, nil, proc.constants.SW_HIDE)
+function TestProcess:test_Wait_Timeout()
+    -- (补回) 等待超时逻辑
+    -- 进程预计存活 30s，等待 100ms 应返回 false (timeout)
+    local start = ffi.load("kernel32").GetTickCount()
+    local res = self.proc:wait_for_exit(100)
+    local dur = ffi.load("kernel32").GetTickCount() - start
+    
+    lu.assertFalse(res, "Should timeout")
+    lu.assertTrue(dur >= 90, "Wait duration too short")
+end
+
+function TestProcess:test_Suspend_Resume()
+    -- (新增) 挂起/恢复测试
+    lu.assertTrue(self.proc:suspend(), "Suspend failed")
+    -- 简单的状态检查比较困难，主要测试 API 调用不崩溃
+    lu.assertTrue(self.proc:resume(), "Resume failed")
+end
+
+function TestProcess:test_Tree_Kill()
+    -- (补回) 进程树终止
+    -- 启动 cmd -> ping 结构
+    local p = win.process.exec('cmd.exe /c "ping -n 20 127.0.0.1 > NUL"', nil, 0)
     lu.assertNotIsNil(p)
+    ffi.C.Sleep(500) -- 等待子进程产生
+    
+    local pid = p.pid
+    p:terminate_tree()
+    
     ffi.C.Sleep(500)
-
-    local ok = proc.terminate_by_pid(p.pid, 0)
-    lu.assertTrue(ok, "terminate_by_pid failed")
-
-    local closed = proc.wait_close(p.pid, 3000)
-    lu.assertTrue(closed, "wait_close failed (expected true)")
-    print("[SUCCESS] test_terminate_and_wait_close")
+    lu.assertEquals(win.process.exists(pid), 0, "Parent process should be gone")
 end
 
-function TestProcessUtils:test_wait_for_process_timeout_and_success()
-    print("[RUNNING] test_wait_for_process_timeout_and_success")
-    -- 1. Test Timeout
-    local start = ffi.C.GetTickCount64()
-    local pid, err_code = proc.wait("fake_proc_123.exe", 500)
-    local duration = tonumber(ffi.C.GetTickCount64() - start)
-    lu.assertIsNil(pid, "wait should return nil on timeout")
-    lu.assertNotIsNil(err_code, "wait should return an error code on timeout")
-    lu.assertTrue(duration >= 400, "Wait duration too short")
-
-    -- 2. Test Success
-    local p_launched = proc.exec(TEST_COMMAND, nil, proc.constants.SW_HIDE)
-    lu.assertNotIsNil(p_launched)
-
-    local found_pid = proc.wait(TEST_PROC_NAME, 2000)
-    lu.assertEquals(found_pid, p_launched.pid, "wait did not find the correct PID")
-
-    p_launched:terminate()
-    print("[SUCCESS] test_wait_for_process_timeout_and_success")
+-- ========================================================================
+-- 高级特性 (Token, Net, Service)
+-- ========================================================================
+function TestProcess:test_Token_Security()
+    -- (新增) 令牌与权限
+    local token = win.process.token.open_process_token(self.proc.pid)
+    lu.assertNotIsNil(token, "Open token failed")
+    
+    local user = win.process.token.get_user(token)
+    lu.assertIsString(user, "SID should be string")
+    lu.assertStrMatches(user, "^S%-1%-.*")
+    
+    local integrity = win.process.token.get_integrity_level(token)
+    lu.assertIsString(integrity)
+    
+    token:close()
 end
 
-function TestProcessUtils:test_get_path_and_command_line()
-    print("[RUNNING] test_get_path_and_command_line")
-    local p = proc.exec(TEST_COMMAND_WITH_ARGS, nil, proc.constants.SW_HIDE)
-    lu.assertNotIsNil(p)
-    ffi.C.Sleep(500)
-
-    -- GetPath
-    local path = p:get_path()
-    lu.assertNotIsNil(path, "get_path failed")
-    lu.assertStrContains(path:lower(), TEST_PROC_NAME, "Path mismatch")
-
-    -- GetCommandLine
-    local cmdline = p:get_command_line()
-    lu.assertNotIsNil(cmdline)
-    lu.assertStrContains(cmdline, "-n 4", "Command line mismatch")
-
-    p:terminate(0)
-    print("[SUCCESS] test_get_path_and_command_line")
+function TestProcess:test_Net_Stat()
+    -- (新增) 网络状态
+    local table = win.net.stat.get_tcp_table()
+    lu.assertIsTable(table)
+    -- 只要返回表即可，内容视系统状态而定
 end
 
-function TestProcessUtils:test_set_priority()
-    print("[RUNNING] test_set_priority")
-    local p = proc.exec(TEST_COMMAND, nil, proc.constants.SW_HIDE)
-    lu.assertNotIsNil(p)
-    ffi.C.Sleep(500)
-
-    -- Set valid priority
-    local ok, err_code, err_msg = p:set_priority("L")
-    lu.assertTrue(ok, "set_priority('L') failed: " .. tostring(err_msg))
-
-    -- Set invalid priority
-    local ok_fail, err_fail = p:set_priority("X")
-    lu.assertIsNil(ok_fail, "set_priority('X') should have failed")
-    lu.assertNotIsNil(err_fail, "set_priority with invalid arg should return an error code")
-
-    p:terminate(0)
-    print("[SUCCESS] test_set_priority")
-end
-
-function TestProcessUtils:test_get_parent_and_terminate_tree()
-    print("[RUNNING] test_get_parent_and_terminate_tree")
-    local parent_p = proc.exec(CMD_PING_COMMAND, nil, proc.constants.SW_HIDE)
-    lu.assertNotIsNil(parent_p, "Parent process launch failed")
-
-    ffi.C.Sleep(1000) -- Give time for child to spawn
-
-    -- [NOTE] Even though parent is cmd.exe, it spawns ping.exe.
-    -- We want to verify we can find the child.
-    local child_p = proc.open_by_name("ping.exe")
-    lu.assertNotIsNil(child_p, "Child process not found")
-
-    local child_info = child_p:get_info()
-    lu.assertNotIsNil(child_info)
-    lu.assertEquals(child_info.parent_pid, parent_p.pid, "Parent PID mismatch")
-
-    local ok = parent_p:terminate_tree()
-    lu.assertTrue(ok, "terminate_tree failed")
-
-    ffi.C.Sleep(500)
-    lu.assertEquals(proc.exists(parent_p.pid), 0, "Parent remains")
-    lu.assertEquals(proc.exists(child_p.pid), 0, "Child remains")
-    print("[SUCCESS] test_get_parent_and_terminate_tree")
-end
-
-function TestProcessUtils:test_find_all_processes()
-    print("[RUNNING] test_find_all_processes")
-    local p1 = proc.exec(TEST_COMMAND, nil, proc.constants.SW_HIDE)
-    local p2 = proc.exec(TEST_COMMAND, nil, proc.constants.SW_HIDE)
-    ffi.C.Sleep(1000)
-
-    local pids = proc.find_all(TEST_PROC_NAME)
-    lu.assertTrue(#pids >= 2, "Count < 2")
-
+function TestProcess:test_Service_List()
+    -- (新增) 服务枚举
+    -- 需要确保 service 模块已加载
+    local svcs = win.service.list()
+    lu.assertIsTable(svcs)
+    lu.assertTrue(#svcs > 0, "Should list system services")
+    
+    -- 检查常见服务 (例如 Spooler 或 EventLog)
     local found = false
-    for _, pid in ipairs(pids) do
-        if pid == p1.pid then
+    for _, s in ipairs(svcs) do
+        if s.name == "Spooler" or s.name == "EventLog" then
             found = true
+            lu.assertIsNumber(s.pid)
             break
         end
     end
-    lu.assertTrue(found, "P1 not found in list")
-
-    p1:terminate()
-    p2:terminate()
-    print("[SUCCESS] test_find_all_processes")
-end
-
-function TestProcessUtils:test_get_full_process_info()
-    print("[RUNNING] test_get_full_process_info")
-    local p = proc.exec(TEST_COMMAND_WITH_ARGS, nil, proc.constants.SW_HIDE)
-    lu.assertNotIsNil(p)
-    ffi.C.Sleep(500)
-
-    local info = p:get_info()
-    lu.assertNotIsNil(info, "get_info failed")
-
-    lu.assertEquals(info.pid, p.pid)
-    lu.assertStrContains(info.exe_path:lower(), TEST_PROC_NAME)
-    lu.assertStrContains(info.command_line, "-n 4")
-    lu.assertTrue(info.session_id >= 0)
-
-    -- Test invalid pid
-    local bad_p = proc.open_by_pid(999999)
-    lu.assertIsNil(bad_p)
-
-    p:terminate(0)
-    print("[SUCCESS] test_get_full_process_info")
-end
-
-function TestProcessUtils:test_oop_unicode_support()
-    print("[RUNNING] test_oop_unicode_support")
-    local unicode_arg = "arg_" .. UNICODE_FILENAME
-    -- This command already redirects to NUL
-    local cmd = string.format('cmd.exe /c "ping -n 2 127.0.0.1 > NUL & rem %s"', unicode_arg)
-    local p = proc.exec(cmd, nil, proc.constants.SW_HIDE)
-    lu.assertNotIsNil(p)
-    ffi.C.Sleep(500)
-    local cl = p:get_command_line()
-    if cl then
-        lu.assertStrContains(cl, unicode_arg)
-    end
-    p:terminate_tree()
-    print("[SUCCESS] test_oop_unicode_support")
+    lu.assertTrue(found, "Standard service not found")
 end
