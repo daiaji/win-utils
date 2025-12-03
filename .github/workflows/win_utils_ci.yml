@@ -13,38 +13,39 @@ on:
 
 jobs:
   # ===========================================================================
-  # Job 1: Build Environment
+  # Job 1: Build & Cache LuaJIT
+  # 目标：只要编译成功一次，就永久缓存，不受测试失败影响
   # ===========================================================================
-  build-env:
-    name: Build LuaJIT Environment
+  build-luajit:
+    name: Build LuaJIT
     runs-on: windows-latest
     env:
-      # [FIX] Rename .luajit to luajit_build to prevent upload-artifact ignoring it
       LUAJIT_BIN_DIR: ${{ github.workspace }}\luajit_build
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          submodules: recursive
 
+      # 1. 尝试恢复缓存
       - name: Cache LuaJIT Build
         id: cache-luajit
         uses: actions/cache@v3
         with:
           path: ${{ env.LUAJIT_BIN_DIR }}
-          # [FIX] Update cache key v3
+          # 缓存键：基于 OS 和 luajit.h 的哈希。
+          # 只要 luajit 源码不动，这里永远命中。
           key: ${{ runner.os }}-luajit-52compat-v3-${{ hashFiles('vendor/luajit/src/luajit.h') }}
-          restore-keys: |
-            ${{ runner.os }}-luajit-52compat-v3-
-
+          
+      # 2. 如果没有缓存，配置 MSVC
       - name: Setup MSVC
         if: steps.cache-luajit.outputs.cache-hit != 'true'
         uses: ilammy/msvc-dev-cmd@v1
 
-      - name: Build LuaJIT (with Lua 5.2 Compat)
+      # 3. 如果没有缓存，执行编译
+      - name: Build LuaJIT (Run only on Cache Miss)
         if: steps.cache-luajit.outputs.cache-hit != 'true'
         shell: cmd
         run: |
+          echo "::notice ::Cache miss! Compiling LuaJIT..."
           cd vendor/luajit/src
           call msvcbuild.bat lua52compat
           if %errorlevel% neq 0 exit /b %errorlevel%
@@ -56,20 +57,28 @@ jobs:
           if not exist "%LUAJIT_BIN_DIR%\jit" mkdir "%LUAJIT_BIN_DIR%\jit"
           copy jit\*.lua "%LUAJIT_BIN_DIR%\jit\"
 
+      # 4. 如果命中了缓存，打印提示（可选，为了让你看着放心）
+      - name: Verify Cache Hit
+        if: steps.cache-luajit.outputs.cache-hit == 'true'
+        run: echo "::notice ::LuaJIT Cache Hit! Skipping compilation."
+
+      # 5. 上传产物给 Job 2 使用
+      # 注意：即使是缓存恢复出来的文件，也需要 upload 才能传给下一个 job
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: luajit-dist
           path: ${{ env.LUAJIT_BIN_DIR }}
           retention-days: 1
-          include-hidden-files: true # Just in case
+          include-hidden-files: true
 
   # ===========================================================================
   # Job 2: Run Tests
+  # 目标：下载现成的 LuaJIT 跑测试。即使挂了，Job 1 的缓存也依然在。
   # ===========================================================================
   test-suite:
-    name: Full Test Suite
-    needs: build-env
+    name: Run Tests
+    needs: build-luajit  # 依赖 Job 1
     runs-on: windows-latest
     env:
       LUAJIT_BIN_DIR: ${{ github.workspace }}\luajit_build
@@ -80,6 +89,7 @@ jobs:
         with:
           submodules: recursive
 
+      # 下载 Job 1 传过来的 LuaJIT (无论是刚编译的还是缓存的)
       - name: Download LuaJIT Artifact
         uses: actions/download-artifact@v4
         with:
