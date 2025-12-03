@@ -11,32 +11,45 @@ on:
     branches: ["main", "master"]
   workflow_dispatch:
 
+# 定义全局变量，方便两边 Job 使用同一个 Key
+env:
+  # [关键] 手动控制版本。如果你更新了 luajit 源码，请升级这个数字 (v4 -> v5)
+  LUAJIT_CACHE_KEY: windows-luajit-52compat-v4
+  LUAJIT_BIN_DIR: ${{ github.workspace }}\luajit_build
+
 jobs:
   # ===========================================================================
-  # Job 1: Build & Cache LuaJIT
-  # (编译成功即缓存，不受测试失败影响)
+  # Job 1: Build Keeper
+  # 职责：确保缓存里有东西。如果有，它什么都不做。如果没有，它负责编译并存入缓存。
   # ===========================================================================
   build-luajit:
-    name: Build LuaJIT
+    name: Ensure LuaJIT Cache
     runs-on: windows-latest
-    env:
-      LUAJIT_BIN_DIR: ${{ github.workspace }}\luajit_build
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Cache LuaJIT Build
+      # 1. 直接检查缓存是否存在 (不需要 Checkout 代码！)
+      - name: Check Cache
         id: cache-luajit
         uses: actions/cache@v3
         with:
           path: ${{ env.LUAJIT_BIN_DIR }}
-          key: ${{ runner.os }}-luajit-52compat-v3-${{ hashFiles('vendor/luajit/src/luajit.h') }}
-          
-      - name: Setup MSVC
+          key: ${{ env.LUAJIT_CACHE_KEY }}
+          lookup-only: true # [优化] 只检查存在性，不下载文件，节省时间
+
+      # 2. 只有当缓存【不存在】时，才需要 Checkout 代码
+      - name: Checkout (Only on Miss)
+        if: steps.cache-luajit.outputs.cache-hit != 'true'
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # 3. 只有当缓存【不存在】时，才配置环境
+      - name: Setup MSVC (Only on Miss)
         if: steps.cache-luajit.outputs.cache-hit != 'true'
         uses: ilammy/msvc-dev-cmd@v1
 
-      - name: Build LuaJIT (Run only on Cache Miss)
+      # 4. 只有当缓存【不存在】时，才编译
+      # 编译成功后，actions/cache 会在 Post 阶段自动保存缓存
+      - name: Build LuaJIT (Only on Miss)
         if: steps.cache-luajit.outputs.cache-hit != 'true'
         shell: cmd
         run: |
@@ -52,37 +65,31 @@ jobs:
           if not exist "%LUAJIT_BIN_DIR%\jit" mkdir "%LUAJIT_BIN_DIR%\jit"
           copy jit\*.lua "%LUAJIT_BIN_DIR%\jit\"
 
-      - name: Upload Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: luajit-dist
-          path: ${{ env.LUAJIT_BIN_DIR }}
-          retention-days: 1
-          include-hidden-files: true
-
   # ===========================================================================
   # Job 2: Run Tests
+  # 职责：下载缓存，签出测试代码，运行。
   # ===========================================================================
   test-suite:
     name: Run Tests
-    needs: build-luajit
+    needs: build-luajit # 必须等待 Job 1 确认缓存已就绪
     runs-on: windows-latest
-    env:
-      LUAJIT_BIN_DIR: ${{ github.workspace }}\luajit_build
-      
+    
     steps:
+      # 1. 签出你的源码 (这是必须的，因为要跑这里的测试代码)
       - name: Checkout Source Code
         uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      - name: Download LuaJIT Artifact
-        uses: actions/download-artifact@v4
+      # 2. 恢复 LuaJIT 缓存 (Job 1 保证了它一定存在)
+      - name: Restore LuaJIT from Cache
+        uses: actions/cache/restore@v3
         with:
-          name: luajit-dist
           path: ${{ env.LUAJIT_BIN_DIR }}
+          key: ${{ env.LUAJIT_CACHE_KEY }}
+          fail-on-cache-miss: true # [保险] 如果 Job 1 成功了但这里没找到缓存，直接报错
 
-      # [FIX] 这里使用了你提供的那个逻辑更完善的 PowerShell 脚本
+      # 3. 组装环境 (无需修改逻辑)
       - name: Assemble Test Environment
         shell: pwsh
         run: |
@@ -93,38 +100,29 @@ jobs:
           $lua   = New-Item -ItemType Directory -Path "stage/lua"
           $tests = New-Item -ItemType Directory -Path "stage/tests"
           
-          # 1. Binaries (LuaJIT)
+          # 1. Binaries (从缓存目录复制)
           Copy-Item "${{ env.LUAJIT_BIN_DIR }}\bin\*" $bin
           
-          # 2. Lua Libs - win-utils (智能检测目录结构)
+          # 2. Lua Libs
           $pkgDest = New-Item -ItemType Directory -Path "$lua/win-utils" -Force
-          
           if (Test-Path "win-utils\init.lua") {
-              Write-Host "Detected subdirectory structure for win-utils."
               Copy-Item "win-utils\*" $pkgDest -Recurse 
               if (Test-Path "win-utils\tests") { Copy-Item "win-utils\tests\*" $tests -Recurse }
           } elseif (Test-Path "init.lua") {
-              Write-Host "Detected root directory structure for win-utils."
               Get-ChildItem -Path . -Exclude ".git", ".github", "stage", "luajit_build", "vendor", "test_sandbox" | Copy-Item -Destination $pkgDest -Recurse
               if (Test-Path "tests") { Copy-Item "tests\*" $tests -Recurse }
-          } else {
-              Write-Error "Could not find init.lua in '.' or './win-utils'. Layout unknown."
           }
           
-          # 3. Deps - lua-ffi-bindings (修复了这里！增加了 Fallback 逻辑)
+          # 3. Deps
           if (Test-Path "vendor/lua-ffi-bindings/ffi") {
              Copy-Item "vendor/lua-ffi-bindings/ffi" "$lua" -Recurse
              if (Test-Path "vendor/lua-ffi-bindings/req.lua") { Copy-Item "vendor/lua-ffi-bindings/req.lua" "$lua/ffi/" }
           } elseif (Test-Path "vendor/lua-ffi-bindings/req.lua") {
-             # [FIX] 如果是扁平结构，手动创建 ffi 文件夹并拷入
-             Write-Host "Detected flat structure for lua-ffi-bindings."
              $ffiDest = New-Item -ItemType Directory -Path "$lua/ffi" -Force
              Copy-Item "vendor/lua-ffi-bindings/*" "$ffiDest" -Recurse -Exclude ".git"
-          } else {
-             Write-Warning "vendor/lua-ffi-bindings not found or structure unknown."
           }
           
-          # 4. Deps - lua-ext
+          # 4. Lua Ext
           if (Test-Path "vendor/lua-ext") {
              $extDir = New-Item -ItemType Directory -Path (Join-Path $lua.FullName "ext") -Force
              Copy-Item "vendor/lua-ext/*.lua" -Destination $extDir.FullName -Force
@@ -132,11 +130,9 @@ jobs:
              if (Test-Path $extLuaInside) { Move-Item -Path $extLuaInside -Destination $lua.FullName -Force }
           }
 
-          # 5. External Tools
           Invoke-WebRequest -Uri "https://raw.githubusercontent.com/bluebird75/luaunit/master/luaunit.lua" -OutFile "$lua/luaunit.lua"
           Invoke-WebRequest -Uri "https://raw.githubusercontent.com/daiaji/luafilesystem/main/lfs_ffi.lua" -OutFile "$lua/lfs_ffi.lua"
 
-          # 6. LuaJIT Libs
           Copy-Item "${{ env.LUAJIT_BIN_DIR }}\jit" "$lua/jit" -Recurse
 
           echo "TEST_STAGE=$($stage.FullName)" >> $env:GITHUB_ENV
