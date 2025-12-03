@@ -12,28 +12,30 @@ on:
   workflow_dispatch:
 
 jobs:
-  test-suite:
-    name: Full Test Suite (Windows)
+  # ===========================================================================
+  # Job 1: 编译 LuaJIT
+  # 只要这个 Job 成功，缓存就会被保存，不受测试失败影响
+  # ===========================================================================
+  build-env:
+    name: Build LuaJIT Environment
     runs-on: windows-latest
-    
     env:
       LUAJIT_BIN_DIR: ${{ github.workspace }}\.luajit
-      
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           submodules: recursive
 
+      # 缓存键基于 luajit.h 的哈希，只要文件没变，就命中缓存
       - name: Cache LuaJIT Build
         id: cache-luajit
         uses: actions/cache@v3
         with:
           path: ${{ env.LUAJIT_BIN_DIR }}
-          # [CHANGED] Update cache key to distinguish 5.2-compat build from standard build
-          key: ${{ runner.os }}-luajit-52compat-${{ hashFiles('vendor/luajit/src/luajit.h') }}
+          key: ${{ runner.os }}-luajit-52compat-v2-${{ hashFiles('vendor/luajit/src/luajit.h') }}
           restore-keys: |
-            ${{ runner.os }}-luajit-52compat-
+            ${{ runner.os }}-luajit-52compat-v2-
 
       - name: Setup MSVC
         if: steps.cache-luajit.outputs.cache-hit != 'true'
@@ -44,18 +46,47 @@ jobs:
         shell: cmd
         run: |
           cd vendor/luajit/src
-          
-          :: [CHANGED] Enable Lua 5.2 compatibility mode
           call msvcbuild.bat lua52compat
           if %errorlevel% neq 0 exit /b %errorlevel%
           
-          :: Prepare artifact directory
           if not exist "%LUAJIT_BIN_DIR%\bin" mkdir "%LUAJIT_BIN_DIR%\bin"
           copy luajit.exe "%LUAJIT_BIN_DIR%\bin\"
           copy lua51.dll "%LUAJIT_BIN_DIR%\bin\"
           
           if not exist "%LUAJIT_BIN_DIR%\jit" mkdir "%LUAJIT_BIN_DIR%\jit"
           copy jit\*.lua "%LUAJIT_BIN_DIR%\jit\"
+
+      # 将编译产物上传为 Artifact，供测试 Job 使用
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: luajit-dist
+          path: ${{ env.LUAJIT_BIN_DIR }}
+          retention-days: 1
+
+  # ===========================================================================
+  # Job 2: 运行测试
+  # 依赖 build-env，失败不影响缓存保存
+  # ===========================================================================
+  test-suite:
+    name: Full Test Suite
+    needs: build-env
+    runs-on: windows-latest
+    env:
+      LUAJIT_BIN_DIR: ${{ github.workspace }}\.luajit
+      
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # 下载 Job 1 编译好的 LuaJIT
+      - name: Download LuaJIT Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: luajit-dist
+          path: ${{ env.LUAJIT_BIN_DIR }}
 
       - name: Assemble Test Environment
         shell: pwsh
@@ -68,76 +99,51 @@ jobs:
           $lua   = New-Item -ItemType Directory -Path "stage/lua"
           $tests = New-Item -ItemType Directory -Path "stage/tests"
           
-          # 1. Binaries
+          # 1. Binaries (From Artifact)
           Copy-Item "${{ env.LUAJIT_BIN_DIR }}\bin\*" $bin
           
           # 2. Lua Libs
           
-          # A. win-utils (Library code + Tests)
+          # A. win-utils
           $pkgDest = New-Item -ItemType Directory -Path "$lua/win-utils" -Force
-          
           if (Test-Path "win-utils\init.lua") {
-              Write-Host "Detected subdirectory structure."
               Copy-Item "win-utils\*" $pkgDest -Recurse 
-              if (Test-Path "win-utils\tests") {
-                  Copy-Item "win-utils\tests\*" $tests -Recurse
-              }
+              if (Test-Path "win-utils\tests") { Copy-Item "win-utils\tests\*" $tests -Recurse }
           } elseif (Test-Path "init.lua") {
-              Write-Host "Detected root directory structure."
               Get-ChildItem -Path . -Exclude ".git", ".github", "stage", ".luajit", "vendor", "test_sandbox" | Copy-Item -Destination $pkgDest -Recurse
-              if (Test-Path "tests") {
-                  Copy-Item "tests\*" $tests -Recurse
-              }
-          } else {
-              Write-Error "Could not find init.lua in '.' or './win-utils'. Layout unknown."
-              exit 1
+              if (Test-Path "tests") { Copy-Item "tests\*" $tests -Recurse }
           }
           
-          # B. lua-ffi-bindings (Must exist for win-utils to work)
+          # B. lua-ffi-bindings
           if (Test-Path "vendor/lua-ffi-bindings/ffi") {
              Copy-Item "vendor/lua-ffi-bindings/ffi" "$lua" -Recurse
-             # Also copy the req.lua loader if it sits outside ffi folder
-             if (Test-Path "vendor/lua-ffi-bindings/req.lua") {
-                 Copy-Item "vendor/lua-ffi-bindings/req.lua" "$lua/ffi/"
-             }
+             if (Test-Path "vendor/lua-ffi-bindings/req.lua") { Copy-Item "vendor/lua-ffi-bindings/req.lua" "$lua/ffi/" }
           } elseif (Test-Path "vendor/lua-ffi-bindings/req.lua") {
-             # Fallback: Flat repo structure
              $ffiDest = New-Item -ItemType Directory -Path "$lua/ffi" -Force
              Copy-Item "vendor/lua-ffi-bindings/*" "$ffiDest" -Recurse -Exclude ".git"
-          } else {
-             Write-Warning "vendor/lua-ffi-bindings not found or structure unknown."
           }
           
-          # C. lua-ext (Required by win-utils)
+          # C. lua-ext
           if (Test-Path "vendor/lua-ext") {
-             Write-Host "Installing lua-ext from vendor..."
              $extDir = New-Item -ItemType Directory -Path (Join-Path $lua.FullName "ext") -Force
              Copy-Item "vendor/lua-ext/*.lua" -Destination $extDir.FullName -Force
-             
-             # Move stage/lua/ext/ext.lua -> stage/lua/ext.lua
              $extLuaInside = Join-Path $extDir.FullName "ext.lua"
-             if (Test-Path $extLuaInside) {
-                 Move-Item -Path $extLuaInside -Destination $lua.FullName -Force
-             }
-          } else {
-             Write-Warning "vendor/lua-ext not found. Tests may fail."
+             if (Test-Path $extLuaInside) { Move-Item -Path $extLuaInside -Destination $lua.FullName -Force }
           }
 
-          # D. LuaUnit & lfs_ffi
+          # D. Tools
           Invoke-WebRequest -Uri "https://raw.githubusercontent.com/bluebird75/luaunit/master/luaunit.lua" -OutFile "$lua/luaunit.lua"
           Invoke-WebRequest -Uri "https://raw.githubusercontent.com/daiaji/luafilesystem/main/lfs_ffi.lua" -OutFile "$lua/lfs_ffi.lua"
 
-          # E. JIT Libs
+          # E. JIT Libs (From Artifact)
           Copy-Item "${{ env.LUAJIT_BIN_DIR }}\jit" "$lua/jit" -Recurse
 
-          # Save Path
           echo "TEST_STAGE=$($stage.FullName)" >> $env:GITHUB_ENV
 
       - name: Run Tests
         shell: pwsh
         env:
-          # Add stage/tests to path for specs, stage/lua for libs
           LUA_PATH: ${{ env.TEST_STAGE }}\tests\?.lua;${{ env.TEST_STAGE }}\lua\?.lua;${{ env.TEST_STAGE }}\lua\?\init.lua;;
         run: |
-          Write-Host "Running tests in staged environment (PowerShell)..."
+          Write-Host "Running tests..."
           & "${{ env.TEST_STAGE }}\bin\luajit.exe" "${{ env.TEST_STAGE }}\tests\run_tests.lua" -v
