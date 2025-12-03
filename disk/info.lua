@@ -13,8 +13,12 @@ local function get_desc(h)
     local hdr = util.ioctl(h, defs.IOCTL.STORAGE_QUERY_PROPERTY, q, nil, "STORAGE_DEVICE_DESCRIPTOR")
     if not hdr then return nil end
     
-    local buf = util.ioctl(h, defs.IOCTL.STORAGE_QUERY_PROPERTY, q, nil, nil, hdr.Size)
-    if not buf then return nil end
+    -- [FIX] Explicitly allocate buffer. util.ioctl returns the buffer passed as 'out_type' (if cdata)
+    local buf = ffi.new("uint8_t[?]", hdr.Size)
+    if not util.ioctl(h, defs.IOCTL.STORAGE_QUERY_PROPERTY, q, nil, buf, hdr.Size) then 
+        return nil 
+    end
+    
     local desc = ffi.cast("STORAGE_DEVICE_DESCRIPTOR*", buf)
     
     local function s(off) return off > 0 and ffi.string(ffi.cast("char*", desc) + off):match("^%s*(.-)%s*$") or nil end
