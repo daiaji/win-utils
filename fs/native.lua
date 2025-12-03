@@ -21,19 +21,32 @@ local FILE_DISPOSITION_POSIX_SEMANTICS = 0x00000002
 local FILE_DISPOSITION_IGNORE_READONLY_ATTRIBUTE = 0x00000010
 
 local function open_file_native(path, access)
+    -- print("[NATIVE] Opening: " .. tostring(path))
+    local wpath = util.to_wide(path)
+    if not wpath then return nil, "Invalid path encoding" end
+
     local flags = bit.bor(C.FILE_FLAG_BACKUP_SEMANTICS, C.OPEN_EXISTING)
     local share = bit.bor(C.FILE_SHARE_READ, C.FILE_SHARE_WRITE, C.FILE_SHARE_DELETE)
     
-    local hFile = kernel32.CreateFileW(util.to_wide(path), access, share, nil, C.OPEN_EXISTING, C.FILE_FLAG_BACKUP_SEMANTICS, nil)
+    local hFile = kernel32.CreateFileW(wpath, access, share, nil, C.OPEN_EXISTING, C.FILE_FLAG_BACKUP_SEMANTICS, nil)
         
-    if hFile == ffi.cast("HANDLE", -1) then return nil, util.format_error() end
+    if hFile == ffi.cast("HANDLE", -1) then 
+        local err = kernel32.GetLastError()
+        -- print("[NATIVE] Open failed. Err=" .. err)
+        return nil, util.format_error(err) 
+    end
     return Handle.new(hFile)
 end
 
 function M.force_delete(path)
+    -- print("[NATIVE] force_delete entry: " .. tostring(path))
+    
     -- 1. 打开文件 (需 DELETE 权限)
-    local hFileObj = open_file_native(path, 0x00010000) -- DELETE
-    if not hFileObj then return false, "Open failed" end
+    local hFileObj, err = open_file_native(path, 0x00010000) -- DELETE
+    if not hFileObj then 
+        print("[NATIVE] Open failed: " .. tostring(err))
+        return false, "Open failed: " .. tostring(err) 
+    end
     
     -- 2. 使用 POSIX 语义删除 (Win10+)
     local iosb = ffi.new("IO_STATUS_BLOCK")
@@ -46,7 +59,9 @@ function M.force_delete(path)
     )
     
     -- FileDispositionInformationEx = 64
+    -- print("[NATIVE] Calling NtSetInformationFile...")
     local status = ntdll.NtSetInformationFile(hFileObj:get(), iosb, info_ex, ffi.sizeof(info_ex), 64)
+    -- print(string.format("[NATIVE] NtSetInformationFile status: 0x%X", status))
     
     -- RAII Close 触发删除
     hFileObj:close()

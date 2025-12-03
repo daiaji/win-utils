@@ -87,9 +87,19 @@ function TestCore:test_FS_BasicOps()
     
     -- Native Force Delete
     print("[TEST] Force Deleting: " .. moved)
-    local ok_del = win.fs.native.force_delete(moved)
-    print("[TEST] Delete result: " .. tostring(ok_del))
-    lu.assertTrue(ok_del, "Force delete failed")
+    
+    -- [DEBUG] Wrap in pcall to catch hidden errors
+    local status, ok_del, err_msg = pcall(function() 
+        return win.fs.native.force_delete(moved)
+    end)
+    
+    if not status then
+        print("[TEST] CRASH/ERROR in force_delete: " .. tostring(ok_del))
+        lu.fail("force_delete crashed: " .. tostring(ok_del))
+    end
+    
+    print("[TEST] Delete result: " .. tostring(ok_del) .. " (Msg: " .. tostring(err_msg) .. ")")
+    lu.assertTrue(ok_del, "Force delete failed: " .. tostring(err_msg))
     
     local f5 = io.open(moved, "r"); lu.assertNil(f5)
     print("[TEST] FS_BasicOps Done.")
