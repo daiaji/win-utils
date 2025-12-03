@@ -1,38 +1,45 @@
 local M = {}
 
--- 静态引入，防止元表干扰
-local volume = require 'win-utils.disk.volume'
+print("[DEBUG] Loading win-utils.disk (Eager Mode)...")
 
--- 惰性加载其他子模块
-local lazy = {
-    info      = "win-utils.disk.info",
-    physical  = "win-utils.disk.physical",
-    layout    = "win-utils.disk.layout",
-    vds       = "win-utils.disk.vds",
-    vhd       = "win-utils.disk.vhd",
-    format    = "win-utils.disk.format.init",
-    badblocks = "win-utils.disk.badblocks",
-    types     = "win-utils.disk.types",
-    defs      = "win-utils.disk.defs",
-    safety    = "win-utils.disk.safety",
-    subst     = "win-utils.disk.subst",
-    mount     = "win-utils.disk.mount",
-    esp       = "win-utils.disk.esp",
-    op        = "win-utils.disk.operation"
-}
+-- 显式加载所有子模块
+local function req(name)
+    print("[DEBUG]   - disk." .. name)
+    return require('win-utils.disk.' .. name)
+end
 
-setmetatable(M, {
-    __index = function(t, k)
-        if k == "volume" then
-            rawset(t, k, volume)
-            return volume
-        elseif lazy[k] then
-            local mod = require(lazy[k])
-            rawset(t, k, mod)
-            return mod
-        end
-        return nil
-    end
-})
+M.volume    = req('volume')
+M.info      = req('info')
+M.physical  = req('physical')
+M.layout    = req('layout')
+M.vds       = req('vds')
+M.vhd       = req('vhd')
+M.format    = req('format.init')
+M.badblocks = req('badblocks')
+M.types     = req('types')
+M.defs      = req('defs')
+M.safety    = req('safety')
+M.subst     = req('subst')
+M.mount     = req('mount')
+M.esp       = req('esp')
+M.op        = req('operation')
 
+-- [FIX] 补充测试中依赖的别名 (Facade Methods)
+print("[DEBUG] Binding facade methods for win-utils.disk...")
+
+if M.info and M.info.list_physical_drives then
+    M.list_drives = M.info.list_physical_drives
+    print("[DEBUG]   + list_drives -> info.list_physical_drives (OK)")
+else
+    print("[ERROR]   ! info.list_physical_drives MISSING")
+end
+
+if M.op then
+    -- 转发常用的操作函数到 disk 命名空间
+    M.prepare_drive = M.op.prepare_drive
+    M.format_partition = M.op.format_partition
+    M.clean_all = M.op.clean_all
+end
+
+print("[DEBUG] win-utils.disk loaded.")
 return M

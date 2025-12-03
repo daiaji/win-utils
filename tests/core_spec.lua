@@ -2,6 +2,8 @@ local lu = require('luaunit')
 local win = require('win-utils')
 local ffi = require('ffi')
 
+print("[DEBUG] core_spec loaded. win-utils available.")
+
 TestCore = {}
 
 function TestCore:setUp()
@@ -33,9 +35,9 @@ end
 -- ========================================================================
 function TestCore:test_LazyLoading()
     lu.assertNotIsNil(win.util, "Util should be preloaded")
-    -- 验证子模块按需加载
+    -- 验证子模块 (现在是 Eager Load，只要不为 nil 即可)
     local fs = win.fs
-    lu.assertIsTable(fs, "FS module should load on demand")
+    lu.assertIsTable(fs, "FS module should be loaded")
     lu.assertIsFunction(fs.copy, "FS copy function missing")
 end
 
@@ -141,8 +143,22 @@ end
 -- 磁盘 (Disk) 测试
 -- ========================================================================
 function TestCore:test_Disk_ListAndInfo()
+    print("[TEST] calling win.disk.list_drives()...")
+    if not win.disk.list_drives then
+        print("[TEST] ERROR: win.disk.list_drives is nil!")
+        -- Fallback check
+        if win.disk.info and win.disk.info.list_physical_drives then
+             print("[TEST] BUT win.disk.info.list_physical_drives exists.")
+        end
+    end
+
     local drives = win.disk.list_drives() -- 原 list() 现为 list_physical_drives
-    if drives and #drives > 0 then
+    
+    -- 如果是在 CI 的无头/无磁盘环境，drives 可能为空，但不能崩溃
+    lu.assertIsTable(drives)
+    print(string.format("[TEST] Found %d physical drives.", #drives))
+    
+    if #drives > 0 then
         lu.assertIsNumber(drives[1].index)
         lu.assertIsString(drives[1].model)
     end
