@@ -11,6 +11,12 @@ local token = require 'win-utils.process.token'
 local M = {}
 local C = ffi.C
 
+-- [DEBUG] Helper
+local function log(msg)
+    io.write(msg .. "\n")
+    io.stdout:flush()
+end
+
 ffi.cdef [[
     BOOL ConvertStringSidToSidW(LPCWSTR StringSid, PSID* Sid);
     
@@ -24,36 +30,82 @@ local FILE_DISPOSITION_DELETE = 0x00000001
 local FILE_DISPOSITION_POSIX_SEMANTICS = 0x00000002
 local FILE_DISPOSITION_IGNORE_READONLY_ATTRIBUTE = 0x00000010
 
-local function open_file_native(path, access)
-    print("[NATIVE] Opening: " .. tostring(path))
-    local wpath = util.to_wide(path)
-    if not wpath then return nil, "Invalid path encoding" end
+-- [DEBUG] Local safe to_wide implementation to isolate util.lua issues
+local function safe_to_wide(str)
+    if not str then return nil end
+    local len = #str
+    -- CP_UTF8 = 65001
+    local req = kernel32.MultiByteToWideChar(65001, 0, str, len, nil, 0)
+    if req == 0 then return nil end
+    local buf = ffi.new("wchar_t[?]", req + 1)
+    kernel32.MultiByteToWideChar(65001, 0, str, len, buf, req)
+    buf[req] = 0
+    return buf
+end
 
-    local flags = bit.bor(C.FILE_FLAG_BACKUP_SEMANTICS, C.OPEN_EXISTING)
-    local share = bit.bor(C.FILE_SHARE_READ, C.FILE_SHARE_WRITE, C.FILE_SHARE_DELETE)
+local function open_file_native(path, access)
+    log("[NATIVE] Opening: " .. tostring(path))
     
-    local hFile = kernel32.CreateFileW(wpath, access, share, nil, C.OPEN_EXISTING, C.FILE_FLAG_BACKUP_SEMANTICS, nil)
+    -- [DEBUG] Use local safe_to_wide and wrap in pcall
+    local status, wpath = pcall(safe_to_wide, path)
+    
+    if not status then
+        log("[NATIVE] safe_to_wide CRASHED: " .. tostring(wpath))
+        return nil, "Encoding crash"
+    end
+    
+    if not wpath then 
+        log("[NATIVE] safe_to_wide failed")
+        return nil, "Invalid path encoding" 
+    end
+    
+    log(string.format("[NATIVE] wpath ptr: %s", tostring(wpath)))
+
+    local flag_backup = 0x02000000 -- FILE_FLAG_BACKUP_SEMANTICS
+    local flag_exist = 3           -- OPEN_EXISTING
+    local share = 7                -- READ|WRITE|DELETE
+    local flags = bit.bor(flag_backup, flag_exist)
+    local creation = flag_exist
+    
+    log(string.format("[NATIVE] CreateFileW calling... Access=%X Share=%X", access, share))
+    
+    -- CreateFileW(LPCWSTR, DWORD, DWORD, void*, DWORD, DWORD, HANDLE)
+    local hFile = kernel32.CreateFileW(
+        wpath, 
+        ffi.cast("DWORD", access), 
+        ffi.cast("DWORD", share), 
+        nil, 
+        ffi.cast("DWORD", creation), 
+        ffi.cast("DWORD", flag_backup), -- FlagsAndAttributes
+        nil
+    )
+    
+    log("[NATIVE] CreateFileW returned: " .. tostring(hFile))
         
     if hFile == ffi.cast("HANDLE", -1) then 
         local err = kernel32.GetLastError()
-        print("[NATIVE] Open failed. Err=" .. err)
+        log("[NATIVE] Open failed. Err=" .. err)
         return nil, util.format_error(err) 
     end
-    return Handle.new(hFile)
+    
+    log("[NATIVE] Wrapping handle...")
+    local hObj = Handle.new(hFile)
+    log("[NATIVE] Handle wrapped.")
+    return hObj
 end
 
 function M.force_delete(path)
-    print("[NATIVE] force_delete entry: " .. tostring(path))
+    log("[NATIVE] force_delete entry: " .. tostring(path))
     
     -- 1. 打开文件 (需 DELETE 权限)
     local hFileObj, err = open_file_native(path, 0x00010000) -- DELETE
     if not hFileObj then 
-        print("[NATIVE] Open failed: " .. tostring(err))
+        log("[NATIVE] Open failed: " .. tostring(err))
         return false, "Open failed: " .. tostring(err) 
     end
     
+    log("[NATIVE] Allocating IO_STATUS_BLOCK...")
     -- 2. 尝试使用 POSIX 语义删除 (Win10 1709+)
-    -- 这种方式支持立即删除，且即使文件被设置为只读也能删除
     local iosb = ffi.new("IO_STATUS_BLOCK")
     local info_ex = ffi.new("FILE_DISPOSITION_INFO_EX")
     
@@ -63,24 +115,26 @@ function M.force_delete(path)
         FILE_DISPOSITION_IGNORE_READONLY_ATTRIBUTE
     )
     
-    print("[NATIVE] Calling NtSetInformationFile (Class 64)...")
+    log("[NATIVE] Calling NtSetInformationFile (Class 64)... Handle=" .. tostring(hFileObj:get()))
     -- FileDispositionInformationEx = 64
     local status = ntdll.NtSetInformationFile(hFileObj:get(), iosb, info_ex, ffi.sizeof(info_ex), 64)
-    print(string.format("[NATIVE] Class 64 Result: 0x%X", status))
+    log(string.format("[NATIVE] Class 64 Result: 0x%X", status))
     
-    -- 3. 如果 POSIX 删除失败 (例如系统版本低，或文件系统不支持)，尝试传统删除
+    -- 3. 如果 POSIX 删除失败，尝试传统删除
     if status < 0 then
-        print("[NATIVE] Fallback to classic DeleteFile logic (Class 13)...")
+        log("[NATIVE] Fallback to classic DeleteFile logic (Class 13)...")
         local info = ffi.new("FILE_DISPOSITION_INFORMATION")
         info.DeleteFile = 1
         
         -- FileDispositionInformation = 13
         status = ntdll.NtSetInformationFile(hFileObj:get(), iosb, info, ffi.sizeof(info), 13)
-        print(string.format("[NATIVE] Class 13 Result: 0x%X", status))
+        log(string.format("[NATIVE] Class 13 Result: 0x%X", status))
     end
     
-    -- RAII Close 触发删除 (如果是传统模式)
+    log("[NATIVE] Closing handle...")
+    -- RAII Close 触发删除
     hFileObj:close()
+    log("[NATIVE] Handle closed.")
     
     if status < 0 then 
         return false, string.format("Delete failed: 0x%X", status) 

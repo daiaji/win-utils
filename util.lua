@@ -5,10 +5,18 @@ local M = {}
 local CP_UTF8 = 65001
 local scratch_buf = ffi.new("wchar_t[32768]") 
 
+local function log(msg)
+    io.write(msg .. "\n")
+    io.stdout:flush()
+end
+
 function M.to_wide(str, use_scratch)
     if not str then return nil end
     local len = #str
-    -- print("[UTIL] to_wide len=" .. len) -- Extremely verbose
+    
+    -- [DEBUG] Print to verify call
+    log(string.format("[UTIL] to_wide: '%s' (len=%d)", str, len))
+    
     if use_scratch and len < 8192 then 
         local req = kernel32.MultiByteToWideChar(CP_UTF8, 0, str, len, scratch_buf, 32768)
         if req > 0 then scratch_buf[req] = 0; return scratch_buf end
@@ -16,7 +24,11 @@ function M.to_wide(str, use_scratch)
     
     -- Ensure explicit 0 termination length calculation
     local req = kernel32.MultiByteToWideChar(CP_UTF8, 0, str, len, nil, 0)
-    if req == 0 then return nil end -- Fail safe
+    if req == 0 then 
+        local err = kernel32.GetLastError()
+        log("[UTIL] MultiByteToWideChar (len) failed. Err=" .. err)
+        return nil 
+    end 
     
     local buf = ffi.new("wchar_t[?]", req + 1)
     kernel32.MultiByteToWideChar(CP_UTF8, 0, str, len, buf, req)
@@ -32,8 +44,6 @@ function M.from_wide(wstr, len)
     
     local buf = ffi.new("char[?]", req)
     kernel32.WideCharToMultiByte(CP_UTF8, 0, wstr, len, buf, req, nil, nil)
-    -- If len was -1, req includes the null terminator. If not, string might be raw.
-    -- ffi.string handles length correctly.
     if len == -1 then return ffi.string(buf, req - 1) end
     return ffi.string(buf, req)
 end
