@@ -16,13 +16,12 @@ function M.open_process_token(pid, access)
         print("[TOKEN] OpenProcess failed")
         return nil, util.format_error() 
     end
-    -- local procGuard = Handle.guard(hProcess) -- 暂时注释掉 guard，排除 GC 干扰
     
     local hToken = ffi.new("HANDLE[1]")
     print("[TOKEN] Calling NtOpenProcessToken...")
     local status = ntdll.NtOpenProcessToken(hProcess, bit.bor(0x0020, 0x0008), hToken)
     
-    kernel32.CloseHandle(hProcess) -- 手动关闭
+    kernel32.CloseHandle(hProcess) 
     
     if status < 0 then 
         print(string.format("[TOKEN] NtOpenProcessToken failed: 0x%X", status))
@@ -30,7 +29,11 @@ function M.open_process_token(pid, access)
     end
     
     print(string.format("[TOKEN] Token opened: %s", tostring(hToken[0])))
-    return Handle.new(hToken[0])
+    
+    -- [DEBUG] Separate handle creation
+    local safe = Handle.new(hToken[0])
+    print("[TOKEN] Handle wrapped successfully")
+    return safe
 end
 
 function M.set_privilege(token_handle, priv_name, enable)
@@ -39,11 +42,8 @@ function M.set_privilege(token_handle, priv_name, enable)
     local raw = (type(token_handle)=="table" and token_handle.get) and token_handle:get() or token_handle
     local luid = ffi.new("LUID_NT")
     
-    print("[TOKEN] to_wide...")
-    local wname = util.to_wide(priv_name)
-    
     print("[TOKEN] LookupPrivilegeValueW...")
-    if advapi32.LookupPrivilegeValueW(nil, wname, ffi.cast("LUID*", luid)) == 0 then 
+    if advapi32.LookupPrivilegeValueW(nil, util.to_wide(priv_name), ffi.cast("LUID*", luid)) == 0 then 
         print("[TOKEN] LookupPrivilegeValueW failed")
         return false 
     end
@@ -63,31 +63,29 @@ end
 function M.enable_privilege(name)
     print("[TOKEN] enable_privilege entry: " .. tostring(name))
     local pid = kernel32.GetCurrentProcessId()
-    print("[TOKEN] Current PID: " .. tostring(pid))
     
     local hToken, err = M.open_process_token(pid, C.PROCESS_QUERY_INFORMATION)
-    if not hToken then 
-        print("[TOKEN] Failed to open token: " .. tostring(err))
-        return false, err 
-    end
+    if not hToken then return false, err end
     
+    print("[TOKEN] Calling set_privilege...")
     local ok = M.set_privilege(hToken, name, true)
+    
+    print("[TOKEN] Closing token...")
     hToken:close()
+    
+    print("[TOKEN] Done.")
     return ok
 end
 
+-- ... get_user / get_integrity_level / is_elevated (keep as is) ...
 function M.get_user(token_handle)
     local raw = (type(token_handle)=="table" and token_handle.get) and token_handle:get() or token_handle
     local buf = ffi.new("uint8_t[1024]")
     local len = ffi.new("ULONG[1]")
-    
-    -- TokenUser = 1
     if ntdll.NtQueryInformationToken(raw, 1, buf, 1024, len) < 0 then return nil end
-    
     local user = ffi.cast("SID_AND_ATTRIBUTES*", buf)
     local str_sid = ffi.new("LPWSTR[1]")
     if advapi32.ConvertSidToStringSidW(user.Sid, str_sid) == 0 then return nil end
-    
     local res = util.from_wide(str_sid[0])
     kernel32.LocalFree(str_sid[0])
     return res
@@ -97,13 +95,10 @@ function M.get_integrity_level(token_handle)
     local raw = (type(token_handle)=="table" and token_handle.get) and token_handle:get() or token_handle
     local buf = ffi.new("uint8_t[1024]")
     local len = ffi.new("ULONG[1]")
-    
     if ntdll.NtQueryInformationToken(raw, 25, buf, 1024, len) < 0 then return nil end
-    
     local label = ffi.cast("TOKEN_MANDATORY_LABEL*", buf)
     local count = ffi.cast("uint8_t*", label.Label.Sid)[1]
     local rid = ffi.cast("DWORD*", ffi.cast("uint8_t*", label.Label.Sid) + 8 + (count-1)*4)[0]
-    
     if rid < 0x1000 then return "Untrusted"
     elseif rid < 0x2000 then return "Low"
     elseif rid < 0x3000 then return "Medium"

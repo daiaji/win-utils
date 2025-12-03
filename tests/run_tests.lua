@@ -1,5 +1,14 @@
-local luaunit = require('luaunit')
 local ffi = require 'ffi'
+
+-- [CRITICAL] Disable JIT to prevent FFI stability issues during tests
+-- Many FFI crashes/hangs are due to JIT compilation of bad cdefs or callbacks
+if jit then 
+    jit.off() 
+    jit.flush()
+    print("[INIT] JIT Disabled for stability.")
+end
+
+local luaunit = require('luaunit')
 
 -- 强制刷新缓冲区，确保 CI 日志实时输出
 io.stdout:setvbuf('no')

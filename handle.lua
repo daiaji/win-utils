@@ -8,6 +8,7 @@ local NULL_HANDLE = ffi.cast("HANDLE", 0)
 local SafeHandle = class()
 
 function SafeHandle:init(handle, closer)
+    -- print(string.format("[HANDLE] init: %s", tostring(handle)))
     self.handle = handle
     
     -- [CRITICAL FIX] Capture closer in local scope to avoid 'self' capture in GC
@@ -16,9 +17,11 @@ function SafeHandle:init(handle, closer)
     
     if self:is_valid() then
         -- FFI GC Anchor
+        -- print("[HANDLE] setting ffi.gc...")
         ffi.gc(self.handle, function(h)
             -- Only use 'h' (the cdata itself) and 'close_func' (upvalue)
             if h ~= INVALID and h ~= NULL_HANDLE then 
+                -- print("[HANDLE] GC closing: " .. tostring(h))
                 close_func(h) 
             end
         end)
