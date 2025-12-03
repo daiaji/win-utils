@@ -1,5 +1,7 @@
 local ffi = require 'ffi'
 local bit = require 'bit'
+
+print("[PROCESS] Loading deps...")
 local kernel32 = require 'ffi.req' 'Windows.sdk.kernel32'
 local user32 = require 'ffi.req' 'Windows.sdk.user32'
 local psapi = require 'ffi.req' 'Windows.sdk.psapi'
@@ -14,10 +16,15 @@ local INVALID_HANDLE = ffi.cast("HANDLE", -1)
 local M = {}
 
 -- 导出子模块
+print("[PROCESS] Loading submodule: token")
 M.token  = require 'win-utils.process.token'
+print("[PROCESS] Loading submodule: memory")
 M.memory = require 'win-utils.process.memory'
+print("[PROCESS] Loading submodule: handle")
 M.handle = require 'win-utils.process.handle'
+print("[PROCESS] Loading submodule: job")
 M.job    = require 'win-utils.process.job'
+print("[PROCESS] Loading submodule: module")
 M.module = require 'win-utils.process.module'
 
 M.constants = {
@@ -313,7 +320,16 @@ function M.wait_close(np, t)
     return r==0 
 end
 
-function M.enable_privilege() M.token.enable_privilege("SeDebugPrivilege") end
-M.enable_privilege()
+function M.enable_privilege() 
+    -- [DEBUG] Trace privilege enabling
+    print("[PROCESS] Enabling SeDebugPrivilege...")
+    local ok, err = M.token.enable_privilege("SeDebugPrivilege") 
+    print(string.format("[PROCESS] SeDebugPrivilege result: %s (Err: %s)", tostring(ok), tostring(err)))
+end
 
+-- [DEBUG] Temporarily protect execution to avoid hang on load
+local ok, err = pcall(M.enable_privilege)
+if not ok then print("[PROCESS] Failed to auto-enable privilege: " .. tostring(err)) end
+
+print("[PROCESS] Module loaded.")
 return M

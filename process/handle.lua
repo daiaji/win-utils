@@ -7,6 +7,8 @@ local native = require 'win-utils.native'
 local M = {}
 local C = ffi.C
 
+print("[HANDLE] Loading...")
+
 local function resolve_nt_path(dos_path)
     local buf = ffi.new("wchar_t[1024]")
     local clean_path = dos_path:gsub("\\$", "")
@@ -50,7 +52,7 @@ function M.find_locking_pids(device_path)
     if not target_nt_path then return {} end
     target_nt_path = target_nt_path:lower()
     
-    -- 获取所有 PID
+    -- [Lazy Load] win-utils.process (Break circular dep with handle.lua)
     local proc_mod = require 'win-utils.process'
     
     local locking_pids = {}
@@ -120,4 +122,5 @@ function M.close_remote_handle(pid, handle_val)
     return true
 end
 
+print("[HANDLE] Loaded.")
 return M
