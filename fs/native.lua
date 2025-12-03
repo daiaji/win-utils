@@ -13,6 +13,10 @@ local C = ffi.C
 
 ffi.cdef [[
     BOOL ConvertStringSidToSidW(LPCWSTR StringSid, PSID* Sid);
+    
+    typedef struct _FILE_DISPOSITION_INFORMATION {
+        BOOLEAN DeleteFile;
+    } FILE_DISPOSITION_INFORMATION;
 ]]
 
 -- [FIX] Define constants locally to ensure stability regardless of SDK bindings
@@ -21,7 +25,7 @@ local FILE_DISPOSITION_POSIX_SEMANTICS = 0x00000002
 local FILE_DISPOSITION_IGNORE_READONLY_ATTRIBUTE = 0x00000010
 
 local function open_file_native(path, access)
-    -- print("[NATIVE] Opening: " .. tostring(path))
+    print("[NATIVE] Opening: " .. tostring(path))
     local wpath = util.to_wide(path)
     if not wpath then return nil, "Invalid path encoding" end
 
@@ -32,14 +36,14 @@ local function open_file_native(path, access)
         
     if hFile == ffi.cast("HANDLE", -1) then 
         local err = kernel32.GetLastError()
-        -- print("[NATIVE] Open failed. Err=" .. err)
+        print("[NATIVE] Open failed. Err=" .. err)
         return nil, util.format_error(err) 
     end
     return Handle.new(hFile)
 end
 
 function M.force_delete(path)
-    -- print("[NATIVE] force_delete entry: " .. tostring(path))
+    print("[NATIVE] force_delete entry: " .. tostring(path))
     
     -- 1. 打开文件 (需 DELETE 权限)
     local hFileObj, err = open_file_native(path, 0x00010000) -- DELETE
@@ -48,7 +52,8 @@ function M.force_delete(path)
         return false, "Open failed: " .. tostring(err) 
     end
     
-    -- 2. 使用 POSIX 语义删除 (Win10+)
+    -- 2. 尝试使用 POSIX 语义删除 (Win10 1709+)
+    -- 这种方式支持立即删除，且即使文件被设置为只读也能删除
     local iosb = ffi.new("IO_STATUS_BLOCK")
     local info_ex = ffi.new("FILE_DISPOSITION_INFO_EX")
     
@@ -58,12 +63,23 @@ function M.force_delete(path)
         FILE_DISPOSITION_IGNORE_READONLY_ATTRIBUTE
     )
     
+    print("[NATIVE] Calling NtSetInformationFile (Class 64)...")
     -- FileDispositionInformationEx = 64
-    -- print("[NATIVE] Calling NtSetInformationFile...")
     local status = ntdll.NtSetInformationFile(hFileObj:get(), iosb, info_ex, ffi.sizeof(info_ex), 64)
-    -- print(string.format("[NATIVE] NtSetInformationFile status: 0x%X", status))
+    print(string.format("[NATIVE] Class 64 Result: 0x%X", status))
     
-    -- RAII Close 触发删除
+    -- 3. 如果 POSIX 删除失败 (例如系统版本低，或文件系统不支持)，尝试传统删除
+    if status < 0 then
+        print("[NATIVE] Fallback to classic DeleteFile logic (Class 13)...")
+        local info = ffi.new("FILE_DISPOSITION_INFORMATION")
+        info.DeleteFile = 1
+        
+        -- FileDispositionInformation = 13
+        status = ntdll.NtSetInformationFile(hFileObj:get(), iosb, info, ffi.sizeof(info), 13)
+        print(string.format("[NATIVE] Class 13 Result: 0x%X", status))
+    end
+    
+    -- RAII Close 触发删除 (如果是传统模式)
     hFileObj:close()
     
     if status < 0 then 
