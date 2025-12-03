@@ -1,4 +1,4 @@
-# **System Protocol: LuaJIT FFI & C++ Interop Core Guidelines (v3.2)**
+# **System Protocol: LuaJIT FFI & C++ Interop Core Guidelines (v3.4)**
 
 **Context:** 本文档定义了 LuaJIT (v2.1) + C/C++ 混合架构的最高代码准则。
 **Environment:**
@@ -24,6 +24,8 @@
     *   **Rule:** Lua 的 `number` 是 `double`，只有 53 位精度。定义 >53 位的常量必须加 `ULL` 后缀（如 `0x80...ULL`）。
 5.  **🔠 Encoding Guard:** "传递给 Windows API 的字符串是否已转为 UTF-16？"
     *   **Rule:** 严禁将 Lua 字符串直接强转为 `wchar_t*`。必须使用 `util.to_wide`。
+6.  **🧩 Dependency Check:** "使用的类型（如 `NTSTATUS`, `PVOID`）在当前 `cdef` 中是否已定义？"
+    *   **Rule:** FFI 不会自动导入系统头文件。不要假设 `minwindef` 包含所有类型。必须显式定义。
 
 ---
 
@@ -229,7 +231,7 @@ void HandlePtr(lua_State* L, int idx) {
 
 ### **3. 禁止隐式类型 (No Implicit Types)**
 *   **机制:** FFI 环境是裸环境，没有标准库头文件。
-*   **Rule:** 不要假设 `SIZE_T`, `WCHAR`, `HMODULE` 等类型存在，除非显式 `typedef` 过。
+*   **Rule:** 不要假设 `SIZE_T`, `WCHAR`, `HMODULE`, `NTSTATUS` 等类型存在，除非显式 `typedef` 过。
 *   **Action:** 在 `cdef` 顶部显式定义所有非基础类型。
 
 ---
@@ -239,10 +241,11 @@ void HandlePtr(lua_State* L, int idx) {
 **Context:** 针对 Windows FFI 绑定的常见错误总结。
 
 ### **1. Windows 扩展类型完备性 (Complete Type Specs)**
-*   **错误:** 使用 `PCHAR`, `PHANDLE`, `PDEVINST`, `SC_HANDLE`, `UINT8` 等类型时报错。
-*   **Rule:** FFI 默认不包含任何 Windows 扩展类型。
-*   **Action:** 必须在基础定义文件（如 `minwindef.lua`）中**显式定义**所有指针别名（`P-`前缀）和定长类型（`UINT8`, `INT32` 等）。
+*   **错误:** `declaration specifier expected near 'NTSTATUS'` / `PCHAR` / `UINT8`。
+*   **Rule:** FFI 默认不包含任何 Windows 扩展类型，也不包含 `NTSTATUS`。
+*   **Action:** 必须在基础定义文件（如 `minwindef.lua`）中定义，或者在模块头部**显式补全**。
     ```c
+    typedef LONG NTSTATUS; /* 必须显式定义! */
     typedef char *PCHAR;
     typedef void *SC_HANDLE;
     typedef unsigned char UINT8;
@@ -261,3 +264,65 @@ void HandlePtr(lua_State* L, int idx) {
 
 ### **4. COM 接口定义链 (COM Chain)**
 *   **Rule:** 定义 COM 接口时，必须先定义基类 `IUnknown` 及其 `Vtbl`，不能只做前向声明。
+
+---
+
+## **指令十二：常见报错与自修复 (Error Registry)**
+
+**Context:** 遇到以下 FFI 报错时的标准修复动作。
+
+### **1. 未定义类型 (Undefined Type)**
+*   **Error:** `declaration specifier expected near 'NTSTATUS'` / `near 'PVOID'`
+*   **Cause:** FFI 解析器找不到类型定义。即使依赖了 `minwindef`，如果 `minwindef` 没定义该类型（例如 `NTSTATUS` 通常不在 minwindef 中），也会报错。
+*   **Action:** 立即在当前 `ffi.cdef` 的顶部添加 `typedef`。
+    *   `NTSTATUS` -> `typedef LONG NTSTATUS;`
+    *   `PVOID` -> `typedef void *PVOID;`
+
+### **2. 符号未找到 (Symbol Not Found)**
+*   **Error:** `cannot resolve symbol 'GetProcAddress'`
+*   **Cause:** 函数名可能有 A/W 后缀，或者是宏。
+*   **Action:** 检查 Windows API 文档，通常需要加 `W` (如 `GetProcAddress` 实际上通常绑定不到，它是 `kernel32` 的导出函数，但在 FFI 中最好直接用 `ffi.C.GetProcAddress` 如果已加载库，或者明确指定 `GetProcAddress` 仅针对 ANSI)。注意：大部分 Windows API 在 Lua 中应绑定 `W` 版本（如 `CreateFileW`）。
+
+---
+
+## **指令十三：参数位运算与枚举隔离 (Parameter Isolation)**
+
+**Context:** C API 中不同参数的枚举值（Enum/Flag）可能具有相同的数值。
+
+### **1. 严禁跨参数位运算合并 (No Cross-Param Bitwise OR)**
+*   **陷阱:** `ParamA` 的 `FLAG_X` 值可能是 1，`ParamB` 的 `FLAG_Y` 值也可能是 1。
+*   **错误:** `local flags = bit.bor(FLAG_X, FLAG_Y); Call(flags, flags)`。这将导致 `ParamB` 意外收到 `FLAG_Y` 的效果。
+*   **案例:** `SetupCopyOEMInfW` 中，`MediaType=SPOST_PATH(1)` 与 `CopyStyle=SP_COPY_DELETESOURCE(1)` 数值相同。若将两者混淆，会导致**源文件被删除**。
+*   **Rule:** 必须严格对照 API 签名，**分离**不同参数的变量。严禁将不同参数的 Flag 混合在一个变量中。
+
+---
+
+## **指令十四：库实例与全局 C 空间分离 (Library vs ffi.C)**
+
+**Context:** `ffi.load` 和 `ffi.cdef` 的作用域是完全隔离的。
+
+### **1. 访问常量/枚举/结构体 (Accessing Types/Consts)**
+*   **机制:** `ffi.cdef` 中定义的所有内容（`static const`, `enum`, `typedef`, `struct`）都属于 **LuaJIT 全局 C 命名空间**。
+*   **❌ 错误:** `local lib = ffi.load("mylib"); local val = lib.MY_CONST`。`lib` userdata 仅包含导出函数，不包含 cdef 定义的常量。
+*   **✅ 正确:** `local C = ffi.C; local val = C.MY_CONST`。
+
+### **2. 访问导出函数 (Accessing Functions)**
+*   **机制:** 动态库导出函数（如 `CreateFileW`）必须通过 `ffi.load` 返回的实例调用。
+*   **Rule:** 函数调用 `lib.Func()`，常量访问 `ffi.C.CONST`。
+
+---
+
+## **指令十五：原子化与全量交付协议 (Atomic Delivery)**
+
+**Context:** 之前的错误往往源于“只修改片段”导致的上下文丢失（例如忘记 `require`，或者修改了 `cdef` 但未更新调用逻辑）。
+
+### **1. 禁止省略号 (No Ellipsis Policy)**
+*   **Rule:** 在生成代码时，**严禁**使用 `...`、`// ... same as before ...` 等省略符。
+*   **Rationale:** 任何省略都会导致上下文断裂，使得代码无法直接运行或测试。必须输出**完整、可运行**的文件内容。
+
+### **2. 依赖一致性检查 (Dependency Consistency)**
+*   **Rule:** 修改任何文件（如 `ffi/newdev.lua`）时，必须同时检查并输出所有依赖该文件的上层模块（如 `driver.lua`）。
+*   **Rationale:** FFI 绑定的变更通常伴随着调用逻辑的变更。孤立的修改是 Bug 之源。
+
+### **3. 单一文件完整性 (Single Source of Truth)**
+*   **Rule:** 每次输出必须包含完整的 `require` 头和 `return` 尾。不要假设用户知道上下文。

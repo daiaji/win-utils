@@ -14,6 +14,16 @@ M.shell          = require 'win-utils.shell'
 M.hotkey         = require 'win-utils.hotkey'
 M.service        = require 'win-utils.service'
 
+M.display        = require 'win-utils.display'
+M.desktop        = require 'win-utils.desktop'
+M.driver         = require 'win-utils.driver'
+
+-- [NEW] System & Memory
+M.pagefile       = require 'win-utils.system.pagefile'
+
+-- [NEW] WIM Imaging Support (MOUN)
+M.wim            = require 'win-utils.wim'
+
 -- Network Submodule
 M.net            = require 'win-utils.net' 
 
@@ -38,6 +48,12 @@ M.disk.layout    = require 'win-utils.disk.layout'
 M.disk.vds       = require 'win-utils.disk.vds'
 M.disk.vhd       = require 'win-utils.disk.vhd'
 M.disk.types     = require 'win-utils.disk.types'
+
+-- [NEW] Disk Extensions
+M.disk.subst     = require 'win-utils.disk.subst'
+
+-- [NEW] FS Extensions
+M.fs.native      = require 'win-utils.fs.native'
 
 -- Enhanced Operations
 M.disk.op        = require 'win-utils.disk.operation'

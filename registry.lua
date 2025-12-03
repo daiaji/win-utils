@@ -2,7 +2,10 @@ local ffi = require 'ffi'
 local bit = require 'bit'
 local advapi32 = require 'ffi.req' 'Windows.sdk.advapi32'
 local kernel32 = require 'ffi.req' 'Windows.sdk.kernel32'
+local ntdll = require 'ffi.req' 'Windows.sdk.ntdll'
 local util = require 'win-utils.util'
+local native = require 'win-utils.native'
+local token = require 'win-utils.process.token'
 
 local C = ffi.C
 
@@ -193,6 +196,89 @@ function M.delete_key(root_str, sub_str, recursive)
     else
         return advapi32.RegDeleteKeyW(hRoot, wSub) == 0
     end
+end
+
+-- [NEW] Native Hive Operations
+-- Requires SeRestorePrivilege/SeBackupPrivilege
+
+-- Load a registry hive from a file
+-- @param key_path: Target registry key (e.g. "\\Registry\\Machine\\PE_SYSTEM")
+-- @param file_path: Source file (DOS path, e.g. "C:\\Windows\\System32\\Config\\SYSTEM")
+-- @param as_volatile: Load as volatile (memory only, not saved on unload)
+function M.load_hive(key_path, file_path, as_volatile)
+    token.enable_privilege("SeRestorePrivilege")
+    
+    local nt_file_path = native.dos_path_to_nt_path(file_path)
+    
+    local oa_key, anchor_key = native.init_object_attributes(key_path, nil, C.OBJ_CASE_INSENSITIVE)
+    local oa_file, anchor_file = native.init_object_attributes(nt_file_path, nil, C.OBJ_CASE_INSENSITIVE)
+    
+    local flags = 0
+    if as_volatile then
+        -- REG_NO_LAZY_FLUSH | REG_WHOLE_HIVE_VOLATILE ?
+        -- SystemInformer uses specific flags, here we support basic or volatile.
+        -- REG_WHOLE_HIVE_VOLATILE = 0x00000001L
+        flags = 0x00000001
+    end
+    
+    -- NtLoadKeyEx(Target, Source, Flags, Trust, Event, Access, RootHandle, Reserved)
+    -- We use NtLoadKey if no flags, else NtLoadKeyEx
+    local status
+    if flags == 0 then
+        status = ntdll.NtLoadKey(oa_key, oa_file)
+    else
+        status = ntdll.NtLoadKeyEx(oa_key, oa_file, flags, nil, nil, 0, nil, nil)
+    end
+    
+    -- Keep alive
+    local _ = { anchor_key, anchor_file }
+    
+    if status < 0 then return false, string.format("NtLoadKey failed: 0x%X", status) end
+    return true
+end
+
+-- Unload a registry hive
+-- @param key_path: Target registry key (e.g. "\\Registry\\Machine\\PE_SYSTEM")
+function M.unload_hive(key_path)
+    token.enable_privilege("SeRestorePrivilege")
+    
+    local oa_key, anchor_key = native.init_object_attributes(key_path, nil, C.OBJ_CASE_INSENSITIVE)
+    
+    local status = ntdll.NtUnloadKey(oa_key)
+    
+    local _ = anchor_key
+    
+    if status < 0 then return false, string.format("NtUnloadKey failed: 0x%X", status) end
+    return true
+end
+
+-- Save a registry key to a hive file
+-- @param key_handle: Handle to open key (must be valid)
+-- @param file_path: Target file (DOS path)
+function M.save_hive(key_handle, file_path)
+    token.enable_privilege("SeBackupPrivilege")
+    
+    local nt_file_path = native.dos_path_to_nt_path(file_path)
+    
+    -- NtSaveKey requires a FILE HANDLE, not a path.
+    -- We must create the file first with native NtCreateFile or CreateFileW
+    
+    local hFile = kernel32.CreateFileW(util.to_wide(file_path), 
+        bit.bor(C.GENERIC_READ, C.GENERIC_WRITE), 
+        0, -- No share
+        nil, 
+        C.CREATE_ALWAYS, 
+        C.FILE_ATTRIBUTE_NORMAL, 
+        nil)
+        
+    if hFile == ffi.cast("HANDLE", -1) then return false, "CreateFile failed: " .. util.format_error() end
+    
+    local status = ntdll.NtSaveKey(ffi.cast("HANDLE", key_handle), hFile)
+    
+    kernel32.CloseHandle(hFile)
+    
+    if status < 0 then return false, string.format("NtSaveKey failed: 0x%X", status) end
+    return true
 end
 
 return M
