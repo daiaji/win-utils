@@ -14,7 +14,7 @@ on:
 jobs:
   # ===========================================================================
   # Job 1: Build & Cache LuaJIT
-  # 目标：只要编译成功一次，就永久缓存，不受测试失败影响
+  # (编译成功即缓存，不受测试失败影响)
   # ===========================================================================
   build-luajit:
     name: Build LuaJIT
@@ -25,22 +25,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 1. 尝试恢复缓存
       - name: Cache LuaJIT Build
         id: cache-luajit
         uses: actions/cache@v3
         with:
           path: ${{ env.LUAJIT_BIN_DIR }}
-          # 缓存键：基于 OS 和 luajit.h 的哈希。
-          # 只要 luajit 源码不动，这里永远命中。
           key: ${{ runner.os }}-luajit-52compat-v3-${{ hashFiles('vendor/luajit/src/luajit.h') }}
           
-      # 2. 如果没有缓存，配置 MSVC
       - name: Setup MSVC
         if: steps.cache-luajit.outputs.cache-hit != 'true'
         uses: ilammy/msvc-dev-cmd@v1
 
-      # 3. 如果没有缓存，执行编译
       - name: Build LuaJIT (Run only on Cache Miss)
         if: steps.cache-luajit.outputs.cache-hit != 'true'
         shell: cmd
@@ -57,13 +52,6 @@ jobs:
           if not exist "%LUAJIT_BIN_DIR%\jit" mkdir "%LUAJIT_BIN_DIR%\jit"
           copy jit\*.lua "%LUAJIT_BIN_DIR%\jit\"
 
-      # 4. 如果命中了缓存，打印提示（可选，为了让你看着放心）
-      - name: Verify Cache Hit
-        if: steps.cache-luajit.outputs.cache-hit == 'true'
-        run: echo "::notice ::LuaJIT Cache Hit! Skipping compilation."
-
-      # 5. 上传产物给 Job 2 使用
-      # 注意：即使是缓存恢复出来的文件，也需要 upload 才能传给下一个 job
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
@@ -74,11 +62,10 @@ jobs:
 
   # ===========================================================================
   # Job 2: Run Tests
-  # 目标：下载现成的 LuaJIT 跑测试。即使挂了，Job 1 的缓存也依然在。
   # ===========================================================================
   test-suite:
     name: Run Tests
-    needs: build-luajit  # 依赖 Job 1
+    needs: build-luajit
     runs-on: windows-latest
     env:
       LUAJIT_BIN_DIR: ${{ github.workspace }}\luajit_build
@@ -89,13 +76,13 @@ jobs:
         with:
           submodules: recursive
 
-      # 下载 Job 1 传过来的 LuaJIT (无论是刚编译的还是缓存的)
       - name: Download LuaJIT Artifact
         uses: actions/download-artifact@v4
         with:
           name: luajit-dist
           path: ${{ env.LUAJIT_BIN_DIR }}
 
+      # [FIX] 这里使用了你提供的那个逻辑更完善的 PowerShell 脚本
       - name: Assemble Test Environment
         shell: pwsh
         run: |
@@ -106,25 +93,38 @@ jobs:
           $lua   = New-Item -ItemType Directory -Path "stage/lua"
           $tests = New-Item -ItemType Directory -Path "stage/tests"
           
-          # 1. Binaries
+          # 1. Binaries (LuaJIT)
           Copy-Item "${{ env.LUAJIT_BIN_DIR }}\bin\*" $bin
           
-          # 2. Lua Libs
+          # 2. Lua Libs - win-utils (智能检测目录结构)
           $pkgDest = New-Item -ItemType Directory -Path "$lua/win-utils" -Force
+          
           if (Test-Path "win-utils\init.lua") {
+              Write-Host "Detected subdirectory structure for win-utils."
               Copy-Item "win-utils\*" $pkgDest -Recurse 
               if (Test-Path "win-utils\tests") { Copy-Item "win-utils\tests\*" $tests -Recurse }
           } elseif (Test-Path "init.lua") {
+              Write-Host "Detected root directory structure for win-utils."
               Get-ChildItem -Path . -Exclude ".git", ".github", "stage", "luajit_build", "vendor", "test_sandbox" | Copy-Item -Destination $pkgDest -Recurse
               if (Test-Path "tests") { Copy-Item "tests\*" $tests -Recurse }
+          } else {
+              Write-Error "Could not find init.lua in '.' or './win-utils'. Layout unknown."
           }
           
-          # Deps
+          # 3. Deps - lua-ffi-bindings (修复了这里！增加了 Fallback 逻辑)
           if (Test-Path "vendor/lua-ffi-bindings/ffi") {
              Copy-Item "vendor/lua-ffi-bindings/ffi" "$lua" -Recurse
              if (Test-Path "vendor/lua-ffi-bindings/req.lua") { Copy-Item "vendor/lua-ffi-bindings/req.lua" "$lua/ffi/" }
+          } elseif (Test-Path "vendor/lua-ffi-bindings/req.lua") {
+             # [FIX] 如果是扁平结构，手动创建 ffi 文件夹并拷入
+             Write-Host "Detected flat structure for lua-ffi-bindings."
+             $ffiDest = New-Item -ItemType Directory -Path "$lua/ffi" -Force
+             Copy-Item "vendor/lua-ffi-bindings/*" "$ffiDest" -Recurse -Exclude ".git"
+          } else {
+             Write-Warning "vendor/lua-ffi-bindings not found or structure unknown."
           }
           
+          # 4. Deps - lua-ext
           if (Test-Path "vendor/lua-ext") {
              $extDir = New-Item -ItemType Directory -Path (Join-Path $lua.FullName "ext") -Force
              Copy-Item "vendor/lua-ext/*.lua" -Destination $extDir.FullName -Force
@@ -132,9 +132,11 @@ jobs:
              if (Test-Path $extLuaInside) { Move-Item -Path $extLuaInside -Destination $lua.FullName -Force }
           }
 
+          # 5. External Tools
           Invoke-WebRequest -Uri "https://raw.githubusercontent.com/bluebird75/luaunit/master/luaunit.lua" -OutFile "$lua/luaunit.lua"
           Invoke-WebRequest -Uri "https://raw.githubusercontent.com/daiaji/luafilesystem/main/lfs_ffi.lua" -OutFile "$lua/lfs_ffi.lua"
 
+          # 6. LuaJIT Libs
           Copy-Item "${{ env.LUAJIT_BIN_DIR }}\jit" "$lua/jit" -Recurse
 
           echo "TEST_STAGE=$($stage.FullName)" >> $env:GITHUB_ENV
