@@ -30,27 +30,31 @@ jobs:
         uses: actions/cache@v3
         with:
           path: ${{ env.LUAJIT_BIN_DIR }}
-          key: ${{ runner.os }}-luajit-${{ hashFiles('vendor/luajit/src/luajit.h') }}
+          # [CHANGED] Update cache key to distinguish 5.2-compat build from standard build
+          key: ${{ runner.os }}-luajit-52compat-${{ hashFiles('vendor/luajit/src/luajit.h') }}
           restore-keys: |
-            ${{ runner.os }}-luajit-
+            ${{ runner.os }}-luajit-52compat-
 
       - name: Setup MSVC
         if: steps.cache-luajit.outputs.cache-hit != 'true'
         uses: ilammy/msvc-dev-cmd@v1
 
-      - name: Build LuaJIT
+      - name: Build LuaJIT (with Lua 5.2 Compat)
         if: steps.cache-luajit.outputs.cache-hit != 'true'
         shell: cmd
         run: |
           cd vendor/luajit/src
-          call msvcbuild.bat gc64
+          
+          :: [CHANGED] Enable Lua 5.2 compatibility mode
+          call msvcbuild.bat lua52compat
           if %errorlevel% neq 0 exit /b %errorlevel%
           
-          mkdir "%LUAJIT_BIN_DIR%\bin"
+          :: Prepare artifact directory
+          if not exist "%LUAJIT_BIN_DIR%\bin" mkdir "%LUAJIT_BIN_DIR%\bin"
           copy luajit.exe "%LUAJIT_BIN_DIR%\bin\"
           copy lua51.dll "%LUAJIT_BIN_DIR%\bin\"
           
-          mkdir "%LUAJIT_BIN_DIR%\jit"
+          if not exist "%LUAJIT_BIN_DIR%\jit" mkdir "%LUAJIT_BIN_DIR%\jit"
           copy jit\*.lua "%LUAJIT_BIN_DIR%\jit\"
 
       - name: Assemble Test Environment
@@ -70,20 +74,16 @@ jobs:
           # 2. Lua Libs
           
           # A. win-utils (Library code + Tests)
-          # [Fix] Tests must be included in the library path so require 'win-utils.tests.xxx' works
           $pkgDest = New-Item -ItemType Directory -Path "$lua/win-utils" -Force
           
           if (Test-Path "win-utils\init.lua") {
               Write-Host "Detected subdirectory structure."
-              # Changed: Removed -Exclude "tests" to ensure require resolution works
               Copy-Item "win-utils\*" $pkgDest -Recurse 
               if (Test-Path "win-utils\tests") {
-                  # Also copy to stage/tests for runner entry point
                   Copy-Item "win-utils\tests\*" $tests -Recurse
               }
           } elseif (Test-Path "init.lua") {
               Write-Host "Detected root directory structure."
-              # Changed: Removed "tests" from Exclude list
               Get-ChildItem -Path . -Exclude ".git", ".github", "stage", ".luajit", "vendor", "test_sandbox" | Copy-Item -Destination $pkgDest -Recurse
               if (Test-Path "tests") {
                   Copy-Item "tests\*" $tests -Recurse
@@ -95,8 +95,11 @@ jobs:
           
           # B. lua-ffi-bindings (Must exist for win-utils to work)
           if (Test-Path "vendor/lua-ffi-bindings/ffi") {
-             # Copy folder 'ffi' to stage/lua, resulting in stage/lua/ffi
              Copy-Item "vendor/lua-ffi-bindings/ffi" "$lua" -Recurse
+             # Also copy the req.lua loader if it sits outside ffi folder
+             if (Test-Path "vendor/lua-ffi-bindings/req.lua") {
+                 Copy-Item "vendor/lua-ffi-bindings/req.lua" "$lua/ffi/"
+             }
           } elseif (Test-Path "vendor/lua-ffi-bindings/req.lua") {
              # Fallback: Flat repo structure
              $ffiDest = New-Item -ItemType Directory -Path "$lua/ffi" -Force
@@ -106,12 +109,9 @@ jobs:
           }
           
           # C. lua-ext (Required by win-utils)
-          # Layout: stage/lua/ext.lua (root), stage/lua/ext/*.lua
           if (Test-Path "vendor/lua-ext") {
              Write-Host "Installing lua-ext from vendor..."
              $extDir = New-Item -ItemType Directory -Path (Join-Path $lua.FullName "ext") -Force
-             
-             # Copy ALL files to stage/lua/ext/
              Copy-Item "vendor/lua-ext/*.lua" -Destination $extDir.FullName -Force
              
              # Move stage/lua/ext/ext.lua -> stage/lua/ext.lua
