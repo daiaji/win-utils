@@ -9,6 +9,7 @@ TestCore = {}
 function TestCore:setUp()
     -- 1. 准备沙盒目录
     self.test_dir = "test_sandbox_" .. os.time()
+    print("[TEST] Setting up sandbox: " .. self.test_dir)
     local k32 = ffi.load("kernel32")
     k32.CreateDirectoryW(require('win-utils.util').to_wide(self.test_dir), nil)
     
@@ -19,6 +20,7 @@ function TestCore:setUp()
 end
 
 function TestCore:tearDown()
+    print("[TEST] Tearing down...")
     -- 清理文件
     if win.fs then win.fs.delete(self.test_dir) end
     if win.fs then win.fs.delete("test.lnk") end
@@ -57,25 +59,40 @@ end
 -- 文件系统 (FS) 测试
 -- ========================================================================
 function TestCore:test_FS_BasicOps()
+    print("[TEST] Starting FS_BasicOps...")
     local src = self.test_dir .. "\\src.txt"
     local dst = self.test_dir .. "\\dst.txt"
     local moved = self.test_dir .. "\\moved.txt"
     
     -- Create
+    print("[TEST] Creating file: " .. src)
     local f = io.open(src, "w"); f:write("test"); f:close()
     
     -- Copy
-    lu.assertTrue(win.fs.copy(src, dst), "Copy failed")
+    print("[TEST] Copying to: " .. dst)
+    local ok_copy = win.fs.copy(src, dst)
+    print("[TEST] Copy result: " .. tostring(ok_copy))
+    lu.assertTrue(ok_copy, "Copy failed")
+    
     local f2 = io.open(dst, "r"); lu.assertNotIsNil(f2, "Target missing"); f2:close()
     
     -- Move (补回)
-    lu.assertTrue(win.fs.move(dst, moved), "Move failed")
+    print("[TEST] Moving to: " .. moved)
+    local ok_move = win.fs.move(dst, moved)
+    print("[TEST] Move result: " .. tostring(ok_move))
+    lu.assertTrue(ok_move, "Move failed")
+    
     local f3 = io.open(dst, "r"); lu.assertNil(f3, "Source should be gone")
     local f4 = io.open(moved, "r"); lu.assertNotIsNil(f4, "Moved file missing"); f4:close()
     
     -- Native Force Delete
-    lu.assertTrue(win.fs.native.force_delete(moved), "Force delete failed")
+    print("[TEST] Force Deleting: " .. moved)
+    local ok_del = win.fs.native.force_delete(moved)
+    print("[TEST] Delete result: " .. tostring(ok_del))
+    lu.assertTrue(ok_del, "Force delete failed")
+    
     local f5 = io.open(moved, "r"); lu.assertNil(f5)
+    print("[TEST] FS_BasicOps Done.")
 end
 
 function TestCore:test_FS_Recycle()

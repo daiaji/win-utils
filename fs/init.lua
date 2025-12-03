@@ -15,10 +15,22 @@ M.native = require 'win-utils.fs.native'
 local function sh_op(func, src, dest, flags)
     local sh = ffi.new("SHFILEOPSTRUCTW")
     sh.wFunc = func
-    sh.pFrom = util.to_wide(src .. "\0")
-    if dest then sh.pTo = util.to_wide(dest .. "\0") end
+    
+    -- [CRITICAL FIX] GC Anchoring
+    -- 必须将 cdata 赋值给本地变量以保持其生命周期覆盖 SHFileOperationW 调用期间
+    local w_src = util.to_wide(src .. "\0")
+    local w_dest = dest and util.to_wide(dest .. "\0") or nil
+    
+    sh.pFrom = w_src
+    sh.pTo = w_dest
     sh.fFlags = flags or bit.bor(C.FOF_NOCONFIRMATION, C.FOF_NOERRORUI, C.FOF_SILENT)
-    return shell32.SHFileOperationW(sh) == 0
+    
+    local res = shell32.SHFileOperationW(sh)
+    
+    -- 显式引用，防止被 JIT/GC 优化掉 (虽然本地变量通常足够，但这在 FFI 中是防御性编程)
+    local _anchor = { w_src, w_dest }
+    
+    return res == 0
 end
 
 function M.copy(s, d) return sh_op(C.FO_COPY, s, d) end
