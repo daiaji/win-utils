@@ -34,7 +34,7 @@ function M.netstat()
     -- [LuaJIT] 预分配 table 大小 (Array部分=num, Hash部分=0)
     local r = table_new(num, 0)
     
-    -- [Lua-Ext] 赋予扩展能力 (允许 :find, :filter, :map)
+    -- [Lua-Ext] 赋予扩展能力 (允许 :find, :filter, :map, :findIf)
     setmetatable(r, { __index = table_ext })
     
     for i=0, num-1 do
@@ -58,9 +58,10 @@ function M.get_tcp_listeners()
         :map(function(e) return { port=e.local_port, pid=e.pid } end)
 end
 
--- [Lua-Ext Feature] 使用 :find 查找
+-- [Lua-Ext Feature] 使用 :findIf 查找
 function M.find_pid_by_port(p)
-    local _, res = M.netstat():find(function(e) return e.local_port == p end)
+    -- 注意: findIf 返回 key, value。我们只需要 value.pid
+    local _, res = M.netstat():findIf(function(e) return e.local_port == p end)
     return res and res.pid or nil
 end
 

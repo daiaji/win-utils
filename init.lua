@@ -2,7 +2,6 @@ local M = {}
 
 -- [Lua-Ext Integration]
 -- 显式加载扩展，确保 table/string/math 拥有 :map, :trim 等高级方法
--- 这是实现“现代化”业务逻辑的基础
 require 'ext.table'
 require 'ext.string'
 require 'ext.math'

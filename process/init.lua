@@ -6,6 +6,9 @@ local psapi = require 'ffi.req' 'Windows.sdk.psapi'
 local util = require 'win-utils.core.util'
 local Handle = require 'win-utils.core.handle'
 local class = require 'win-utils.deps'.class
+-- [Modern LuaJIT]
+local table_new = require 'table.new'
+local table_ext = require 'ext.table'
 
 local M = {}
 
@@ -30,7 +33,6 @@ setmetatable(M, {
     end
 })
 
--- [Constants - Restored]
 M.constants = {
     SW_HIDE=0, SW_SHOWNORMAL=1, SW_SHOW=5, 
     PROCESS_ALL_ACCESS=0x1F0FFF, PROCESS_TERMINATE=1, PROCESS_QUERY_INFORMATION=0x400, 
@@ -38,9 +40,6 @@ M.constants = {
 }
 
 local INVALID_HANDLE = ffi.cast("HANDLE", -1)
-
--- [REMOVED] Struct definitions for PEB and RTL_USER_PROCESS_PARAMETERS
--- They are already defined in 'Windows.sdk.ntdll' which is required above.
 
 local function get_cmd_line(pid)
     local hProc = kernel32.OpenProcess(0x410, false, pid)
@@ -118,7 +117,6 @@ function Process:get_info()
 end
 
 function Process:terminate_tree()
-    -- Lazy access to token module
     local token = require 'win-utils.process.token'
     token.enable_privilege("SeDebugPrivilege")
     local function kill(pid)
@@ -162,7 +160,15 @@ function M.each()
     end
 end
 
-function M.list() local t = {}; for p in M.each() do table.insert(t, p) end return t end
+function M.list() 
+    -- [FIX] Use table.new and inject ext.table methods
+    local t = table_new(256, 0)
+    setmetatable(t, { __index = table_ext })
+    for p in M.each() do 
+        table.insert(t, p) 
+    end 
+    return t 
+end
 
 function M.exists(pid)
     if type(pid) ~= "number" then for p in M.each() do if p.name:lower() == pid:lower() then return p.pid end end return 0 end

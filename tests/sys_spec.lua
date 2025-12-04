@@ -18,9 +18,9 @@ function TestSys:test_Service_List()
     lu.assertIsTable(list)
     lu.assertTrue(#list > 0)
     
-    -- [Lua-Ext Feature] 使用 :find 替代手动 for 循环
-    -- 查找核心服务 (LanmanServer 或 EventLog 或 Schedule)
-    local _, found = list:find(function(s) 
+    -- [Lua-Ext] 使用新的 findiIf 替代 filter(..)[1]
+    -- findiIf 使用 ipairs，对于列表遍历更高效且有序
+    local _, found = list:findiIf(function(s) 
         local n = s.name:lower()
         return n == "lanmanserver" or n == "eventlog" or n == "schedule"
     end)
@@ -39,14 +39,16 @@ function TestSys:test_Shortcut()
     local path = os.getenv("TEMP") .. "\\test_" .. os.time() .. ".lnk"
     local target = "C:\\Windows\\System32\\cmd.exe"
     
-    local ok, err = pcall(function() win.sys.shortcut.create(path, target) end)
+    local ok, err = pcall(function() 
+        win.sys.shortcut.create(path, target)
+    end)
     
     if ok then
         local f = io.open(path, "rb")
         if f then 
             f:close()
             os.remove(path)
-            lu.assertTrue(true) 
+            lu.assertTrue(true)
         else
             print("\n[WARN] Shortcut reported success but file missing")
         end

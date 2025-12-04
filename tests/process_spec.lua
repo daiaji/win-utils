@@ -23,8 +23,8 @@ function TestProcess:test_List()
     lu.assertIsTable(list)
     
     if self.proc then
-        -- [Lua-Ext Feature] 极简查找
-        local _, found = list:find(function(p) return p.pid == self.proc.pid end)
+        -- [Lua-Ext] 使用新的 findiIf (极简查找)
+        local _, found = list:findiIf(function(p) return p.pid == self.proc.pid end)
         lu.assertNotNil(found, "Created process not found in list")
     end
 end
