@@ -26,8 +26,8 @@ function M.open_file(path, mode, share_mode)
     elseif share_mode == "exclusive" then
         share = 0
     elseif share_mode == true then 
-        -- [FIX] "true" means "shared", i.e., permissive sharing
-        -- Allow others to Read/Write/Delete. Essential for opening C: drive.
+        -- [FIX] "true" means "shared read/write" (permissive)
+        -- Critical for opening system volumes (C:) or BitLocker checks
         share = bit.bor(C.FILE_SHARE_READ, C.FILE_SHARE_WRITE, C.FILE_SHARE_DELETE)
     elseif share_mode == "read" then 
         share = C.FILE_SHARE_READ 
@@ -81,7 +81,6 @@ end
 
 function M.dos_path_to_nt_path(dos_path)
     if not dos_path then return nil end
-    -- [FIX] Ensure proper prefix handling
     if dos_path:sub(1, 4) == "\\??\\" then return dos_path end
     return "\\??\\" .. dos_path
 end

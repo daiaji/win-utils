@@ -7,8 +7,6 @@ local native = require 'win-utils.core.native'
 local token = require 'win-utils.process.token'
 local class = require 'win-utils.deps'.class
 
--- [Cleaned] RegDeleteTreeW is now in advapi32.lua
-
 local RegKey = class()
 
 function RegKey:init(hkey)

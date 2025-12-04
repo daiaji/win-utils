@@ -6,16 +6,18 @@ local kernel32 = require 'ffi.req' 'Windows.sdk.kernel32'
 local native = require 'win-utils.core.native'
 local token = require 'win-utils.process.token'
 local util = require 'win-utils.core.util'
-local C = require 'win-utils.core.ffi_defs' -- Access constants
+local C = require 'win-utils.core.ffi_defs'
 
 local M = {}
 
 function M.delete_posix(path)
-    -- Mode "rwd" ensures DELETE access which is required for FileDispositionInformation
-    local h, e = native.open_file(path, "rwd", "exclusive")
+    -- [FIX] Use "rd" (Read + Delete) instead of "rwd". 
+    -- "w" adds GENERIC_WRITE which fails on ReadOnly files.
+    -- FileDispositionInformation only requires DELETE access.
+    local h, e = native.open_file(path, "rd", "exclusive")
     if not h then return false, e end
     
-    local info = ffi.new("FILE_DISPOSITION_INFO_EX"); info.Flags = 0x13
+    local info = ffi.new("FILE_DISPOSITION_INFO_EX"); info.Flags = 0x13 -- Delete | Posix | IgnoreReadOnly
     local io = ffi.new("IO_STATUS_BLOCK")
     local s = ntdll.NtSetInformationFile(h:get(), io, info, ffi.sizeof(info), 64)
     h:close()
@@ -23,7 +25,6 @@ function M.delete_posix(path)
 end
 
 function M.set_times(path, c, a, w)
-    -- Use FILE_WRITE_ATTRIBUTES (0x0100) instead of GENERIC_WRITE to allow operation on ReadOnly files
     local access = C.FILE_WRITE_ATTRIBUTES
     local share = bit.bor(C.FILE_SHARE_READ, C.FILE_SHARE_WRITE, C.FILE_SHARE_DELETE)
     local flags = bit.bor(C.FILE_ATTRIBUTE_NORMAL, C.FILE_FLAG_BACKUP_SEMANTICS)

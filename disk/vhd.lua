@@ -18,7 +18,7 @@ function M.create(path, size_bytes)
     params.Version2.MaximumSize = size_bytes
     
     local h = ffi.new("HANDLE[1]")
-    -- [FIX] VirtualDiskAccessMask must be 0 (VIRTUAL_DISK_ACCESS_NONE) for CreateVirtualDisk
+    -- [FIX] VirtualDiskAccessMask must be 0 (VIRTUAL_DISK_ACCESS_NONE) when creating
     local res = C.CreateVirtualDisk(vst, util.to_wide(path), 0, nil, 8, 0, params, nil, h)
     
     if res ~= 0 then return nil, "Create failed: " .. res end
