@@ -7,7 +7,7 @@ local native = require 'win-utils.core.native'
 local token = require 'win-utils.process.token'
 local class = require 'win-utils.deps'.class
 
-ffi.cdef [[ LONG RegDeleteTreeW(HKEY hKey, LPCWSTR lpSubKey); ]]
+-- [Cleaned] RegDeleteTreeW is now in advapi32.lua
 
 local RegKey = class()
 
@@ -22,23 +22,20 @@ function RegKey:close()
     end
 end
 
--- 读取注册表值
 function RegKey:read(name, opts)
     local wname = util.to_wide(name)
     local type_ptr = ffi.new("DWORD[1]")
     local size_ptr = ffi.new("DWORD[1]")
     
-    -- 第一次查询：获取大小
     if advapi32.RegQueryValueExW(self.hkey, wname, nil, type_ptr, nil, size_ptr) ~= 0 then return nil end
     
     local buf = ffi.new("uint8_t[?]", size_ptr[0])
-    -- 第二次查询：获取数据
     if advapi32.RegQueryValueExW(self.hkey, wname, nil, type_ptr, buf, size_ptr) ~= 0 then return nil end
     
     local t = type_ptr[0]
-    if t == 1 or t == 2 then -- REG_SZ / REG_EXPAND_SZ
+    if t == 1 or t == 2 then 
         local str = util.from_wide(ffi.cast("wchar_t*", buf))
-        if str then str = str:gsub("%z+$", "") end -- Trim null
+        if str then str = str:gsub("%z+$", "") end 
         
         if t == 2 and (not opts or opts.expand ~= false) then
             local wstr = util.to_wide(str)
@@ -48,11 +45,11 @@ function RegKey:read(name, opts)
             str = util.from_wide(ex):gsub("%z+$", "")
         end
         return str
-    elseif t == 4 then -- REG_DWORD
+    elseif t == 4 then 
         return ffi.cast("DWORD*", buf)[0]
-    elseif t == 11 then -- REG_QWORD
+    elseif t == 11 then 
         return tonumber(ffi.cast("uint64_t*", buf)[0])
-    elseif t == 7 then -- REG_MULTI_SZ
+    elseif t == 7 then 
         local res = {}
         local ptr = ffi.cast("wchar_t*", buf)
         local offset = 0
@@ -61,18 +58,16 @@ function RegKey:read(name, opts)
             if not s or s == "" then break end
             table.insert(res, s)
             offset = offset + #s + 1
-            -- 跳过额外的空字符
             while (ptr+offset)[0] ~= 0 do offset = offset + 1 end
             offset = offset + 1
         end
         return res
-    elseif t == 3 then -- REG_BINARY
+    elseif t == 3 then 
         return ffi.string(buf, size_ptr[0])
     end
     return nil
 end
 
--- 写入辅助函数表
 local writers = {}
 writers.string = function(v) local w = util.to_wide(v); return ffi.cast("uint8_t*", w), (#tostring(v)+1)*2, 1, w end
 writers.dword = function(v) local d = ffi.new("DWORD[1]", v); return ffi.cast("uint8_t*", d), 4, 4, d end
@@ -87,7 +82,7 @@ writers.multi_sz = function(v)
         table.insert(wstrs, {ptr=w, size=len*2})
         total_len = total_len + len*2
     end
-    total_len = total_len + 2 -- double null
+    total_len = total_len + 2 
     local buf = ffi.new("uint8_t[?]", total_len)
     local offset = 0
     for _, item in ipairs(wstrs) do
@@ -98,7 +93,6 @@ writers.multi_sz = function(v)
 end
 
 function RegKey:write(name, val, type_str)
-    -- 自动推断类型
     if type(val) == "number" and not type_str then type_str = "dword" end
     if type(val) == "string" and not type_str then type_str = "string" end
     if type(val) == "table" and not type_str then type_str = "multi_sz" end
@@ -119,7 +113,6 @@ local M = {}
 function M.open_key(root, sub)
     local roots = { HKLM=0x80000002, HKCU=0x80000001, HKU=0x80000003 }
     local hKey = ffi.new("HKEY[1]")
-    -- 使用 RegCreateKeyExW 以支持不存在时自动创建 (并给予完全权限)
     if advapi32.RegCreateKeyExW(ffi.cast("HKEY", roots[root] or roots.HKLM), util.to_wide(sub), 0, nil, 0, 0xF003F, nil, hKey, nil) ~= 0 then 
         return nil 
     end
@@ -152,9 +145,6 @@ function M.load_hive(key_path, file_path)
     local oa_f, a2 = native.init_object_attributes(native.dos_path_to_nt_path(file_path))
     local res = ntdll.NtLoadKey(oa_k, oa_f)
     local _ = {a1, a2}
-    -- [FIX] Explicit check for STATUS_SUCCESS (0). 
-    -- Negative values are errors, but some positive values are warnings.
-    -- NtLoadKey strictly returns 0 on success.
     return res == 0
 end
 
@@ -166,8 +156,6 @@ function M.unload_hive(key_path)
     return res == 0
 end
 
--- 安全地挂载 Hive，执行操作后自动卸载 (Atomic Hive Op)
--- 即使回调报错，也会尝试卸载 Hive
 function M.with_hive(key_path, file_path, func)
     local loaded = M.load_hive(key_path, file_path)
     if not loaded then return false, "Load hive failed" end
@@ -176,7 +164,6 @@ function M.with_hive(key_path, file_path, func)
         return func(key_path) 
     end, debug.traceback)
     
-    -- 强制 GC，释放可能持有 Registry Key 的句柄
     collectgarbage(); collectgarbage()
     
     local unloaded = M.unload_hive(key_path)
