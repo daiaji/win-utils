@@ -2,6 +2,10 @@ local lu = require('luaunit')
 local win = require('win-utils')
 local ffi = require('ffi')
 
+-- [FIX] Explicitly require kernel32 definitions because win-utils is now lazy-loaded
+-- and the test calls ffi.load("kernel32") directly in setUp.
+require 'ffi.req' 'Windows.sdk.kernel32'
+
 io.write("[DEBUG] core_spec loaded. win-utils available.\n")
 io.stdout:flush()
 
@@ -52,8 +56,6 @@ function TestCore:test_HandleRAII()
     local mock_close = function(h) closed = true end
     
     -- [FIX] Use :new syntax or call operator for ext.class classes
-    -- win.handle.new(val) passes val as 'self' if called with dot, which breaks ext.class newmember
-    -- Correct: win.handle(val) or win.handle:new(val)
     local h = win.handle(ffi.cast("void*", 0x1234), mock_close)
     
     lu.assertTrue(h:is_valid())
@@ -87,7 +89,7 @@ function TestCore:test_FS_BasicOps()
     
     local f2 = io.open(dst, "r"); lu.assertNotIsNil(f2, "Target missing"); f2:close()
     
-    -- Move (补回)
+    -- Move
     io.write("[TEST] Moving to: " .. moved .. "\n")
     io.stdout:flush()
     local ok_move = win.fs.move(dst, moved)
@@ -168,7 +170,7 @@ function TestCore:test_Registry_FullTypes()
     key:write("Num", 123456)
     lu.assertEquals(key:read("Num"), 123456)
     
-    -- Binary (补回)
+    -- Binary
     local bin_data = string.char(0xDE, 0xAD, 0xBE, 0xEF)
     key:write("Bin", bin_data, "binary")
     lu.assertEquals(key:read("Bin"), bin_data)
@@ -191,13 +193,9 @@ function TestCore:test_Disk_ListAndInfo()
     io.stdout:flush()
     if not win.disk.list_drives then
         io.write("[TEST] ERROR: win.disk.list_drives is nil!\n")
-        -- Fallback check
-        if win.disk.info and win.disk.info.list_physical_drives then
-             io.write("[TEST] BUT win.disk.info.list_physical_drives exists.\n")
-        end
     end
 
-    local drives = win.disk.list_drives() -- 原 list() 现为 list_physical_drives
+    local drives = win.disk.list_drives()
     
     -- 如果是在 CI 的无头/无磁盘环境，drives 可能为空，但不能崩溃
     lu.assertIsTable(drives)
@@ -216,7 +214,7 @@ function TestCore:test_Disk_ListAndInfo()
         lu.assertIsString(vols[1].guid_path)
     end
     
-    -- (补回) 详细信息测试 (针对 C:)
+    -- 详细信息测试 (针对 C:)
     local c_info = win.disk.volume.get_info("C:")
     if c_info then
         lu.assertIsString(c_info.filesystem) -- NTFS?
@@ -230,7 +228,6 @@ end
 -- ========================================================================
 function TestCore:test_Shortcut()
     local target = "C:\\Windows\\System32\\notepad.exe"
-    -- 需要绝对路径
     local k32 = ffi.load("kernel32")
     local buf = ffi.new("wchar_t[260]")
     k32.GetFullPathNameW(require('win-utils.util').to_wide(self.test_dir .. "\\test.lnk"), 260, buf, nil)
@@ -245,8 +242,7 @@ function TestCore:test_Shortcut()
 end
 
 function TestCore:test_Hotkey()
-    -- (补回) 热键注册测试
-    -- 注意：在 CI 无头模式下可能失败，做容错处理
+    -- 热键注册测试
     local id = win.hotkey.register("Ctrl+Alt", "P", function() end)
     if id then
         lu.assertIsNumber(id)
