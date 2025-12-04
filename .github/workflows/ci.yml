@@ -12,13 +12,12 @@ on:
   workflow_dispatch:
 
 env:
-  # 保持缓存 Key 不变，继续使用上次编译好的结果
   LUAJIT_CACHE_KEY: windows-luajit-2.1-52compat-v1
   LUAJIT_BIN_DIR: ${{ github.workspace }}\luajit_build
 
 jobs:
   # ===========================================================================
-  # Job 1: Build Keeper (保持不变)
+  # Job 1: Build Keeper
   # ===========================================================================
   build-luajit:
     name: Ensure LuaJIT Cache
@@ -59,7 +58,7 @@ jobs:
           copy jit\*.lua "%LUAJIT_BIN_DIR%\jit\"
 
   # ===========================================================================
-  # Job 2: Test Suite (修复路径逻辑)
+  # Job 2: Test Suite
   # ===========================================================================
   test-suite:
     name: Run Tests
@@ -84,7 +83,6 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           
-          # 创建运行时目录
           $stage = New-Item -ItemType Directory -Path "stage" -Force
           $bin   = New-Item -ItemType Directory -Path "stage/bin" -Force
           $lua   = New-Item -ItemType Directory -Path "stage/lua" -Force
@@ -106,21 +104,17 @@ jobs:
               Copy-Item "vendor/lua-ffi-bindings/*" $ffiDest -Recurse -Exclude ".git"
           }
           
-          # 3. Package (Win-Utils) [关键修复]
-          # 目标路径始终是 stage/lua/win-utils
+          # 3. Package (Win-Utils)
           $pkgDest = New-Item -ItemType Directory -Path "$lua/win-utils" -Force
           
           if (Test-Path "win-utils\init.lua") {
-              # 情况 A: 仓库结构是 repo/win-utils/init.lua
-              Write-Host "Detected nested structure (win-utils subfolder)."
+              Write-Host "Detected nested structure."
               Copy-Item "win-utils\*" $pkgDest -Recurse
           } elseif (Test-Path "init.lua") {
-              # 情况 B: 仓库结构是扁平的 repo/init.lua
-              Write-Host "Detected flat structure (init.lua at root)."
-              # 复制当前目录下的所有内容，但排除构建目录、git 目录和 vendor 目录
+              Write-Host "Detected flat structure."
               Get-ChildItem -Path . -Exclude ".git", ".github", "stage", "luajit_build", "vendor", "test_sandbox" | Copy-Item -Destination $pkgDest -Recurse
           } else {
-              Write-Error "Cannot locate init.lua in root or win-utils subdirectory."
+              Write-Error "Cannot locate init.lua"
           }
           
           # 4. LuaUnit
@@ -131,7 +125,11 @@ jobs:
       - name: Run Tests
         shell: cmd
         env:
-          # 注意：LUA_PATH 现在统一指向 stage 目录
+          # LUA_PATH 指向 Stage 目录，确保所有 require 都能找到
           LUA_PATH: ${{ env.STAGE_PATH }}\lua\?.lua;${{ env.STAGE_PATH }}\lua\?\init.lua;;
         run: |
-          "${{ env.STAGE_PATH }}\bin\luajit.exe" "win-utils\tests\run_tests.lua" -v
+          echo Running tests...
+          
+          REM [Fix] 直接使用 Stage 目录下的绝对路径运行测试脚本
+          REM 这样无论源码是扁平还是嵌套结构，脚本位置在 Stage 中是固定的
+          "${{ env.STAGE_PATH }}\bin\luajit.exe" "${{ env.STAGE_PATH }}\lua\win-utils\tests\run_tests.lua" -v
