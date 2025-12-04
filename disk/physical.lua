@@ -30,8 +30,8 @@ function PhysicalDrive:init(index, mode, exclusive)
     self:update_geometry()
 end
 
--- ... [close, get, ioctl methods unchanged] ...
 function PhysicalDrive:get() return self.handle end
+
 function PhysicalDrive:close()
     if self.handle then
         if self.is_locked then self:unlock() end
@@ -39,6 +39,7 @@ function PhysicalDrive:close()
         self.handle = nil
     end
 end
+
 function PhysicalDrive:ioctl(code, in_obj, in_size, out_type, out_size)
     return util.ioctl(self.handle, code, in_obj, in_size, out_type, out_size)
 end
@@ -51,9 +52,7 @@ function PhysicalDrive:update_geometry()
     end
 end
 
--- [Modern Refactor] 使用 goto 简化重试逻辑
 function PhysicalDrive:lock(force)
-    -- 1. 允许扩展 IO
     self:ioctl(defs.IOCTL.DASD)
     
     local attempts = 0
@@ -73,7 +72,6 @@ function PhysicalDrive:lock(force)
         goto fail
     end
     
-    -- 强制解锁逻辑
     if (force and (attempts % 20 == 0)) or (attempts == 50) then
         local pids = proc_handles.find_lockers(self.path)
         for _, pid in ipairs(pids) do 
@@ -82,7 +80,6 @@ function PhysicalDrive:lock(force)
         if #pids > 0 then kernel32.Sleep(500) end
     end
     
-    -- 尝试卸载卷
     self:ioctl(defs.IOCTL.DISMOUNT)
     kernel32.Sleep(100)
     
@@ -92,7 +89,6 @@ function PhysicalDrive:lock(force)
     return false, err_msg
 end
 
--- ... [unlock, get_attributes, set_attributes, write_sectors, read_sectors unchanged] ...
 function PhysicalDrive:unlock()
     if self.is_locked then self:ioctl(defs.IOCTL.UNLOCK); self.is_locked = false end
 end
@@ -175,9 +171,7 @@ local function get_desc(h)
     }
 end
 
--- [Modern Refactor] SetupAPI 遍历重构
 function PhysicalDrive.list()
-    -- 使用 LuaJIT table.new 预分配 (假设平均有 4 个磁盘)
     local drives = table_new(4, 0)
     local hInfo = setupapi.SetupDiGetClassDevsW(GUID_DISK, nil, nil, 0x12)
     if hInfo == ffi.cast("HANDLE", -1) then return drives end
@@ -186,6 +180,10 @@ function PhysicalDrive.list()
     local iface = ffi.new("SP_DEVICE_INTERFACE_DATA"); iface.cbSize = ffi.sizeof(iface)
     local i = 0
     
+    -- [FIX] Hoist declarations to avoid goto jumping into scope
+    local req = ffi.new("DWORD[1]")
+    local buf, det, h, num, geo
+    
     ::next_dev::
     if setupapi.SetupDiEnumDeviceInfo(hInfo, i, dev) == 0 then goto done end
     
@@ -193,25 +191,25 @@ function PhysicalDrive.list()
         i = i + 1; goto next_dev
     end
     
-    local req = ffi.new("DWORD[1]")
+    -- Reuse req buffer
     setupapi.SetupDiGetDeviceInterfaceDetailW(hInfo, iface, nil, 0, req, nil)
     if req[0] == 0 then i = i + 1; goto next_dev end
     
-    local buf = ffi.new("uint8_t[?]", req[0])
-    local det = ffi.cast("PSP_DEVICE_INTERFACE_DETAIL_DATA_W", buf)
+    buf = ffi.new("uint8_t[?]", req[0])
+    det = ffi.cast("PSP_DEVICE_INTERFACE_DETAIL_DATA_W", buf)
     det.cbSize = ffi.sizeof("SP_DEVICE_INTERFACE_DETAIL_DATA_W")
     
     if setupapi.SetupDiGetDeviceInterfaceDetailW(hInfo, iface, det, req[0], nil, nil) == 0 then
         i = i + 1; goto next_dev
     end
     
-    local h = kernel32.CreateFileW(det.DevicePath, 0, 3, nil, 3, 0, nil)
+    h = kernel32.CreateFileW(det.DevicePath, 0, 3, nil, 3, 0, nil)
     if h == ffi.cast("HANDLE", -1) then i = i + 1; goto next_dev end
     
-    local num = util.ioctl(h, defs.IOCTL.GET_NUM, nil, 0, "STORAGE_DEVICE_NUMBER")
+    num = util.ioctl(h, defs.IOCTL.GET_NUM, nil, 0, "STORAGE_DEVICE_NUMBER")
     if not num then kernel32.CloseHandle(h); i = i + 1; goto next_dev end
     
-    local geo = util.ioctl(h, defs.IOCTL.GET_GEO, nil, 0, "DISK_GEOMETRY_EX")
+    geo = util.ioctl(h, defs.IOCTL.GET_GEO, nil, 0, "DISK_GEOMETRY_EX")
     if geo then
         local desc = get_desc(h)
         table.insert(drives, {

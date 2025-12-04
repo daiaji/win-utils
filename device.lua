@@ -11,7 +11,6 @@ local C = ffi.C
 local GUID_DISK = ffi.new("GUID", {0x53f56307, 0xb6bf, 0x11d0, {0x94, 0xf2, 0x00, 0xa0, 0xc9, 0x1e, 0xfb, 0x8b}})
 local GUID_USB_HUB = ffi.new("GUID", {0xf18a0e88, 0xc30c, 0x11d0, {0x88, 0x15, 0x00, 0xa0, 0xc9, 0x06, 0xbe, 0xd8}})
 
--- [LuaJIT Feature] 使用 goto 替代多层循环 break
 local function get_disk_devinst(drive_index)
     local flags = bit.bor(0x02, 0x10)
     local hInfo = setupapi.SetupDiGetClassDevsW(GUID_DISK, nil, nil, flags)
@@ -22,6 +21,10 @@ local function get_disk_devinst(drive_index)
     local i = 0
     local result = nil
     
+    -- [FIX] Hoist declarations
+    local req = ffi.new("DWORD[1]")
+    local buf, detail, hDev, num
+    
     ::loop::
     if setupapi.SetupDiEnumDeviceInfo(hInfo, i, devData) == 0 then goto done end
     
@@ -29,22 +32,21 @@ local function get_disk_devinst(drive_index)
         i = i + 1; goto loop
     end
     
-    local req = ffi.new("DWORD[1]")
     setupapi.SetupDiGetDeviceInterfaceDetailW(hInfo, ifaceData, nil, 0, req, nil)
     if req[0] == 0 then i = i + 1; goto loop end
     
-    local buf = ffi.new("uint8_t[?]", req[0])
-    local detail = ffi.cast("PSP_DEVICE_INTERFACE_DETAIL_DATA_W", buf)
+    buf = ffi.new("uint8_t[?]", req[0])
+    detail = ffi.cast("PSP_DEVICE_INTERFACE_DETAIL_DATA_W", buf)
     detail.cbSize = ffi.sizeof("SP_DEVICE_INTERFACE_DETAIL_DATA_W")
     
     if setupapi.SetupDiGetDeviceInterfaceDetailW(hInfo, ifaceData, detail, req[0], nil, nil) ~= 0 then
-        local hDev = kernel32.CreateFileW(detail.DevicePath, 0, 3, nil, 3, 0, nil)
+        hDev = kernel32.CreateFileW(detail.DevicePath, 0, 3, nil, 3, 0, nil)
         if hDev ~= ffi.cast("HANDLE", -1) then
-            local num = util.ioctl(hDev, defs.IOCTL.GET_NUM, nil, 0, "STORAGE_DEVICE_NUMBER")
+            num = util.ioctl(hDev, defs.IOCTL.GET_NUM, nil, 0, "STORAGE_DEVICE_NUMBER")
             if num and tonumber(num.DeviceNumber) == drive_index then
                 result = devData.DevInst
                 kernel32.CloseHandle(hDev)
-                goto done -- Found it, jump out
+                goto done 
             end
             kernel32.CloseHandle(hDev)
         end
@@ -67,23 +69,23 @@ function M.cycle_port(physical_drive_index)
     local port = 0
     local hub_inst = 0
     
-    -- [Loop] Flattened tree traversal
-    ::walk_up::
+    -- [FIX] Hoist declarations for loop
     local buf = ffi.new("wchar_t[1024]")
-    local len = ffi.new("ULONG[1]", 2048)
+    local len = ffi.new("ULONG[1]")
     local type_ptr = ffi.new("ULONG[1]")
+    local addr = ffi.new("DWORD[1]")
+    local svc
     
-    -- Check Service Name
+    ::walk_up::
+    len[0] = 2048
     if cfgmgr32.CM_Get_DevNode_Registry_PropertyW(current, 0x05, type_ptr, buf, len, 0) == 0 then
-        local svc = util.from_wide(buf)
+        svc = util.from_wide(buf)
         if svc and svc:upper():find("USBHUB") then
             hub_inst = current
             goto found_hub
         end
     end
     
-    -- Check Address (Port)
-    local addr = ffi.new("DWORD[1]")
     len[0] = 4
     if cfgmgr32.CM_Get_DevNode_Registry_PropertyW(current, 0x1C, type_ptr, addr, len, 0) == 0 then
         port = addr[0]
@@ -99,26 +101,25 @@ function M.cycle_port(physical_drive_index)
     ::found_hub::
     if hub_inst == 0 or port == 0 then return false, "USB Hub/Port invalid" end
     
-    -- Re-use get_disk_devinst logic for hub path finding could be done here,
-    -- but for brevity reusing previous helper approach (omitted here for conciseness, same logic as before)
-    -- ... (See previous implementation of get_hub_path) ...
-    -- Assuming get_hub_path is available or inlined:
-    local hub_path = nil -- Replace with get_hub_path(hub_inst)
+    local hub_path = nil
     
-    -- [Placeholder for get_hub_path logic]
+    -- Inline hub path finding
     local hInfo = setupapi.SetupDiGetClassDevsW(GUID_USB_HUB, nil, nil, bit.bor(0x02, 0x10))
     if hInfo ~= ffi.cast("HANDLE", -1) then
         local devData = ffi.new("SP_DEVINFO_DATA"); devData.cbSize = ffi.sizeof(devData)
         local ifaceData = ffi.new("SP_DEVICE_INTERFACE_DATA"); ifaceData.cbSize = ffi.sizeof(ifaceData)
         local i = 0
+        -- Hoist inner loop vars
+        local req = ffi.new("DWORD[1]")
+        local b, d
+        
         while setupapi.SetupDiEnumDeviceInfo(hInfo, i, devData) ~= 0 do
             if devData.DevInst == hub_inst then
                 if setupapi.SetupDiEnumDeviceInterfaces(hInfo, devData, GUID_USB_HUB, 0, ifaceData) ~= 0 then
-                    local req = ffi.new("DWORD[1]")
                     setupapi.SetupDiGetDeviceInterfaceDetailW(hInfo, ifaceData, nil, 0, req, nil)
                     if req[0] > 0 then
-                        local b = ffi.new("uint8_t[?]", req[0])
-                        local d = ffi.cast("PSP_DEVICE_INTERFACE_DETAIL_DATA_W", b)
+                        b = ffi.new("uint8_t[?]", req[0])
+                        d = ffi.cast("PSP_DEVICE_INTERFACE_DETAIL_DATA_W", b)
                         d.cbSize = ffi.sizeof("SP_DEVICE_INTERFACE_DETAIL_DATA_W")
                         if setupapi.SetupDiGetDeviceInterfaceDetailW(hInfo, ifaceData, d, req[0], nil, nil) ~= 0 then
                             hub_path = util.from_wide(d.DevicePath)
@@ -146,5 +147,79 @@ function M.cycle_port(physical_drive_index)
     return res ~= nil
 end
 
--- ... [cycle_disk uses similar patterns] ...
+function M.cycle_disk(physical_drive_index)
+    local flags = bit.bor(0x02, 0x10) 
+    local hInfo = setupapi.SetupDiGetClassDevsW(GUID_DISK, nil, nil, flags)
+    if hInfo == ffi.cast("HANDLE", -1) then return false, "SetupDiGetClassDevs failed" end
+    
+    local devData = ffi.new("SP_DEVINFO_DATA")
+    devData.cbSize = ffi.sizeof(devData)
+    local ifaceData = ffi.new("SP_DEVICE_INTERFACE_DATA")
+    ifaceData.cbSize = ffi.sizeof(ifaceData)
+    local i = 0
+    local target_dev = nil
+    
+    -- Hoist
+    local req = ffi.new("DWORD[1]")
+    local buf, detail, hDev, num
+    
+    ::loop::
+    if setupapi.SetupDiEnumDeviceInfo(hInfo, i, devData) == 0 then goto done end
+    
+    if setupapi.SetupDiEnumDeviceInterfaces(hInfo, devData, GUID_DISK, 0, ifaceData) == 0 then
+        i = i + 1; goto loop
+    end
+    
+    setupapi.SetupDiGetDeviceInterfaceDetailW(hInfo, ifaceData, nil, 0, req, nil)
+    if req[0] == 0 then i = i + 1; goto loop end
+    
+    buf = ffi.new("uint8_t[?]", req[0])
+    detail = ffi.cast("PSP_DEVICE_INTERFACE_DETAIL_DATA_W", buf)
+    detail.cbSize = ffi.sizeof("SP_DEVICE_INTERFACE_DETAIL_DATA_W")
+    
+    if setupapi.SetupDiGetDeviceInterfaceDetailW(hInfo, ifaceData, detail, req[0], nil, nil) ~= 0 then
+        hDev = kernel32.CreateFileW(detail.DevicePath, 0, 3, nil, 3, 0, nil)
+        if hDev ~= ffi.cast("HANDLE", -1) then
+            num = util.ioctl(hDev, defs.IOCTL.GET_NUM, nil, 0, "STORAGE_DEVICE_NUMBER")
+            if num and tonumber(num.DeviceNumber) == physical_drive_index then
+                target_dev = ffi.new("SP_DEVINFO_DATA")
+                ffi.copy(target_dev, devData, ffi.sizeof(devData))
+                kernel32.CloseHandle(hDev)
+                goto done
+            end
+            kernel32.CloseHandle(hDev)
+        end
+    end
+    
+    i = i + 1
+    goto loop
+    
+    ::done::
+    if not target_dev then
+        setupapi.SetupDiDestroyDeviceInfoList(hInfo)
+        return false, "Device not found"
+    end
+    
+    local params = ffi.new("SP_PROPCHANGE_PARAMS")
+    params.ClassInstallHeader.cbSize = ffi.sizeof("SP_CLASSINSTALL_HEADER")
+    params.ClassInstallHeader.InstallFunction = 0x12 -- DIF_PROPERTYCHANGE
+    params.Scope = 0x2 -- DICS_FLAG_CONFIGSPECIFIC
+    params.HwProfile = 0
+    
+    -- Disable
+    params.StateChange = 0x2 -- DICS_DISABLE
+    setupapi.SetupDiSetClassInstallParamsW(hInfo, target_dev, ffi.cast("PSP_CLASSINSTALL_HEADER", params), ffi.sizeof(params))
+    setupapi.SetupDiChangeState(hInfo, target_dev)
+    
+    kernel32.Sleep(250)
+    
+    -- Enable
+    params.StateChange = 0x1 -- DICS_ENABLE
+    setupapi.SetupDiSetClassInstallParamsW(hInfo, target_dev, ffi.cast("PSP_CLASSINSTALL_HEADER", params), ffi.sizeof(params))
+    local res = setupapi.SetupDiChangeState(hInfo, target_dev)
+    
+    setupapi.SetupDiDestroyDeviceInfoList(hInfo)
+    return res ~= 0
+end
+
 return M
