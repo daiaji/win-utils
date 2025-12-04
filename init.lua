@@ -21,6 +21,7 @@ local modules = {
         display  = 'win-utils.sys.display',
         shortcut = 'win-utils.sys.shortcut',
         hotkey   = 'win-utils.sys.hotkey',
+        info     = 'win-utils.sys.info', -- [ADDED]
     }
 }
 

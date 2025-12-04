@@ -32,7 +32,7 @@ ffi.cdef [[
     static const uint32_t FILE_FLAG_NO_BUFFERING   = 0x20000000;
     static const uint32_t FILE_FLAG_WRITE_THROUGH  = 0x80000000;
     
-    static const uint32_t INVALID_FILE_ATTRIBUTES  = 0xFFFFFFFF;
+    /* [REMOVED] INVALID_FILE_ATTRIBUTES is already defined in minwindef.lua */
 ]]
 
 return ffi.C

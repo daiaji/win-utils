@@ -39,29 +39,8 @@ M.constants = {
 
 local INVALID_HANDLE = ffi.cast("HANDLE", -1)
 
-ffi.cdef [[
-    typedef struct _RTL_USER_PROCESS_PARAMETERS {
-        BYTE Reserved1[16];
-        PVOID Reserved2[10];
-        UNICODE_STRING ImagePathName;
-        UNICODE_STRING CommandLine;
-    } RTL_USER_PROCESS_PARAMETERS;
-
-    typedef struct _PEB {
-        BYTE Reserved1[2];
-        BYTE BeingDebugged;
-        BYTE Reserved2[1];
-        PVOID Reserved3[2];
-        PVOID Ldr;
-        PVOID ProcessParameters;
-        BYTE Reserved4[104];
-        PVOID Reserved5[52];
-        PVOID PostProcessInitRoutine;
-        BYTE Reserved6[128];
-        PVOID Reserved7[1];
-        ULONG SessionId;
-    } PEB;
-]]
+-- [REMOVED] Struct definitions for PEB and RTL_USER_PROCESS_PARAMETERS
+-- They are already defined in 'Windows.sdk.ntdll' which is required above.
 
 local function get_cmd_line(pid)
     local hProc = kernel32.OpenProcess(0x410, false, pid)
