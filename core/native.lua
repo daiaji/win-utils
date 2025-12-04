@@ -1,5 +1,5 @@
 local ffi = require 'ffi'
-local bit = require 'bit'
+local bit = require 'bit' -- LuaJIT BitOp
 local kernel32 = require 'ffi.req' 'Windows.sdk.kernel32'
 local util = require 'win-utils.core.util'
 local Handle = require 'win-utils.core.handle'
@@ -10,8 +10,11 @@ local M = {}
 function M.open_internal(path, access, share, creation, flags)
     local wpath = util.to_wide(path)
     if not wpath then return nil, "Invalid path" end
+    
     local h = kernel32.CreateFileW(wpath, access, share, nil, creation, flags, nil)
-    if h == ffi.cast("HANDLE", -1) then return nil, util.last_error() end
+    if h == ffi.cast("HANDLE", -1) then 
+        return nil, util.last_error() 
+    end
     return Handle(h)
 end
 
@@ -26,14 +29,15 @@ function M.open_file(path, mode, share_mode)
     elseif share_mode == "exclusive" then
         share = 0
     elseif share_mode == true then 
-        -- [FIX] "true" means "shared read/write" (permissive)
-        -- Critical for opening system volumes (C:) or BitLocker checks
+        -- [BUG FIX] "true" 意味着极其宽容的共享模式
+        -- 打开正在运行的系统卷 (C:) 或 VHD 时，必须允许 FILE_SHARE_DELETE
+        -- 否则会报 ERROR_SHARING_VIOLATION
         share = bit.bor(C.FILE_SHARE_READ, C.FILE_SHARE_WRITE, C.FILE_SHARE_DELETE)
     elseif share_mode == "read" then 
         share = C.FILE_SHARE_READ 
     else
-        -- Default: Permissive sharing
-        share = bit.bor(C.FILE_SHARE_READ, C.FILE_SHARE_WRITE, C.FILE_SHARE_DELETE)
+        -- 默认：允许读写共享，但不允许删除
+        share = bit.bor(C.FILE_SHARE_READ, C.FILE_SHARE_WRITE)
     end
     
     local flags = bit.bor(C.FILE_ATTRIBUTE_NORMAL, C.FILE_FLAG_BACKUP_SEMANTICS)
@@ -59,23 +63,43 @@ function M.open_device(path, mode, share_mode)
         share = bit.bor(C.FILE_SHARE_READ, C.FILE_SHARE_WRITE)
     end
     
-    return M.open_internal(p, access, share, C.OPEN_EXISTING, bit.bor(C.FILE_FLAG_NO_BUFFERING, C.FILE_FLAG_WRITE_THROUGH))
+    -- 设备 IO 通常需要 NoBuffering | WriteThrough
+    local flags = bit.bor(C.FILE_FLAG_NO_BUFFERING, C.FILE_FLAG_WRITE_THROUGH)
+    return M.open_internal(p, access, share, C.OPEN_EXISTING, flags)
 end
 
+-- [MEMORY SAFETY] GC 锚定核心逻辑
 function M.to_unicode_string(str)
     if not str then return nil, nil end
+    -- util.to_wide 分配了 C 内存 (wchar_t[])，这是由 Lua GC 管理的
     local wstr = util.to_wide(str)
-    local len = 0; while wstr[len] ~= 0 do len = len + 1 end
+    
+    -- 计算长度
+    local len = 0
+    while wstr[len] ~= 0 do len = len + 1 end
+    
     local us = ffi.new("UNICODE_STRING")
-    us.Buffer = wstr; us.Length = len * 2; us.MaximumLength = (len + 1) * 2
+    us.Buffer = wstr
+    us.Length = len * 2
+    us.MaximumLength = (len + 1) * 2
+    
+    -- [CRITICAL] 返回 wstr 作为锚点 (Anchor)
+    -- 调用者必须持有这个 anchor，直到 C 函数调用结束
+    -- 否则 wstr 可能在 C 函数执行期间被 GC 回收，导致 us.Buffer 变成野指针
     return us, wstr 
 end
 
 function M.init_object_attributes(path_str, root_dir, attributes)
     local us, anchor = M.to_unicode_string(path_str)
-    local oa = ffi.new("OBJECT_ATTRIBUTES")
-    oa.Length = ffi.sizeof(oa); oa.RootDirectory = root_dir or nil
-    oa.ObjectName = us; oa.Attributes = attributes or 0x40 -- OBJ_CASE_INSENSITIVE
+    
+    -- 使用数组 [1] 强制指针语义，避免结构体传值拷贝
+    local oa = ffi.new("OBJECT_ATTRIBUTES[1]")
+    oa[0].Length = ffi.sizeof("OBJECT_ATTRIBUTES")
+    oa[0].RootDirectory = root_dir or nil
+    oa[0].ObjectName = us -- 这里只存了地址
+    oa[0].Attributes = attributes or 0x40 -- OBJ_CASE_INSENSITIVE
+    
+    -- 返回 oa 指针，以及必须持有的锚点表 {us, anchor}
     return oa, { us, anchor }
 end
 
@@ -89,15 +113,26 @@ function M.query_variable_size(func, first_arg, info_class, initial_size)
     local size = initial_size or 4096
     local buf = ffi.new("uint8_t[?]", size)
     local ret_len = ffi.new("ULONG[1]")
+    
+    -- 典型的 C 风格重试循环
     while true do
         local status
-        if info_class then status = func(first_arg, info_class, buf, size, ret_len)
-        else status = func(first_arg, buf, size, ret_len) end
+        if info_class then 
+            status = func(first_arg, info_class, buf, size, ret_len)
+        else 
+            status = func(first_arg, buf, size, ret_len) 
+        end
+        
+        -- STATUS_INFO_LENGTH_MISMATCH / BUFFER_OVERFLOW / BUFFER_TOO_SMALL
         if status == 0xC0000004 or status == 0x80000005 or status == 0xC0000023 then
             size = (ret_len[0] == 0) and size * 2 or ret_len[0]
-            if size > 64*1024*1024 then return nil, "Buffer overflow" end
+            if size > 64*1024*1024 then return nil, "Buffer overflow protection" end
             buf = ffi.new("uint8_t[?]", size)
-        elseif status < 0 then return nil, status else return buf, size, ret_len[0] end
+        elseif status < 0 then 
+            return nil, status 
+        else 
+            return buf, size, ret_len[0] 
+        end
     end
 end
 

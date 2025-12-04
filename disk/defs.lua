@@ -1,9 +1,9 @@
 local ffi = require 'ffi'
--- Ensure definitions are loaded
+-- 确保加载了包含常量的绑定文件
 require 'ffi.req' 'Windows.sdk.winioctl'
 
 local M = {}
--- [FIX] Use ffi.C instead of module return for constants
+-- 映射 FFI 常量到 Lua 表，方便调用
 M.IOCTL = {
     GET_LAYOUT = ffi.C.IOCTL_DISK_GET_DRIVE_LAYOUT_EX,
     SET_LAYOUT = ffi.C.IOCTL_DISK_SET_DRIVE_LAYOUT_EX,
