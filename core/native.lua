@@ -24,12 +24,15 @@ function M.open_file(path, mode, share_mode)
     if type(share_mode) == "number" then
         share = share_mode
     elseif share_mode == "exclusive" then
-        share = 0 -- 严格独占，禁止他人读写删
-    elseif share_mode == "read" or share_mode == true then 
-        share = C.FILE_SHARE_READ -- 允许他人读，但禁止写删
+        share = 0
+    elseif share_mode == true then 
+        -- [FIX] "true" means "shared", i.e., permissive sharing
+        -- Allow others to Read/Write/Delete. Essential for opening C: drive.
+        share = bit.bor(C.FILE_SHARE_READ, C.FILE_SHARE_WRITE, C.FILE_SHARE_DELETE)
+    elseif share_mode == "read" then 
+        share = C.FILE_SHARE_READ 
     else
-        -- 默认：最宽松模式 (Read/Write/Delete)
-        -- 允许文件被他人读写删，仅在自身需要特定权限时受限
+        -- Default: Permissive sharing
         share = bit.bor(C.FILE_SHARE_READ, C.FILE_SHARE_WRITE, C.FILE_SHARE_DELETE)
     end
     
@@ -51,9 +54,8 @@ function M.open_device(path, mode, share_mode)
     elseif share_mode == "exclusive" then
         share = 0
     elseif share_mode == "read" or share_mode == true then
-        share = C.FILE_SHARE_READ -- 允许读，禁止写 (传统 'exclusive=true' 行为)
+        share = C.FILE_SHARE_READ 
     else
-        -- 默认：允许读写
         share = bit.bor(C.FILE_SHARE_READ, C.FILE_SHARE_WRITE)
     end
     
@@ -79,6 +81,7 @@ end
 
 function M.dos_path_to_nt_path(dos_path)
     if not dos_path then return nil end
+    -- [FIX] Ensure proper prefix handling
     if dos_path:sub(1, 4) == "\\??\\" then return dos_path end
     return "\\??\\" .. dos_path
 end

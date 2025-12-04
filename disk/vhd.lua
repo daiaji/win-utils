@@ -18,7 +18,8 @@ function M.create(path, size_bytes)
     params.Version2.MaximumSize = size_bytes
     
     local h = ffi.new("HANDLE[1]")
-    local res = C.CreateVirtualDisk(vst, util.to_wide(path), 0x30000, nil, 8, 0, params, nil, h)
+    -- [FIX] VirtualDiskAccessMask must be 0 (VIRTUAL_DISK_ACCESS_NONE) for CreateVirtualDisk
+    local res = C.CreateVirtualDisk(vst, util.to_wide(path), 0, nil, 8, 0, params, nil, h)
     
     if res ~= 0 then return nil, "Create failed: " .. res end
     return Handle(h[0])
@@ -30,6 +31,7 @@ function M.open(path)
     vst.VendorId = VENDOR_MS
     
     local h = ffi.new("HANDLE[1]")
+    -- 0x30000 = VIRTUAL_DISK_ACCESS_ALL
     local res = C.OpenVirtualDisk(vst, util.to_wide(path), 0x30000, 0, nil, h)
     
     if res ~= 0 then return nil, "Open failed: " .. res end

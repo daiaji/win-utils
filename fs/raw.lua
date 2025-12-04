@@ -12,10 +12,13 @@ local M = {}
 ffi.cdef [[ BOOL ConvertStringSidToSidW(LPCWSTR StringSid, PSID* Sid); ]]
 
 function M.delete_posix(path)
-    local h, e = native.open_file(path, "rw", "exclusive")
+    -- [FIX] Mode "rwd" to include DELETE access, required for FileDispositionInformation
+    local h, e = native.open_file(path, "rwd", "exclusive")
     if not h then return false, e end
-    local info = ffi.new("FILE_DISPOSITION_INFO_EX"); info.Flags = 0x13
+    
+    local info = ffi.new("FILE_DISPOSITION_INFO_EX"); info.Flags = 0x13 -- Delete | Posix | IgnoreReadOnly
     local io = ffi.new("IO_STATUS_BLOCK")
+    -- FileDispositionInformationEx = 64
     local s = ntdll.NtSetInformationFile(h:get(), io, info, ffi.sizeof(info), 64)
     h:close()
     return s >= 0

@@ -152,7 +152,10 @@ function M.load_hive(key_path, file_path)
     local oa_f, a2 = native.init_object_attributes(native.dos_path_to_nt_path(file_path))
     local res = ntdll.NtLoadKey(oa_k, oa_f)
     local _ = {a1, a2}
-    return res >= 0
+    -- [FIX] Explicit check for STATUS_SUCCESS (0). 
+    -- Negative values are errors, but some positive values are warnings.
+    -- NtLoadKey strictly returns 0 on success.
+    return res == 0
 end
 
 function M.unload_hive(key_path)
@@ -160,7 +163,7 @@ function M.unload_hive(key_path)
     local oa_k, a1 = native.init_object_attributes(key_path)
     local res = ntdll.NtUnloadKey(oa_k)
     local _ = a1
-    return res >= 0
+    return res == 0
 end
 
 -- 安全地挂载 Hive，执行操作后自动卸载 (Atomic Hive Op)
