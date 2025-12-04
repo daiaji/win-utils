@@ -6,6 +6,7 @@ local defs = require 'win-utils.disk.defs'
 local Handle = require 'win-utils.core.handle'
 local C = require 'win-utils.core.ffi_defs'
 local table_new = require 'table.new'
+local table_ext = require 'ext.table'
 
 local M = {}
 
@@ -15,6 +16,7 @@ function M.list()
     if hFind == ffi.cast("HANDLE", -1) then return nil end
     
     local res = table_new(8, 0)
+    setmetatable(res, { __index = table_ext })
     
     ::continue_enum::
     
@@ -78,12 +80,13 @@ function M.find_guid_by_partition(drive_index, partition_offset)
     local vols = M.list()
     if not vols then return nil end
     
+    -- 使用 lua-ext 的 find 会更优雅，但此处涉及 IO 操作和资源关闭
+    -- 混合使用传统循环以控制 Handle 生命周期
     for _, v in ipairs(vols) do
         local hVol = M.open(v.guid_path)
         if hVol then
             local ext = util.ioctl(hVol:get(), defs.IOCTL.GET_VOL_EXTENTS, nil, 0, "VOLUME_DISK_EXTENTS")
             if ext and ext.NumberOfDiskExtents > 0 then
-                -- 检查是否匹配物理盘号和偏移
                 if ext.Extents[0].DiskNumber == drive_index and 
                    tonumber(ext.Extents[0].StartingOffset.QuadPart) == partition_offset then
                     hVol:close()
@@ -113,7 +116,6 @@ function M.assign(idx, offset, letter)
     local mount_point = letter or M.find_free_letter()
     if not mount_point then return false, "No free letters" end
     
-    -- SetVolumeMountPoint 需要尾部反斜杠 (e.g. "X:\")
     if #mount_point == 2 then mount_point = mount_point .. "\\" end
     
     if kernel32.SetVolumeMountPointW(util.to_wide(mount_point), util.to_wide(guid_path)) == 0 then
@@ -131,11 +133,9 @@ function M.unmount_all_on_disk(idx)
         if hVol then
             local ext = util.ioctl(hVol:get(), defs.IOCTL.GET_VOL_EXTENTS, nil, 0, "VOLUME_DISK_EXTENTS")
             if ext and ext.NumberOfDiskExtents > 0 and ext.Extents[0].DiskNumber == idx then
-                -- 卸载所有挂载点 (盘符)
                 for _, mp in ipairs(v.mount_points) do 
                     kernel32.DeleteVolumeMountPointW(util.to_wide(mp)) 
                 end
-                -- 强制卸载卷本身 (强制关闭打开的句柄)
                 util.ioctl(hVol:get(), defs.IOCTL.DISMOUNT)
             end
             hVol:close()

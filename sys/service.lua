@@ -4,6 +4,7 @@ local kernel32 = require 'ffi.req' 'Windows.sdk.kernel32'
 local util = require 'win-utils.core.util'
 local Handle = require 'win-utils.core.handle'
 local table_new = require 'table.new'
+local table_ext = require 'ext.table'
 
 local M = {}
 local function close_svc(h) advapi32.CloseServiceHandle(h) end
@@ -26,16 +27,14 @@ function M.list(drivers)
     local bytes_needed = ffi.new("DWORD[1]")
     local count = ffi.new("DWORD[1]")
     local resume = ffi.new("DWORD[1]", 0)
-    local buf = nil
-    local buf_size = 0
     
     -- 第一次调用获取大小
     advapi32.EnumServicesStatusExW(scm:get(), 0, type_flag, 3, nil, 0, bytes_needed, count, resume, nil)
     local err = kernel32.GetLastError()
     if err ~= 234 then return nil end -- ERROR_MORE_DATA
     
-    buf_size = bytes_needed[0]
-    buf = ffi.new("uint8_t[?]", buf_size)
+    local buf_size = bytes_needed[0]
+    local buf = ffi.new("uint8_t[?]", buf_size)
     
     if advapi32.EnumServicesStatusExW(scm:get(), 0, type_flag, 3, buf, buf_size, bytes_needed, count, resume, nil) == 0 then
         return nil 
@@ -43,6 +42,8 @@ function M.list(drivers)
     
     local num = tonumber(count[0])
     local res = table_new(num, 0)
+    setmetatable(res, { __index = table_ext }) -- Enable lua-ext methods
+    
     local ptr = ffi.cast("ENUM_SERVICE_STATUS_PROCESSW*", buf)
     
     for i=0, num-1 do
@@ -88,11 +89,13 @@ function M.stop(n)
     return true
 end
 
--- 递归停止依赖服务
 function M.stop_recursive(n)
     local deps = M.get_dependents(n)
-    for _, d in ipairs(deps) do 
-        M.stop_recursive(d) 
+    -- lua-ext style iteration
+    if deps and #deps > 0 then
+        for _, d in ipairs(deps) do 
+            M.stop_recursive(d) 
+        end
     end
     return M.stop(n)
 end
@@ -107,7 +110,6 @@ function M.get_dependents(n)
     local bytes = ffi.new("DWORD[1]")
     local count = ffi.new("DWORD[1]")
     
-    -- 获取缓冲区大小
     advapi32.EnumDependentServicesW(svc:get(), 3, nil, 0, bytes, count)
     
     if bytes[0] == 0 then return {} end
@@ -118,8 +120,9 @@ function M.get_dependents(n)
     end
     
     local deps = table_new(tonumber(count[0]), 0)
-    local ptr = ffi.cast("ENUM_SERVICE_STATUSW*", buf)
+    setmetatable(deps, { __index = table_ext })
     
+    local ptr = ffi.cast("ENUM_SERVICE_STATUSW*", buf)
     for i=0, count[0]-1 do 
         table.insert(deps, util.from_wide(ptr[i].lpServiceName)) 
     end
