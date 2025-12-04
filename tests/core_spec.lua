@@ -50,7 +50,11 @@ function TestCore:test_HandleRAII()
     -- 验证自动关闭句柄机制
     local closed = false
     local mock_close = function(h) closed = true end
-    local h = win.handle.new(ffi.cast("void*", 0x1234), mock_close)
+    
+    -- [FIX] Use :new syntax or call operator for ext.class classes
+    -- win.handle.new(val) passes val as 'self' if called with dot, which breaks ext.class newmember
+    -- Correct: win.handle(val) or win.handle:new(val)
+    local h = win.handle(ffi.cast("void*", 0x1234), mock_close)
     
     lu.assertTrue(h:is_valid())
     h:close()

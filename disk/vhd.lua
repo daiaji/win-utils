@@ -23,7 +23,6 @@ function M.create(path, size_bytes)
     local res = C.CreateVirtualDisk(vst, util.to_wide(path), 0x30000, nil, 8, 0, params, nil, h)
     
     if res ~= 0 then return nil, "Create failed: " .. res end
-    -- [FIX] Handle(h[0])
     return Handle(h[0])
 end
 
@@ -36,7 +35,6 @@ function M.open(path)
     local res = C.OpenVirtualDisk(vst, util.to_wide(path), 0x30000, 0, nil, h)
     
     if res ~= 0 then return nil, "Open failed: " .. res end
-    -- [FIX] Handle(h[0])
     return Handle(h[0])
 end
 
@@ -55,9 +53,13 @@ function M.expand(h, new_size)
 end
 
 function M.get_physical_path(h)
+    -- [FIX] Support both Handle object and raw cdata (for tests/flexibility)
+    local raw_h = (type(h) == "table" and h.get) and h:get() or h
+    if not raw_h or raw_h == ffi.cast("HANDLE", -1) then return nil end
+
     local sz = ffi.new("DWORD[1]", 520)
     local buf = ffi.new("wchar_t[260]")
-    if C.GetVirtualDiskPhysicalPath(h:get(), sz, buf) ~= 0 then return nil end
+    if C.GetVirtualDiskPhysicalPath(raw_h, sz, buf) ~= 0 then return nil end
     return util.from_wide(buf)
 end
 
