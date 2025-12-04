@@ -18,13 +18,7 @@ function SafeHandle:init(handle, closer)
     local close_func = closer or kernel32.CloseHandle
     self._closer = close_func 
     
-    -- io.write(string.format("[HANDLE] Closer func: %s\n", tostring(close_func)))
-    -- io.stdout:flush()
-
     if self:is_valid() then
-        -- io.write("[HANDLE] Handle is valid, attaching GC...\n")
-        -- io.stdout:flush()
-        
         -- FFI GC Anchor
         ffi.gc(self.handle, function(h)
             if h ~= INVALID and h ~= NULL_HANDLE then 
@@ -33,9 +27,6 @@ function SafeHandle:init(handle, closer)
                 close_func(h) 
             end
         end)
-        
-        -- io.write("[HANDLE] GC attached.\n")
-        -- io.stdout:flush()
     else
         io.write("[HANDLE] Handle is INVALID or NULL, skipping GC.\n")
         io.stdout:flush()
@@ -58,8 +49,11 @@ end
 
 function SafeHandle:get() return self.handle end
 
--- Static Factories
-function SafeHandle.new(h, c) return SafeHandle(h, c) end
+-- [FIX] Removed SafeHandle.new to prevent recursion loop with ext.class __call mechanism
+-- ext.class automatically provides a .new() method that calls init().
+-- Using SafeHandle(h) or SafeHandle:new(h) is sufficient.
+
+-- Guard factory (Alias for instantiation, useful for explicit intent)
 function SafeHandle.guard(h, c) return SafeHandle(h, c) end
 
 return SafeHandle

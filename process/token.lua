@@ -32,7 +32,8 @@ function M.open_process_token(pid, access)
     
     -- [DEBUG] Separate handle creation
     print("[TOKEN] Creating SafeHandle...")
-    local safe = Handle.new(hToken[0])
+    -- Handle is the class. Calling it invokes __call -> new -> init.
+    local safe = Handle(hToken[0]) 
     print("[TOKEN] Handle wrapped successfully")
     return safe
 end
