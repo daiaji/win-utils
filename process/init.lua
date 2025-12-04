@@ -186,12 +186,30 @@ end
 function M.each()
     local hSnap = kernel32.CreateToolhelp32Snapshot(2, 0)
     if hSnap == INVALID_HANDLE then return function() end end
+    
+    -- [FIX] Auto-close snapshot via GC anchor to prevent leaks on break
+    local anchor = ffi.new("struct { int x; }") -- Dummy cdata
+    ffi.gc(anchor, function() kernel32.CloseHandle(hSnap) end)
+    
     local pe = ffi.new("PROCESSENTRY32W"); pe.dwSize = ffi.sizeof(pe)
     local first = true
+    local closed = false
+    
     return function()
+        if closed then return nil end
         local res = first and kernel32.Process32FirstW(hSnap, pe) or kernel32.Process32NextW(hSnap, pe)
         first = false
-        if res == 0 then kernel32.CloseHandle(hSnap); return nil end
+        if res == 0 then 
+            -- Explicit close for loop completion
+            ffi.gc(anchor, nil)
+            kernel32.CloseHandle(hSnap) 
+            closed = true
+            return nil 
+        end
+        
+        -- Keep anchor alive during iteration
+        local _ = anchor 
+        
         return { 
             pid = tonumber(pe.th32ProcessID), 
             name = util.from_wide(pe.szExeFile), 
@@ -217,24 +235,35 @@ end
 
 function M.exists(n) 
     if type(n)=="number" then 
-        -- [MODIFIED] Check exit code to avoid false positives for zombie processes (held handles)
-        -- 0x1000 = PROCESS_QUERY_LIMITED_INFORMATION
-        local h = kernel32.OpenProcess(0x1000, false, n)
+        -- [MODIFIED] Robust check using SYNCHRONIZE (0x100000) first
+        local h = kernel32.OpenProcess(0x100000, false, n)
         if h and h ~= INVALID_HANDLE then 
+            -- WaitForSingleObject(h, 0) == WAIT_TIMEOUT (258) -> Running
+            -- WAIT_OBJECT_0 (0) -> Terminated
+            local res = kernel32.WaitForSingleObject(h, 0)
+            kernel32.CloseHandle(h)
+            
+            if res == 258 then return n end
+            return 0
+        end
+        
+        -- Fallback: If we don't have SYNCHRONIZE access (e.g. system process), try QUERY_LIMITED
+        h = kernel32.OpenProcess(0x1000, false, n)
+        if h and h ~= INVALID_HANDLE then
             local code = ffi.new("DWORD[1]")
             local is_running = false
-            
             if kernel32.GetExitCodeProcess(h, code) ~= 0 then
                 -- 259 = STILL_ACTIVE
                 if code[0] == 259 then is_running = true end
             else
-                -- If we can't query exit code but opened handle, assume running conservatively
+                -- If we can open handle but fails query, assume exists (defensive)
                 is_running = true
             end
-            
             kernel32.CloseHandle(h)
-            return is_running and n or 0 
-        end 
+            return is_running and n or 0
+        end
+        
+        -- Can't open handle -> Likely doesn't exist (or protected PPL)
         return 0 
     else 
         return find_pid_by_name(n) 
