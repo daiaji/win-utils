@@ -217,8 +217,24 @@ end
 
 function M.exists(n) 
     if type(n)=="number" then 
-        local h=kernel32.OpenProcess(0x1000,false,n)
-        if h and h~=INVALID_HANDLE then kernel32.CloseHandle(h); return n end 
+        -- [MODIFIED] Check exit code to avoid false positives for zombie processes (held handles)
+        -- 0x1000 = PROCESS_QUERY_LIMITED_INFORMATION
+        local h = kernel32.OpenProcess(0x1000, false, n)
+        if h and h ~= INVALID_HANDLE then 
+            local code = ffi.new("DWORD[1]")
+            local is_running = false
+            
+            if kernel32.GetExitCodeProcess(h, code) ~= 0 then
+                -- 259 = STILL_ACTIVE
+                if code[0] == 259 then is_running = true end
+            else
+                -- If we can't query exit code but opened handle, assume running conservatively
+                is_running = true
+            end
+            
+            kernel32.CloseHandle(h)
+            return is_running and n or 0 
+        end 
         return 0 
     else 
         return find_pid_by_name(n) 

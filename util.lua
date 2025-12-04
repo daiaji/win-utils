@@ -6,8 +6,9 @@ local CP_UTF8 = 65001
 local scratch_buf = ffi.new("wchar_t[32768]") 
 
 local function log(msg)
-    io.write(msg .. "\n")
-    io.stdout:flush()
+    -- [DEBUG] Silenced for production/test output cleanliness
+    -- io.write(msg .. "\n")
+    -- io.stdout:flush()
 end
 
 function M.to_wide(str, use_scratch)

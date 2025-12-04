@@ -14,6 +14,8 @@ end
 function TestProcess:tearDown()
     if self.proc and self.proc:is_valid() then
         self.proc:terminate()
+        -- [CRITICAL] Close handle explicitly to allow process object destruction
+        self.proc:close() 
     end
 end
 
@@ -71,6 +73,10 @@ function TestProcess:test_Tree_Kill()
     
     local pid = p.pid
     p:terminate_tree()
+    
+    -- [CRITICAL FIX] Close our handle to the process. 
+    -- If we keep it open, the process object remains (as zombie) and exists() returns true (if it only checks OpenProcess).
+    p:close()
     
     -- Wait for cleanup
     ffi.C.Sleep(1000)
