@@ -3,12 +3,16 @@ local defs = require 'win-utils.disk.defs'
 local types = require 'win-utils.disk.types'
 local util = require 'win-utils.core.util'
 local ole32 = require 'ffi.req' 'Windows.sdk.ole32'
+-- [FIX] Ensure definitions for DRIVE_LAYOUT_INFORMATION_EX are loaded
+require 'ffi.req' 'Windows.sdk.winioctl'
 
 local M = {}
 
 local function get_raw(d)
-    local sz = ffi.sizeof("DRIVE_LAYOUT_INFORMATION_EX") + 128*ffi.sizeof("PARTITION_INFORMATION_EX")
+    -- Using the extended structure for FFI safety
+    local sz = ffi.sizeof("DRIVE_LAYOUT_INFORMATION_EX_FULL")
     local buf = ffi.new("uint8_t[?]", sz)
+    -- IOCTL_DISK_GET_DRIVE_LAYOUT_EX expects standard struct size at least
     if not d:ioctl(defs.IOCTL.GET_LAYOUT, nil, 0, buf, sz) then return nil end
     return ffi.cast("DRIVE_LAYOUT_INFORMATION_EX_FULL*", buf), sz
 end

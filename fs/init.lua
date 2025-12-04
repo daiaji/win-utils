@@ -4,12 +4,10 @@ local kernel32 = require 'ffi.req' 'Windows.sdk.kernel32'
 local version = require 'ffi.req' 'Windows.sdk.version'
 local ntdll = require 'ffi.req' 'Windows.sdk.ntdll'
 local util = require 'win-utils.core.util'
--- [FIX] Added dependency for native.open_file
 local native = require 'win-utils.core.native'
 
 local M = {}
 
--- [Lazy Loading Submodules]
 local sub_modules = {
     native = 'win-utils.fs.raw',
     ntfs   = 'win-utils.fs.ntfs',
@@ -28,26 +26,8 @@ setmetatable(M, {
     end
 })
 
--- Native Directory Information Struct
-ffi.cdef[[
-    typedef struct _FILE_DIRECTORY_INFORMATION {
-        ULONG NextEntryOffset;
-        ULONG FileIndex;
-        LARGE_INTEGER CreationTime;
-        LARGE_INTEGER LastAccessTime;
-        LARGE_INTEGER LastWriteTime;
-        LARGE_INTEGER ChangeTime;
-        LARGE_INTEGER EndOfFile;
-        LARGE_INTEGER AllocationSize;
-        ULONG FileAttributes;
-        ULONG FileNameLength;
-        WCHAR FileName[1];
-    } FILE_DIRECTORY_INFORMATION;
-]]
-
 -- [Internal] Native Directory Iterator
 local function scandir_native(path)
-    -- [FIX] Use native.open_file instead of raw.open_file (which didn't exist)
     local h, err = native.open_file(path, "r", true) 
     if not h then return function() end end
     
@@ -85,7 +65,6 @@ end
 -- [Internal] Recursive Delete
 local function rm_rf(path)
     local raw = require 'win-utils.fs.raw'
-    -- 1. Try POSIX delete first
     if raw.delete_posix(path) then return true end
     
     local attr = kernel32.GetFileAttributesW(util.to_wide(path))
@@ -103,26 +82,23 @@ local function rm_rf(path)
         end
         
         if ok then
-            -- Remove ReadOnly if present before deleting dir
             if bit.band(attr, 1) ~= 0 then raw.set_attributes(path, 0x80) end
             return kernel32.RemoveDirectoryW(util.to_wide(path)) ~= 0
         end
         return false
     end
     
-    -- File fallback
     if bit.band(attr, 1) ~= 0 then raw.set_attributes(path, 0x80) end
     return kernel32.DeleteFileW(util.to_wide(path)) ~= 0
 end
 
--- [Internal] Recursive Copy
 local function cp_r(src, dst, fail_on_exist)
     local attr = kernel32.GetFileAttributesW(util.to_wide(src))
     if attr == 0xFFFFFFFF then return false, "Source not found" end
     
-    if bit.band(attr, 0x10) == 0 then -- File
+    if bit.band(attr, 0x10) == 0 then
         return kernel32.CopyFileW(util.to_wide(src), util.to_wide(dst), fail_on_exist and 1 or 0) ~= 0
-    else -- Directory
+    else
         if kernel32.CreateDirectoryW(util.to_wide(dst), nil) == 0 then
             if kernel32.GetLastError() ~= 183 then return false, "CreateDir failed" end
         end
@@ -133,15 +109,12 @@ local function cp_r(src, dst, fail_on_exist)
     end
 end
 
--- [API Exports]
 function M.copy(src, dst) return cp_r(src, dst, false) end
 function M.move(src, dst) return kernel32.MoveFileExW(util.to_wide(src), util.to_wide(dst), 11) ~= 0 end
 function M.delete(path) return rm_rf(path) end
 M.force_delete = M.delete
 
 function M.recycle(path)
-    -- Recycle bin logic (Shell32)
-    -- In PE, usually fails or Shell32 is missing
     local sh = ffi.load("shell32")
     if not sh then return false, "Recycle bin not available" end
     local op = ffi.new("SHFILEOPSTRUCTW")
