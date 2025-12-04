@@ -2,7 +2,9 @@ local ffi = require 'ffi'
 local util = require 'win-utils.core.util'
 local token = require 'win-utils.process.token'
 
--- 定义 SetNamedSecurityInfoW (Advapi32)
+-- [FIX] Explicitly load Advapi32 for SetNamedSecurityInfoW
+local advapi32 = ffi.load("advapi32")
+
 ffi.cdef[[
     DWORD SetNamedSecurityInfoW(
         LPWSTR pObjectName,
@@ -27,7 +29,7 @@ function M.reset(path)
     -- OWNER_SECURITY_INFORMATION (1) | DACL_SECURITY_INFORMATION (4)
     local flags = 5
     
-    local res = ffi.C.SetNamedSecurityInfoW(
+    local res = advapi32.SetNamedSecurityInfoW(
         util.to_wide(path),
         1, -- SE_FILE_OBJECT
         flags,

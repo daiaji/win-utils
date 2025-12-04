@@ -4,6 +4,8 @@ local kernel32 = require 'ffi.req' 'Windows.sdk.kernel32'
 local version = require 'ffi.req' 'Windows.sdk.version'
 local ntdll = require 'ffi.req' 'Windows.sdk.ntdll'
 local util = require 'win-utils.core.util'
+-- [FIX] Added dependency for native.open_file
+local native = require 'win-utils.core.native'
 
 local M = {}
 
@@ -45,9 +47,8 @@ ffi.cdef[[
 
 -- [Internal] Native Directory Iterator
 local function scandir_native(path)
-    -- Lazy require
-    local raw = require 'win-utils.fs.raw'
-    local h, err = raw.open_file(path, "r", true) 
+    -- [FIX] Use native.open_file instead of raw.open_file (which didn't exist)
+    local h, err = native.open_file(path, "r", true) 
     if not h then return function() end end
     
     local buf_size = 4096
