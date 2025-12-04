@@ -1,7 +1,6 @@
 local M = {}
 
--- [OPTIMIZATION] Lazy Loading
--- Modules are only loaded when accessed. This significantly improves startup time.
+print("[DEBUG] Loading win-utils root (Lazy Mode)...")
 
 local modules = {
     util     = 'win-utils.util',
@@ -10,7 +9,7 @@ local modules = {
     
     registry = 'win-utils.registry',
     shortcut = 'win-utils.shortcut',
-    fs       = 'win-utils.fs.init', -- Note: fs.init handles submodules
+    fs       = 'win-utils.fs.init',
     shell    = 'win-utils.shell',
     hotkey   = 'win-utils.hotkey',
     service  = 'win-utils.service',
@@ -30,7 +29,6 @@ setmetatable(M, {
     __index = function(t, key)
         local path = modules[key]
         if path then
-            -- print("[DEBUG] Lazy loading: " .. key .. " -> " .. path)
             local mod = require(path)
             rawset(t, key, mod) -- Cache result
             return mod

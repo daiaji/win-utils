@@ -1,5 +1,4 @@
 local ffi = require 'ffi'
-local bit = require 'bit'
 local defs = require 'win-utils.disk.defs'
 local util = require 'win-utils.util'
 local native = require 'win-utils.native'
@@ -14,12 +13,11 @@ local PhysicalDrive = class()
 function PhysicalDrive:init(index, write_access, exclusive)
     self.path = type(index) == "number" and ("\\\\.\\PhysicalDrive" .. index) or index
     
-    -- [REFACTOR] Use centralized native opener
     local h, err = native.open_device(self.path, write_access, exclusive)
     if not h then error("Open failed: " .. tostring(err)) end
     
     self.obj = h
-    self.handle = h:get() -- Cache raw handle for performance in tight loops
+    self.handle = h:get()
     
     self.sector_size = 512
     self.size = 0
@@ -52,7 +50,6 @@ function PhysicalDrive:lock(force)
             return true
         end
         if (force and (i % 20 == 0)) or (i == 50) then
-            -- Lazy load to break circular dependency is handled by process module being lazy loaded in init
             local pids = proc_handle.find_locking_pids(self.path)
             for _, pid in ipairs(pids) do proc_utils.terminate_by_pid(pid) end
             if #pids > 0 then kernel32.Sleep(500) end
@@ -161,5 +158,4 @@ end
 function PhysicalDrive:write_sectors(o, d) return self:io_op(o, d, true) end
 function PhysicalDrive:read_sectors(o, s) return self:io_op(o, s, false) end
 
--- Return class directly, caller uses PhysicalDrive(idx)
 return PhysicalDrive

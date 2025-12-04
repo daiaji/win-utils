@@ -7,9 +7,6 @@ local Handle = require 'win-utils.handle'
 local M = {}
 local C = ffi.C
 
--- [REFACTOR] Common I/O logic
--- Centralizes CreateFileW logic to ensure consistent sharing modes and flags.
-
 local function open_internal(path, access, share, creation, flags)
     local wpath = util.to_wide(path)
     if not wpath then return nil, "Invalid path" end
@@ -23,7 +20,6 @@ local function open_internal(path, access, share, creation, flags)
     return Handle(h)
 end
 
--- Open file/directory (supports backup semantics for dirs)
 function M.open_file(path, write, exclusive)
     local access = write and bit.bor(C.GENERIC_READ, C.GENERIC_WRITE) or C.GENERIC_READ
     local share = exclusive and 0 or bit.bor(C.FILE_SHARE_READ, C.FILE_SHARE_WRITE, C.FILE_SHARE_DELETE)
@@ -32,10 +28,8 @@ function M.open_file(path, write, exclusive)
     return open_internal(path, access, share, C.OPEN_EXISTING, flags)
 end
 
--- Open raw volume/disk (no buffering, write through)
 function M.open_device(path, write, exclusive)
     local p = path
-    -- Auto-fix paths
     if type(p) == "string" then
         if p:match("^%a:$") then p = "\\\\.\\" .. p
         elseif p:match("^%a:\\$") then p = "\\\\.\\" .. p:sub(1,2) 
@@ -50,8 +44,6 @@ function M.open_device(path, write, exclusive)
     
     return open_internal(p, access, share, C.OPEN_EXISTING, flags)
 end
-
--- Native Object Helpers
 
 function M.to_unicode_string(str)
     if not str then return nil, nil end
