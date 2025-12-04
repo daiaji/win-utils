@@ -1,0 +1,96 @@
+name: Win-Utils CI
+
+on:
+  push:
+    branches: ["main", "master"]
+    paths:
+      - 'win-utils/**'
+      - '.github/workflows/ci.yml'
+  pull_request:
+    branches: ["main", "master"]
+  workflow_dispatch:
+
+env:
+  LUAJIT_CACHE_KEY: windows-luajit-2.1-v1
+  LUAJIT_BIN_DIR: ${{ github.workspace }}\luajit_build
+
+jobs:
+  test:
+    name: Test Suite
+    runs-on: windows-latest
+    
+    steps:
+      - name: Checkout Source
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # 1. 缓存 LuaJIT 构建产物
+      - name: Cache LuaJIT
+        id: cache-luajit
+        uses: actions/cache@v3
+        with:
+          path: ${{ env.LUAJIT_BIN_DIR }}
+          key: ${{ env.LUAJIT_CACHE_KEY }}
+
+      # 2. 编译 LuaJIT (仅当缓存未命中时)
+      - name: Setup MSVC
+        if: steps.cache-luajit.outputs.cache-hit != 'true'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Build LuaJIT
+        if: steps.cache-luajit.outputs.cache-hit != 'true'
+        shell: cmd
+        run: |
+          cd vendor/luajit/src
+          call msvcbuild.bat static
+          if %errorlevel% neq 0 exit /b %errorlevel%
+          
+          if not exist "%LUAJIT_BIN_DIR%" mkdir "%LUAJIT_BIN_DIR%"
+          copy luajit.exe "%LUAJIT_BIN_DIR%\"
+          copy lua51.dll "%LUAJIT_BIN_DIR%\"
+          copy lua51.lib "%LUAJIT_BIN_DIR%\"
+          
+          if not exist "%LUAJIT_BIN_DIR%\jit" mkdir "%LUAJIT_BIN_DIR%\jit"
+          copy jit\*.lua "%LUAJIT_BIN_DIR%\jit\"
+
+      # 3. 部署测试环境
+      - name: Assemble Environment
+        shell: pwsh
+        run: |
+          $stage = New-Item -ItemType Directory -Path "stage" -Force
+          $bin = New-Item -ItemType Directory -Path "stage/bin" -Force
+          $lua = New-Item -ItemType Directory -Path "stage/lua" -Force
+          
+          # Binaries
+          Copy-Item "${{ env.LUAJIT_BIN_DIR }}\*" $bin -Recurse
+          
+          # Dependencies: Correctly place them in package path structure
+          # lua-ext -> stage/lua/ext/
+          if (Test-Path "vendor/lua-ext") {
+              $extDest = New-Item -ItemType Directory -Path "$lua/ext" -Force
+              Copy-Item "vendor/lua-ext/*.lua" $extDest
+          }
+          
+          # lua-ffi-bindings -> stage/lua/ffi/
+          if (Test-Path "vendor/lua-ffi-bindings") {
+              $ffiDest = New-Item -ItemType Directory -Path "$lua/ffi" -Force
+              Copy-Item "vendor/lua-ffi-bindings/*" $ffiDest -Recurse
+          }
+          
+          # Win-Utils (本仓库) -> stage/lua/win-utils/
+          $pkg = New-Item -ItemType Directory -Path "$lua/win-utils" -Force
+          Copy-Item "win-utils/*" $pkg -Recurse
+          
+          # Test Deps
+          Invoke-WebRequest "https://raw.githubusercontent.com/bluebird75/luaunit/master/luaunit.lua" -OutFile "$lua/luaunit.lua"
+          
+          echo "STAGE_PATH=$($stage.FullName)" >> $env:GITHUB_ENV
+
+      # 4. 运行测试
+      - name: Run Tests
+        shell: cmd
+        env:
+          LUA_PATH: ${{ env.STAGE_PATH }}\lua\?.lua;${{ env.STAGE_PATH }}\lua\?\init.lua;;
+        run: |
+          "${{ env.STAGE_PATH }}\bin\luajit.exe" "win-utils\tests\run_tests.lua" -v

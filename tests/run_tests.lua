@@ -1,34 +1,34 @@
+-- Global Test Runner
 local ffi = require 'ffi'
 
--- [CRITICAL] Disable JIT to prevent FFI stability issues during tests
--- Many FFI crashes/hangs are due to JIT compilation of bad cdefs or callbacks
+-- [CRITICAL] Disable JIT for FFI stability during heavy tests
 if jit then 
     jit.off() 
-    jit.flush()
-    print("[INIT] JIT Disabled for stability.")
+    jit.flush() 
 end
+
+-- Polyfill for environments without 'win-utils' in package.path correctly setup
+-- This allows running directly from source folder structure
+local function setup_path()
+    local sep = package.config:sub(1,1)
+    local root = debug.getinfo(1).source:match("@(.*[\\/])tests[\\/]") 
+    if root then
+        -- Add project root to path so 'require "win-utils"' works
+        package.path = root .. "?.lua;" .. root .. "?" .. sep .. "init.lua;" .. package.path
+    end
+end
+setup_path()
 
 local luaunit = require('luaunit')
 
--- 强制刷新缓冲区，确保 CI 日志实时输出
-io.stdout:setvbuf('no')
-io.stderr:setvbuf('no')
+print("=== Win-Utils Test Suite ===")
+print("OS: " .. ffi.os .. " / Arch: " .. ffi.arch)
 
-print("=== Win-Utils Test Suite (Complete Coverage) ===")
-print("OS: " .. ffi.os)
-print("Arch: " .. ffi.arch)
-
--- 1. 加载核心测试 (FS, Registry, Disk, Handle)
-print("Loading: core_spec")
+-- Load Suites
 require 'win-utils.tests.core_spec'
-
--- 2. 加载进程测试 (Process, Token, Service, NetStat)
-print("Loading: process_spec")
 require 'win-utils.tests.process_spec'
+require 'win-utils.tests.disk_spec'
+require 'win-utils.tests.net_spec'
+require 'win-utils.tests.sys_spec'
 
--- 3. 加载扩展测试 (Network, Job, WIM, VHD, Desktop)
-print("Loading: extra_spec")
-require 'win-utils.tests.extra_spec'
-
--- 运行
 os.exit(luaunit.LuaUnit.run())

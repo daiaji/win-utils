@@ -3,8 +3,7 @@ local bit = require 'bit'
 local setupapi = require 'ffi.req' 'Windows.sdk.setupapi'
 local kernel32 = require 'ffi.req' 'Windows.sdk.kernel32'
 local cfgmgr32 = require 'ffi.req' 'Windows.sdk.cfgmgr32'
-local util = require 'win-utils.util'
-local Handle = require 'win-utils.handle'
+local util = require 'win-utils.core.util'
 local defs = require 'win-utils.disk.defs'
 
 local M = {}
@@ -34,12 +33,9 @@ local function get_disk_devinst(drive_index)
                 if setupapi.SetupDiGetDeviceInterfaceDetailW(hInfo, ifaceData, detail, req[0], nil, nil) ~= 0 then
                     local hDev = kernel32.CreateFileW(detail.DevicePath, 0, 3, nil, 3, 0, nil)
                     if hDev ~= ffi.cast("HANDLE", -1) then
-                        local num = ffi.new("STORAGE_DEVICE_NUMBER")
-                        local bytes = ffi.new("DWORD[1]")
-                        if kernel32.DeviceIoControl(hDev, defs.IOCTL.STORAGE_GET_DEVICE_NUMBER, nil, 0, num, ffi.sizeof(num), bytes, nil) ~= 0 then
-                            if tonumber(num.DeviceNumber) == drive_index then
-                                result = devData.DevInst
-                            end
+                        local num = util.ioctl(hDev, defs.IOCTL.GET_NUM, nil, 0, "STORAGE_DEVICE_NUMBER")
+                        if num and tonumber(num.DeviceNumber) == drive_index then
+                            result = devData.DevInst
                         end
                         kernel32.CloseHandle(hDev)
                     end
@@ -100,8 +96,8 @@ function M.cycle_port(physical_drive_index)
         local len = ffi.new("ULONG[1]", 2048)
         local type_ptr = ffi.new("ULONG[1]")
         
-        -- 获取 Service 属性
-        if cfgmgr32.CM_Get_DevNode_Registry_PropertyW(current, 0x05, type_ptr, buf, len, 0) == 0 then -- CM_DRP_SERVICE
+        -- 获取 Service 属性 (CM_DRP_SERVICE = 0x05)
+        if cfgmgr32.CM_Get_DevNode_Registry_PropertyW(current, 0x05, type_ptr, buf, len, 0) == 0 then
             local svc = util.from_wide(buf)
             if svc and svc:upper():find("USBHUB") then
                 hub_inst = current
@@ -109,10 +105,10 @@ function M.cycle_port(physical_drive_index)
             end
         end
         
-        -- 获取 Address (Port Number)
+        -- 获取 Address (Port Number) (CM_DRP_ADDRESS = 0x1C)
         local addr = ffi.new("DWORD[1]")
         len[0] = 4
-        if cfgmgr32.CM_Get_DevNode_Registry_PropertyW(current, 0x1C, type_ptr, addr, len, 0) == 0 then -- CM_DRP_ADDRESS
+        if cfgmgr32.CM_Get_DevNode_Registry_PropertyW(current, 0x1C, type_ptr, addr, len, 0) == 0 then
             port = addr[0]
         end
         
@@ -125,6 +121,7 @@ function M.cycle_port(physical_drive_index)
     local hub_path = get_hub_path(hub_inst)
     if not hub_path then return false, "Hub path not found" end
     
+    -- IOCTL_USB_HUB_CYCLE_PORT needs write access
     local hHub = kernel32.CreateFileW(util.to_wide(hub_path), C.GENERIC_WRITE, C.FILE_SHARE_WRITE, nil, C.OPEN_EXISTING, 0, nil)
     if hHub == ffi.cast("HANDLE", -1) then return false, "Open Hub failed" end
     
@@ -149,6 +146,7 @@ function M.cycle_disk(physical_drive_index)
     local i = 0
     local target_dev = nil
     
+    -- 查找目标设备上下文
     while setupapi.SetupDiEnumDeviceInfo(hInfo, i, devData) ~= 0 do
         if setupapi.SetupDiEnumDeviceInterfaces(hInfo, devData, GUID_DISK, 0, ifaceData) ~= 0 then
             local req = ffi.new("DWORD[1]")
@@ -160,13 +158,10 @@ function M.cycle_disk(physical_drive_index)
                 if setupapi.SetupDiGetDeviceInterfaceDetailW(hInfo, ifaceData, detail, req[0], nil, nil) ~= 0 then
                     local hDev = kernel32.CreateFileW(detail.DevicePath, 0, 3, nil, 3, 0, nil)
                     if hDev ~= ffi.cast("HANDLE", -1) then
-                        local num = ffi.new("STORAGE_DEVICE_NUMBER")
-                        local bytes = ffi.new("DWORD[1]")
-                        if kernel32.DeviceIoControl(hDev, defs.IOCTL.STORAGE_GET_DEVICE_NUMBER, nil, 0, num, ffi.sizeof(num), bytes, nil) ~= 0 then
-                            if tonumber(num.DeviceNumber) == physical_drive_index then
-                                target_dev = ffi.new("SP_DEVINFO_DATA")
-                                ffi.copy(target_dev, devData, ffi.sizeof(devData))
-                            end
+                        local num = util.ioctl(hDev, defs.IOCTL.GET_NUM, nil, 0, "STORAGE_DEVICE_NUMBER")
+                        if num and tonumber(num.DeviceNumber) == physical_drive_index then
+                            target_dev = ffi.new("SP_DEVINFO_DATA")
+                            ffi.copy(target_dev, devData, ffi.sizeof(devData))
                         end
                         kernel32.CloseHandle(hDev)
                     end
@@ -184,16 +179,18 @@ function M.cycle_disk(physical_drive_index)
     
     local params = ffi.new("SP_PROPCHANGE_PARAMS")
     params.ClassInstallHeader.cbSize = ffi.sizeof("SP_CLASSINSTALL_HEADER")
-    params.ClassInstallHeader.InstallFunction = 0x12 
-    params.Scope = 0x2 
+    params.ClassInstallHeader.InstallFunction = 0x12 -- DIF_PROPERTYCHANGE
+    params.Scope = 0x2 -- DICS_FLAG_CONFIGSPECIFIC
     params.HwProfile = 0
     
+    -- Disable
     params.StateChange = 0x2 -- DICS_DISABLE
     setupapi.SetupDiSetClassInstallParamsW(hInfo, target_dev, ffi.cast("PSP_CLASSINSTALL_HEADER", params), ffi.sizeof(params))
     setupapi.SetupDiChangeState(hInfo, target_dev)
     
     kernel32.Sleep(250)
     
+    -- Enable
     params.StateChange = 0x1 -- DICS_ENABLE
     setupapi.SetupDiSetClassInstallParamsW(hInfo, target_dev, ffi.cast("PSP_CLASSINSTALL_HEADER", params), ffi.sizeof(params))
     local res = setupapi.SetupDiChangeState(hInfo, target_dev)

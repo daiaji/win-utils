@@ -1,59 +1,85 @@
 local ffi = require 'ffi'
 local kernel32 = require 'ffi.req' 'Windows.sdk.kernel32'
-local util = require 'win-utils.util'
-local Handle = require 'win-utils.handle'
+local util = require 'win-utils.core.util'
 local defs = require 'win-utils.disk.defs'
-
 local M = {}
 
--- 自动挂载管理
-function M.set_automount(enable)
+function M.set_automount(en)
     local h = kernel32.CreateFileW(util.to_wide("\\\\.\\MountPointManager"), 0, 3, nil, 3, 0, nil)
     if h == ffi.cast("HANDLE", -1) then return false end
-    local state = ffi.new("int[1]", enable and 1 or 0)
-    local res = util.ioctl(h, defs.IOCTL.MOUNTMGR_SET_AUTO_MOUNT, state, 4)
+    local s = ffi.new("int[1]", en and 1 or 0)
+    local r = util.ioctl(h, 0x6D0040, s, 4) -- SET_AUTO_MOUNT
     kernel32.CloseHandle(h)
-    return res ~= nil
+    return r ~= nil
 end
 
 function M.get_automount()
     local h = kernel32.CreateFileW(util.to_wide("\\\\.\\MountPointManager"), 0, 3, nil, 3, 0, nil)
     if h == ffi.cast("HANDLE", -1) then return nil end
-    local state = util.ioctl(h, defs.IOCTL.MOUNTMGR_QUERY_AUTO_MOUNT, nil, 0, "int")
+    local s = util.ioctl(h, 0x6D003C, nil, 0, "int") -- QUERY_AUTO_MOUNT
     kernel32.CloseHandle(h)
-    return state and (state[0] == 1)
+    return s and s[0] == 1
 end
 
--- [FIX] 恢复强制挂载 (DefineDosDeviceW)
--- 这对于将物理路径 \Device\HarddiskVolumeX 映射为盘符至关重要
-function M.force_mount(letter, target)
-    -- DDD_RAW_TARGET_PATH | DDD_NO_BROADCAST_SYSTEM
-    local flags = 0x9 
-    local t = target
-    
-    -- 处理 NT 路径格式，DefineDosDeviceW 的 RAW 模式需要原生 NT 路径
-    -- 移除 Lua 侧的转义，确保只有一层 \??\
-    if t:match("^%\\%?%?%\\") then 
-        t = t:sub(5) 
-    end
-    
-    if not t:match("^%\\") then 
-        t = "\\??\\" .. t 
-    elseif not t:match("^%\\%?%?%\\") then
-        t = "\\??\\" .. t:sub(2) -- 假设是 \Device\...
-    end
-    
-    -- 实际上 DefineDosDeviceW(DDD_RAW_TARGET_PATH) 需要的是完整的 NT 对象路径
-    -- 例如 \Device\HarddiskVolume1
-    -- 如果 target 已经是 NT 路径，则直接使用
-    
-    return kernel32.DefineDosDeviceW(flags, util.to_wide(letter), util.to_wide(target)) ~= 0
+function M.find_free()
+    local m = kernel32.GetLogicalDrives()
+    for i=25,2,-1 do if bit.band(m, bit.lshift(1, i))==0 then return string.char(65+i)..":" end end
 end
 
-function M.force_unmount(letter)
-    -- DDD_REMOVE_DEFINITION | DDD_NO_BROADCAST_SYSTEM
-    local flags = 0xA
-    return kernel32.DefineDosDeviceW(flags, util.to_wide(letter), nil) ~= 0
+function M.mount(drv, path)
+    if not path:match("^%\\") then path = "\\??\\"..path end
+    return kernel32.DefineDosDeviceW(0, util.to_wide(drv), util.to_wide(path)) ~= 0
+end
+
+-- 查询挂载点目标 (e.g. "X:" -> "\Device\HarddiskVolume1")
+function M.query(drv)
+    local buf = ffi.new("wchar_t[1024]")
+    if kernel32.QueryDosDeviceW(util.to_wide(drv), buf, 1024) == 0 then return nil end
+    local t = util.from_wide(buf)
+    if t and t:match("^%\\%?%?%\\") then return t:sub(5) end
+    return t
+end
+
+function M.force_mount(drv, path)
+    local t = path
+    if t:match("^%\\%?%?%\\") then t = t:sub(5) end -- Raw target for DefineDosDevice
+    if not t:match("^%\\") then t = "\\??\\"..t end
+    return kernel32.DefineDosDeviceW(0x9, util.to_wide(drv), util.to_wide(t)) ~= 0
+end
+
+function M.unmount(drv) return kernel32.DefineDosDeviceW(2, util.to_wide(drv), nil) ~= 0 end
+
+function M.temp_mount(idx, off)
+    local layout = require('win-utils.disk.layout')
+    local d = require('win-utils.disk.physical').open(idx, "r")
+    if not d then return nil end
+    local info = layout.get(d)
+    d:close()
+    if not info then return nil end
+    for _,p in ipairs(info.parts) do
+        if p.off == off then
+            local t = string.format("\\Device\\Harddisk%d\\Partition%d", idx, p.num)
+            local l = M.find_free()
+            if l and M.mount(l, t) then return l end
+        end
+    end
+end
+
+function M.unmount_all(idx)
+    local vol = require('win-utils.disk.volume')
+    local list = vol.list()
+    if not list then return end
+    for _, v in ipairs(list) do
+        local h = vol.open(v.guid_path)
+        if h then
+            local ext = util.ioctl(h:get(), defs.IOCTL.GET_VOL_EXTENTS, nil, 0, "VOLUME_DISK_EXTENTS")
+            if ext and ext.NumberOfDiskExtents > 0 and ext.Extents[0].DiskNumber == idx then
+                for _, mp in ipairs(v.mount_points) do M.unmount(mp:sub(1,2)) end
+                util.ioctl(h:get(), defs.IOCTL.DISMOUNT)
+            end
+            h:close()
+        end
+    end
 end
 
 return M

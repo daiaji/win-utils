@@ -1,13 +1,12 @@
 local ffi = require 'ffi'
 local virtdisk = require 'ffi.req' 'Windows.sdk.virtdisk'
 local kernel32 = require 'ffi.req' 'Windows.sdk.kernel32'
-local util = require 'win-utils.util'
-local Handle = require 'win-utils.handle'
-
-local C = virtdisk
-local VENDOR_MS = ffi.new("GUID", {0xEC984AEC, 0xA0F9, 0x47e9, {0x90, 0x1F, 0x71, 0x41, 0x5A, 0x66, 0x34, 0x5B}})
+local util = require 'win-utils.core.util'
+local Handle = require 'win-utils.core.handle'
 
 local M = {}
+local C = virtdisk
+local VENDOR_MS = ffi.new("GUID", {0xEC984AEC, 0xA0F9, 0x47e9, {0x90, 0x1F, 0x71, 0x41, 0x5A, 0x66, 0x34, 0x5B}})
 
 function M.create(path, size_bytes)
     local vst = ffi.new("VIRTUAL_STORAGE_TYPE")
@@ -19,7 +18,6 @@ function M.create(path, size_bytes)
     params.Version2.MaximumSize = size_bytes
     
     local h = ffi.new("HANDLE[1]")
-    -- VIRTUAL_DISK_ACCESS_ALL | VIRTUAL_DISK_ACCESS_CREATE
     local res = C.CreateVirtualDisk(vst, util.to_wide(path), 0x30000, nil, 8, 0, params, nil, h)
     
     if res ~= 0 then return nil, "Create failed: " .. res end
@@ -28,7 +26,7 @@ end
 
 function M.open(path)
     local vst = ffi.new("VIRTUAL_STORAGE_TYPE")
-    vst.DeviceId = 0 -- Unknown (Auto)
+    vst.DeviceId = 0
     vst.VendorId = VENDOR_MS
     
     local h = ffi.new("HANDLE[1]")
@@ -38,13 +36,8 @@ function M.open(path)
     return Handle(h[0])
 end
 
-function M.attach(h) 
-    return C.AttachVirtualDisk(h:get(), nil, 0, 0, nil, nil) == 0 
-end
-
-function M.detach(h) 
-    return C.DetachVirtualDisk(h:get(), 0, 0) == 0 
-end
+function M.attach(h) return C.AttachVirtualDisk(h:get(), nil, 0, 0, nil, nil) == 0 end
+function M.detach(h) return C.DetachVirtualDisk(h:get(), 0, 0) == 0 end
 
 function M.expand(h, new_size)
     local p = ffi.new("EXPAND_VIRTUAL_DISK_PARAMETERS")
@@ -53,10 +46,7 @@ function M.expand(h, new_size)
 end
 
 function M.get_physical_path(h)
-    -- [FIX] Support both Handle object and raw cdata (for tests/flexibility)
     local raw_h = (type(h) == "table" and h.get) and h:get() or h
-    if not raw_h or raw_h == ffi.cast("HANDLE", -1) then return nil end
-
     local sz = ffi.new("DWORD[1]", 520)
     local buf = ffi.new("wchar_t[260]")
     if C.GetVirtualDiskPhysicalPath(raw_h, sz, buf) ~= 0 then return nil end

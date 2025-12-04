@@ -1,6 +1,22 @@
 local M = {}
-M.adapter = require 'win-utils.net.adapter'
-M.icmp = require 'win-utils.net.icmp'
-M.dns = require 'win-utils.net.dns'
-M.stat = require 'win-utils.net.stat'
+
+local sub_modules = {
+    adapter = 'win-utils.net.adapter',
+    dns     = 'win-utils.net.dns',
+    icmp    = 'win-utils.net.icmp',
+    stat    = 'win-utils.net.stat'
+}
+
+setmetatable(M, {
+    __index = function(t, key)
+        local path = sub_modules[key]
+        if path then
+            local mod = require(path)
+            rawset(t, key, mod)
+            return mod
+        end
+        return nil
+    end
+})
+
 return M

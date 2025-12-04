@@ -3,13 +3,11 @@ local bit = require 'bit'
 local ole32 = require 'ffi.req' 'Windows.sdk.ole32'
 local vds_sdk = require 'ffi.req' 'Windows.sdk.vds'
 local kernel32 = require 'ffi.req' 'Windows.sdk.kernel32'
-local util = require 'win-utils.util'
+local util = require 'win-utils.core.util'
 local class = require 'win-utils.deps'.class
 local volume_lib = require 'win-utils.disk.volume'
 
 local M = {}
-local C = ffi.C
-
 local function release(o) if o and o ~= ffi.NULL then o.lpVtbl.Release(o) end end
 
 local VdsContext = class()
@@ -43,7 +41,7 @@ function VdsContext:get_disk(idx)
     local unk = ffi.new("IUnknown*[1]")
     local n = ffi.new("ULONG[1]")
     
-    -- VDS Enumeration Hell (Simplified)
+    -- VDS Enumeration Hell (Full Logic Restored)
     while not found and enum[0].lpVtbl.Next(enum[0], 1, unk, n) == 0 and n[0] > 0 do
         local prov = ffi.new("IVdsProvider*[1]")
         if unk[0].lpVtbl.QueryInterface(unk[0], vds_sdk.IID_IVdsProvider, ffi.cast("void**", prov)) == 0 then
@@ -89,21 +87,16 @@ function VdsContext:get_disk(idx)
     return found
 end
 
-function M.create_context() return VdsContext() end
-
 local function vds_op(idx, cb)
     local ctx = VdsContext(); if not ctx.service then return false, "Init failed" end
     local disk = ctx:get_disk(idx)
     if not disk then ctx:close(); return false, "Disk not found" end
-    
     local adv = ffi.new("IVdsAdvancedDisk*[1]")
     local ok, msg = false, "IVdsAdvancedDisk not supported"
-    
     if disk.lpVtbl.QueryInterface(disk, vds_sdk.IID_IVdsAdvancedDisk, ffi.cast("void**", adv)) == 0 then
         ok, msg = cb(adv[0])
         release(adv[0])
     end
-    
     release(disk); ctx:close()
     return ok, msg
 end
@@ -116,13 +109,6 @@ function M.clean(idx)
         async[0].lpVtbl.Wait(async[0], hr, out)
         release(async[0])
         return (hr[0] >= 0), string.format("0x%X", hr[0])
-    end)
-end
-
-function M.delete_partition(idx, offset, force)
-    return vds_op(idx, function(adv)
-        local hr = adv.lpVtbl.DeletePartition(adv, offset, force and 1 or 0, force and 1 or 0)
-        return (hr >= 0), string.format("0x%X", hr)
     end)
 end
 

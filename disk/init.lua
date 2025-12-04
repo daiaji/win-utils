@@ -1,45 +1,111 @@
 local M = {}
 
-print("[DEBUG] Loading win-utils.disk (Eager Mode)...")
+-- [Lazy Loading Submodules]
+local sub_modules = {
+    physical  = 'win-utils.disk.physical',
+    layout    = 'win-utils.disk.layout',
+    geometry  = 'win-utils.disk.geometry',
+    mount     = 'win-utils.disk.mount',
+    format    = 'win-utils.disk.format',
+    vds       = 'win-utils.disk.vds',
+    vhd       = 'win-utils.disk.vhd',
+    badblocks = 'win-utils.disk.badblocks',
+    image     = 'win-utils.disk.image',
+    esp       = 'win-utils.disk.esp',
+    defs      = 'win-utils.disk.defs',
+    types     = 'win-utils.disk.types',
+    bitlocker = 'win-utils.disk.bitlocker'
+}
 
--- 显式加载所有子模块
-local function req(name)
-    print("[DEBUG]   - disk." .. name)
-    return require('win-utils.disk.' .. name)
+setmetatable(M, {
+    __index = function(t, key)
+        local path = sub_modules[key]
+        if path then
+            local mod = require(path)
+            rawset(t, key, mod)
+            return mod
+        end
+        return nil
+    end
+})
+
+-- [Facade APIs]
+-- 这里的 require 放在函数内部，确保调用时才加载依赖模块
+
+function M.prepare_drive(drive_index, scheme, opts)
+    local kernel32 = require 'ffi.req' 'Windows.sdk.kernel32'
+    local mount = require 'win-utils.disk.mount'
+    local physical = require 'win-utils.disk.physical'
+    local vds = require 'win-utils.disk.vds'
+    local layout = require 'win-utils.disk.layout'
+
+    mount.unmount_all_on_disk(drive_index)
+    
+    local drive = physical.open(drive_index, "rw", true)
+    if not drive then return false, "Open failed" end
+    if not drive:lock(true) then drive:close(); return false, "Lock failed" end
+    
+    local wiped = drive:wipe_layout()
+    drive:close()
+    if not wiped then return false, "Wipe layout failed" end
+    
+    vds.clean(drive_index)
+    kernel32.Sleep(500)
+    
+    drive = physical.open(drive_index, "rw", true)
+    if not drive then return false, "Re-open failed" end
+    if not drive:lock(true) then drive:close(); return false, "Re-lock failed" end
+    
+    local plan = layout.calculate_partition_plan(drive, scheme, opts)
+    local ok = layout.apply(drive, scheme, plan)
+    drive:close()
+    
+    kernel32.Sleep(1000)
+    return ok, plan
 end
 
-M.volume    = req('volume')
-M.info      = req('info')
-M.physical  = req('physical')
-M.layout    = req('layout')
-M.vds       = req('vds')
-M.vhd       = req('vhd')
-M.format    = req('format.init')
-M.badblocks = req('badblocks')
-M.types     = req('types')
-M.defs      = req('defs')
-M.safety    = req('safety')
-M.subst     = req('subst')
-M.mount     = req('mount')
-M.esp       = req('esp')
-M.op        = req('operation')
-
--- [FIX] 补充测试中依赖的别名 (Facade Methods)
-print("[DEBUG] Binding facade methods for win-utils.disk...")
-
-if M.info and M.info.list_physical_drives then
-    M.list_drives = M.info.list_physical_drives
-    print("[DEBUG]   + list_drives -> info.list_physical_drives (OK)")
-else
-    print("[ERROR]   ! info.list_physical_drives MISSING")
+function M.clean_all(drive_index, cb)
+    local mount = require 'win-utils.disk.mount'
+    local physical = require 'win-utils.disk.physical'
+    
+    mount.unmount_all_on_disk(drive_index)
+    local drive = physical.open(drive_index, "rw", true)
+    if not drive then return false end
+    if not drive:lock(true) then drive:close(); return false end
+    local ok = drive:zero_fill(0, nil, cb)
+    drive:close()
+    return ok
 end
 
-if M.op then
-    -- 转发常用的操作函数到 disk 命名空间
-    M.prepare_drive = M.op.prepare_drive
-    M.format_partition = M.op.format_partition
-    M.clean_all = M.op.clean_all
+function M.check_health(drive_index, cb, write_test)
+    local mount = require 'win-utils.disk.mount'
+    local physical = require 'win-utils.disk.physical'
+    local badblocks = require 'win-utils.disk.badblocks'
+    
+    if write_test then mount.unmount_all_on_disk(drive_index) end
+    local mode = write_test and "rw" or "r"
+    local drive = physical.open(drive_index, mode, true)
+    if not drive then return false end
+    if not drive:lock(true) then drive:close(); return false end
+    
+    local patterns = write_test and {0x55, 0xAA, 0x00, 0xFF} or nil
+    local ok, msg = badblocks.check(drive, cb, false, patterns)
+    drive:close()
+    return ok, msg
 end
 
-print("[DEBUG] win-utils.disk loaded.")
+function M.rescan()
+    local vds = require 'win-utils.disk.vds'
+    local ctx = vds.create_context()
+    if ctx then
+        if ctx.service then
+            ctx.service.lpVtbl.Refresh(ctx.service)
+            ctx.service.lpVtbl.Reenumerate(ctx.service)
+        end
+        ctx:close()
+        return true
+    end
+    return false
+end
+
 return M

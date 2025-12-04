@@ -1,372 +1,221 @@
 local ffi = require 'ffi'
-local bit = require 'bit'
-
--- [CLEANUP] Removed debug print
 local kernel32 = require 'ffi.req' 'Windows.sdk.kernel32'
+local ntdll = require 'ffi.req' 'Windows.sdk.ntdll'
 local user32 = require 'ffi.req' 'Windows.sdk.user32'
 local psapi = require 'ffi.req' 'Windows.sdk.psapi'
-local ntdll = require 'ffi.req' 'Windows.sdk.ntdll'
-local util = require 'win-utils.util'
-local Handle = require 'win-utils.handle'
+local util = require 'win-utils.core.util'
+local Handle = require 'win-utils.core.handle'
 local class = require 'win-utils.deps'.class
-
-local C = ffi.C
-local INVALID_HANDLE = ffi.cast("HANDLE", -1)
 
 local M = {}
 
--- 导出子模块
-M.token  = require 'win-utils.process.token'
-M.memory = require 'win-utils.process.memory'
-M.handle = require 'win-utils.process.handle'
-M.job    = require 'win-utils.process.job'
-M.module = require 'win-utils.process.module'
+-- [Lazy Loading Submodules]
+local sub_modules = {
+    token   = 'win-utils.process.token',
+    job     = 'win-utils.process.job',
+    memory  = 'win-utils.process.memory',
+    module  = 'win-utils.process.module',
+    handles = 'win-utils.process.handles'
+}
 
+setmetatable(M, {
+    __index = function(t, key)
+        local path = sub_modules[key]
+        if path then
+            local mod = require(path)
+            rawset(t, key, mod)
+            return mod
+        end
+        return nil
+    end
+})
+
+-- [Constants - Restored]
 M.constants = {
     SW_HIDE=0, SW_SHOWNORMAL=1, SW_SHOW=5, 
     PROCESS_ALL_ACCESS=0x1F0FFF, PROCESS_TERMINATE=1, PROCESS_QUERY_INFORMATION=0x400, 
     SYNCHRONIZE=0x100000, PROCESS_SUSPEND_RESUME=0x0800
 }
 
--- [Helper] 获取进程路径
--- Win10+ 仅使用 QueryFullProcessImageNameW
-local function get_process_path(pid, handle)
-    -- 0x1000 = PROCESS_QUERY_LIMITED_INFORMATION
-    local hProc = handle or kernel32.OpenProcess(0x1000, false, pid) 
-    if not hProc or hProc == INVALID_HANDLE then return "" end
-    
-    local buf = ffi.new("wchar_t[1024]")
-    local size = ffi.new("DWORD[1]", 1024)
-    local path = ""
-    
-    -- Win10+ Standard API
-    if kernel32.QueryFullProcessImageNameW(hProc, 0, buf, size) ~= 0 then 
-        path = util.from_wide(buf)
-    end
-    
-    if not handle then kernel32.CloseHandle(hProc) end
-    return path
-end
+local INVALID_HANDLE = ffi.cast("HANDLE", -1)
 
--- [Helper] 获取命令行
-local function get_process_command_line(pid)
-    local hProc = kernel32.OpenProcess(0x410, false, pid) -- QUERY_INFO | VM_READ
+ffi.cdef [[
+    typedef struct _RTL_USER_PROCESS_PARAMETERS {
+        BYTE Reserved1[16];
+        PVOID Reserved2[10];
+        UNICODE_STRING ImagePathName;
+        UNICODE_STRING CommandLine;
+    } RTL_USER_PROCESS_PARAMETERS;
+
+    typedef struct _PEB {
+        BYTE Reserved1[2];
+        BYTE BeingDebugged;
+        BYTE Reserved2[1];
+        PVOID Reserved3[2];
+        PVOID Ldr;
+        PVOID ProcessParameters;
+        BYTE Reserved4[104];
+        PVOID Reserved5[52];
+        PVOID PostProcessInitRoutine;
+        BYTE Reserved6[128];
+        PVOID Reserved7[1];
+        ULONG SessionId;
+    } PEB;
+]]
+
+local function get_cmd_line(pid)
+    local hProc = kernel32.OpenProcess(0x410, false, pid)
     if not hProc or hProc == INVALID_HANDLE then return "" end
     
+    local cmd = ""
     local pbi = ffi.new("PROCESS_BASIC_INFORMATION")
-    if ntdll.NtQueryInformationProcess(hProc, 0, pbi, ffi.sizeof(pbi), nil) < 0 or pbi.PebBaseAddress == nil then 
-        kernel32.CloseHandle(hProc); return "" 
-    end
-    
-    local peb = ffi.new("PEB")
-    if kernel32.ReadProcessMemory(hProc, pbi.PebBaseAddress, peb, ffi.sizeof(peb), nil) == 0 then 
-        kernel32.CloseHandle(hProc); return "" 
-    end
-    
-    local params = ffi.new("RTL_USER_PROCESS_PARAMETERS")
-    if kernel32.ReadProcessMemory(hProc, peb.ProcessParameters, params, ffi.sizeof(params), nil) == 0 then 
-        kernel32.CloseHandle(hProc); return "" 
-    end
-    
-    local len = params.CommandLine.Length
-    local res = ""
-    if len > 0 then
-        local buf = ffi.new("uint8_t[?]", len + 2)
-        if kernel32.ReadProcessMemory(hProc, params.CommandLine.Buffer, buf, len, nil) ~= 0 then
-            res = util.from_wide(ffi.cast("wchar_t*", buf), len / 2)
+    if ntdll.NtQueryInformationProcess(hProc, 0, pbi, ffi.sizeof(pbi), nil) >= 0 and pbi.PebBaseAddress ~= nil then
+        local peb = ffi.new("PEB")
+        if kernel32.ReadProcessMemory(hProc, pbi.PebBaseAddress, peb, ffi.sizeof(peb), nil) ~= 0 then
+            local params = ffi.new("RTL_USER_PROCESS_PARAMETERS")
+            if kernel32.ReadProcessMemory(hProc, peb.ProcessParameters, params, ffi.sizeof(params), nil) ~= 0 then
+                local len = params.CommandLine.Length
+                if len > 0 then
+                    local buf = ffi.new("uint8_t[?]", len + 2)
+                    if kernel32.ReadProcessMemory(hProc, params.CommandLine.Buffer, buf, len, nil) ~= 0 then
+                        cmd = util.from_wide(ffi.cast("wchar_t*", buf), len/2)
+                    end
+                end
+            end
         end
     end
     kernel32.CloseHandle(hProc)
-    return res
+    return cmd
 end
 
--- [Class] Process 对象
+local function get_path(pid, handle)
+    local h = handle
+    local close_me = false
+    if not h then 
+        h = kernel32.OpenProcess(0x1000, false, pid)
+        if not h or h == INVALID_HANDLE then return "" end
+        close_me = true
+    end
+    local buf = ffi.new("wchar_t[1024]")
+    local sz = ffi.new("DWORD[1]", 1024)
+    local path = ""
+    if kernel32.QueryFullProcessImageNameW(h, 0, buf, sz) ~= 0 then path = util.from_wide(buf) end
+    if close_me then kernel32.CloseHandle(h) end
+    return path
+end
+
 local Process = class()
-
-function Process:init(pid, handle) 
-    self.pid = pid
-    -- [FIX] Use Handle(handle) instead of Handle.new(handle)
-    if handle then self.obj = Handle(handle) end 
-end
-
-function Process:handle() return self.obj and self.obj:get() end
-function Process:is_valid() return self.obj and self.obj:is_valid() end
-function Process:close() return self.obj and self.obj:close() or false end
-
-function Process:terminate(e) 
-    if self:is_valid() then kernel32.TerminateProcess(self:handle(), e or 0) end 
-    return M.terminate_by_pid(self.pid, e) 
-end
-
-function Process:wait_for_exit(t) 
-    if not self:is_valid() then return true end 
-    return kernel32.WaitForSingleObject(self:handle(), t or -1) == 0 
-end
-
-function Process:suspend() 
-    if self:is_valid() then return ntdll.NtSuspendProcess(self:handle()) >= 0 end 
-    return M.suspend(self.pid) 
-end
-
-function Process:resume() 
-    if self:is_valid() then return ntdll.NtResumeProcess(self:handle()) >= 0 end 
-    return M.resume(self.pid) 
-end
-
-function Process:get_path() return get_process_path(self.pid, self:handle()) end
-function Process:get_command_line() return get_process_command_line(self.pid) end
-
-function Process:set_priority(p)
-    local map = { L=0x40, B=0x4000, N=0x20, A=0x8000, H=0x80, R=0x100 }
-    local val = map[p and p:upper()]
-    if not val then return false, "Invalid priority" end
-    
-    local h = self:handle()
-    local close = false
-    if not h then
-        h = kernel32.OpenProcess(0x200, false, self.pid) -- SET_INFO
-        if not h then return false, util.format_error() end
-        close = true
-    end
-    
-    local res = kernel32.SetPriorityClass(h, val) ~= 0
-    if close then kernel32.CloseHandle(h) end
-    return res
-end
-
-function Process:terminate_tree()
-    M.enable_privilege()
-    local function kill_kids(pid) 
-        for p in M.each() do 
-            if p.parent_pid == pid and p.pid ~= pid then 
-                kill_kids(p.pid)
-                M.terminate_by_pid(p.pid) 
-            end 
-        end 
-    end
-    kill_kids(self.pid)
-    return self:terminate()
-end
+function Process:init(pid, h) self.pid = pid; self.obj = Handle(h) end
+function Process:handle() return self.obj:get() end
+function Process:close() self.obj:close() end
+function Process:terminate(code) return kernel32.TerminateProcess(self:handle(), code or 0) ~= 0 end
+function Process:suspend() return ntdll.NtSuspendProcess(self:handle()) >= 0 end
+function Process:resume() return ntdll.NtResumeProcess(self:handle()) >= 0 end
+function Process:wait(ms) return kernel32.WaitForSingleObject(self:handle(), ms or -1) == 0 end
+function Process:get_path() return get_path(self.pid, self:handle()) end
+function Process:get_command_line() return get_cmd_line(self.pid) end
 
 function Process:get_info()
     if self.pid == 0 then return nil end
-    local out = { pid = self.pid }
-    local hProc = self:handle() or kernel32.OpenProcess(0x410, false, self.pid)
-    if not hProc or hProc == INVALID_HANDLE then return nil end
+    local info = { pid = self.pid }
+    local h = self:handle() or kernel32.OpenProcess(0x410, false, self.pid)
     
-    local sess = ffi.new("DWORD[1]")
-    if kernel32.ProcessIdToSessionId(self.pid, sess) ~= 0 then out.session_id = sess[0] end
-    
-    local pbi = ffi.new("PROCESS_BASIC_INFORMATION")
-    if ntdll.NtQueryInformationProcess(hProc, 0, pbi, ffi.sizeof(pbi), nil) == 0 then 
-        out.parent_pid = tonumber(pbi.InheritedFromUniqueProcessId) 
+    if h and h ~= INVALID_HANDLE then
+        local pbi = ffi.new("PROCESS_BASIC_INFORMATION")
+        if ntdll.NtQueryInformationProcess(h, 0, pbi, ffi.sizeof(pbi), nil) >= 0 then
+            info.parent_pid = tonumber(pbi.InheritedFromUniqueProcessId)
+        end
+        local pmc = ffi.new("PROCESS_MEMORY_COUNTERS_EX"); pmc.cb = ffi.sizeof(pmc)
+        if psapi.GetProcessMemoryInfo(h, pmc, ffi.sizeof(pmc)) ~= 0 then
+            info.memory_usage_bytes = tonumber(pmc.WorkingSetSize)
+        end
+        local sess = ffi.new("DWORD[1]")
+        if kernel32.ProcessIdToSessionId(self.pid, sess) ~= 0 then info.session_id = sess[0] end
+        info.exe_path = get_path(self.pid, h)
+        if not self:handle() then kernel32.CloseHandle(h) end
     end
-    
-    local pmc = ffi.new("PROCESS_MEMORY_COUNTERS_EX"); pmc.cb = ffi.sizeof(pmc)
-    if psapi.GetProcessMemoryInfo(hProc, pmc, ffi.sizeof(pmc)) ~= 0 then 
-        out.memory_usage_bytes = tonumber(pmc.WorkingSetSize) 
-    end
-    
-    out.exe_path = get_process_path(self.pid, hProc)
-    out.command_line = get_process_command_line(self.pid)
-    
-    if not self:handle() then kernel32.CloseHandle(hProc) end
-    return out
+    info.command_line = get_cmd_line(self.pid)
+    return info
 end
 
--- [Module API]
+function Process:terminate_tree()
+    -- Lazy access to token module
+    local token = require 'win-utils.process.token'
+    token.enable_privilege("SeDebugPrivilege")
+    local function kill(pid)
+        for p in M.each() do
+            if p.parent_pid == pid and p.pid ~= pid then kill(p.pid); M.terminate(p.pid) end
+        end
+    end
+    kill(self.pid)
+    return self:terminate()
+end
 
--- 迭代器模式：低内存开销遍历进程
+function M.exec(cmd, workdir, show)
+    local si = ffi.new("STARTUPINFOW"); si.cb = ffi.sizeof(si); si.dwFlags = 1; si.wShowWindow = show or 1
+    local pi = ffi.new("PROCESS_INFORMATION")
+    local wcmd = util.to_wide(cmd)
+    if kernel32.CreateProcessW(nil, wcmd, nil, nil, false, 0, nil, util.to_wide(workdir), si, pi) == 0 then return nil end
+    kernel32.CloseHandle(pi.hThread)
+    local _ = wcmd
+    return Process(tonumber(pi.dwProcessId), pi.hProcess)
+end
+
+function M.open(pid, access)
+    local h = kernel32.OpenProcess(access or 0x1F0FFF, false, pid)
+    if not h then return nil end
+    return Process(pid, h)
+end
+
 function M.each()
     local hSnap = kernel32.CreateToolhelp32Snapshot(2, 0)
     if hSnap == INVALID_HANDLE then return function() end end
-    
-    -- [FIX] Auto-close snapshot via GC anchor to prevent leaks on break
-    local anchor = ffi.new("struct { int x; }") -- Dummy cdata
-    ffi.gc(anchor, function() kernel32.CloseHandle(hSnap) end)
-    
     local pe = ffi.new("PROCESSENTRY32W"); pe.dwSize = ffi.sizeof(pe)
     local first = true
     local closed = false
-    
     return function()
         if closed then return nil end
-        local res = first and kernel32.Process32FirstW(hSnap, pe) or kernel32.Process32NextW(hSnap, pe)
-        first = false
-        if res == 0 then 
-            -- Explicit close for loop completion
-            ffi.gc(anchor, nil)
-            kernel32.CloseHandle(hSnap) 
-            closed = true
-            return nil 
-        end
-        
-        -- Keep anchor alive during iteration
-        local _ = anchor 
-        
-        return { 
-            pid = tonumber(pe.th32ProcessID), 
-            name = util.from_wide(pe.szExeFile), 
-            parent_pid = tonumber(pe.th32ParentProcessID), 
-            thread_count = tonumber(pe.cntThreads) 
-        }
+        local res
+        if first then res = kernel32.Process32FirstW(hSnap, pe); first = false
+        else res = kernel32.Process32NextW(hSnap, pe) end
+        if res == 0 then kernel32.CloseHandle(hSnap); closed = true; return nil end
+        return { pid = tonumber(pe.th32ProcessID), name = util.from_wide(pe.szExeFile), parent_pid = tonumber(pe.th32ParentProcessID), thread_count = tonumber(pe.cntThreads) }
     end
 end
 
 function M.list() local t = {}; for p in M.each() do table.insert(t, p) end return t end
 
-local function find_pid_by_name(n) 
-    local l = n:lower()
-    for p in M.each() do if p.name:lower() == l then return p.pid end end 
-    return 0 
-end
-
-function M.find_all(n) 
-    local t={}; local l=n:lower()
-    for p in M.each() do if p.name:lower()==l then table.insert(t,p.pid) end end 
-    return t 
-end
-
-function M.exists(n) 
-    if type(n)=="number" then 
-        -- [MODIFIED] Robust check using SYNCHRONIZE (0x100000) first
-        local h = kernel32.OpenProcess(0x100000, false, n)
-        if h and h ~= INVALID_HANDLE then 
-            -- WaitForSingleObject(h, 0) == WAIT_TIMEOUT (258) -> Running
-            -- WAIT_OBJECT_0 (0) -> Terminated
-            local res = kernel32.WaitForSingleObject(h, 0)
-            kernel32.CloseHandle(h)
-            
-            if res == 258 then return n end
-            return 0
-        end
-        
-        -- Fallback: If we don't have SYNCHRONIZE access (e.g. system process), try QUERY_LIMITED
-        h = kernel32.OpenProcess(0x1000, false, n)
-        if h and h ~= INVALID_HANDLE then
-            local code = ffi.new("DWORD[1]")
-            local is_running = false
-            if kernel32.GetExitCodeProcess(h, code) ~= 0 then
-                -- 259 = STILL_ACTIVE
-                if code[0] == 259 then is_running = true end
-            else
-                -- If we can open handle but fails query, assume exists (defensive)
-                is_running = true
-            end
-            kernel32.CloseHandle(h)
-            return is_running and n or 0
-        end
-        
-        -- Can't open handle -> Likely doesn't exist (or protected PPL)
-        return 0 
-    else 
-        return find_pid_by_name(n) 
-    end 
-end
-
-function M.exec(cmd, wd, show, dt)
-    local si = ffi.new("STARTUPINFOW"); si.cb = ffi.sizeof(si); si.dwFlags = 1; si.wShowWindow = show or 5
-    if dt then si.lpDesktop = util.to_wide(dt) end
-    local pi = ffi.new("PROCESS_INFORMATION")
-    local buf = ffi.new("wchar_t[?]", #cmd+1)
-    ffi.copy(buf, util.to_wide(cmd), (#cmd+1)*2)
-    
-    if kernel32.CreateProcessW(nil, buf, nil, nil, false, 0, nil, wd and util.to_wide(wd), si, pi) == 0 then 
-        return nil, util.format_error() 
+function M.exists(pid)
+    if type(pid) ~= "number" then for p in M.each() do if p.name:lower() == pid:lower() then return p.pid end end return 0 end
+    local h = kernel32.OpenProcess(0x100000, false, pid)
+    if h and h ~= INVALID_HANDLE then
+        local r = kernel32.WaitForSingleObject(h, 0)
+        kernel32.CloseHandle(h)
+        return (r == 258) and pid or 0
     end
-    kernel32.CloseHandle(pi.hThread)
-    return Process(tonumber(pi.dwProcessId), pi.hProcess)
+    h = kernel32.OpenProcess(0x1000, false, pid)
+    if h and h ~= INVALID_HANDLE then
+        local c = ffi.new("DWORD[1]")
+        local ok = (kernel32.GetExitCodeProcess(h, c) ~= 0 and c[0] == 259)
+        kernel32.CloseHandle(h)
+        return ok and pid or 0
+    end
+    return 0
 end
 
-function M.open_by_pid(pid, acc) 
-    local h = kernel32.OpenProcess(acc or 0x1F0FFF, false, pid or 0)
-    return (h and h~=INVALID_HANDLE) and Process(pid, h) or nil, util.format_error() 
-end
+function M.terminate(pid) local p = M.open(pid, 1); if p then local r = p:terminate(); p:close(); return r end return false end
+function M.suspend(pid) local p = M.open(pid, 0x800); if p then local r = p:suspend(); p:close(); return r end return false end
+function M.resume(pid) local p = M.open(pid, 0x800); if p then local r = p:resume(); p:close(); return r end return false end
 
-function M.open_by_name(n, acc) 
-    local pid = find_pid_by_name(n)
-    return pid>0 and M.open_by_pid(pid, acc) or nil, "Process not found" 
-end
-
-function M.current() return M.open_by_pid(kernel32.GetCurrentProcessId()) end
-
-function M.terminate_by_pid(pid, e) 
-    local h = kernel32.OpenProcess(1, false, pid)
-    if not h or h==INVALID_HANDLE then return false end 
-    local r = kernel32.TerminateProcess(h, e or 0)
+function M.terminate_gracefully(pid, timeout)
+    local h = kernel32.OpenProcess(0x100001, false, pid)
+    if not h then return false end
+    local ptr = ffi.new("DWORD[1]")
+    local cb = ffi.cast("WNDENUMPROC", function(w,l) user32.GetWindowThreadProcessId(w, ptr); if ptr[0]==pid then user32.PostMessageW(w, 0x10, 0, 0) end return 1 end)
+    user32.EnumWindows(cb, 0); cb:free()
+    if kernel32.WaitForSingleObject(h, timeout or 3000) == 258 then kernel32.TerminateProcess(h, 0) end
     kernel32.CloseHandle(h)
-    return r~=0 
-end
-
-function M.terminate_gracefully(pid, ms)
-    require('jit').off() -- Callback safety
-    ms = ms or 3000
-    
-    local h = kernel32.OpenProcess(0x100001, false, pid) -- SYNCHRONIZE | TERMINATE
-    if not h or h==INVALID_HANDLE then require('jit').on(); return false end
-    
-    local pid_ptr = ffi.new("DWORD[1]")
-    local cb = ffi.cast("WNDENUMPROC", function(w,l) 
-        user32.GetWindowThreadProcessId(w, pid_ptr)
-        if pid_ptr[0]==pid then user32.PostMessageW(w, 0x10, 0, 0) end -- WM_CLOSE
-        return 1 
-    end)
-    
-    user32.EnumWindows(cb, 0)
-    cb:free()
-    
-    local res = kernel32.WaitForSingleObject(h, ms)
-    if res==258 then kernel32.TerminateProcess(h, 0) end -- WAIT_TIMEOUT
-    
-    kernel32.CloseHandle(h)
-    require('jit').on()
     return true
 end
-
-function M.suspend(pid) 
-    local h = kernel32.OpenProcess(0x800, false, pid)
-    if not h or h==INVALID_HANDLE then return false end 
-    local r = ntdll.NtSuspendProcess(h)
-    kernel32.CloseHandle(h)
-    return r>=0 
-end
-
-function M.resume(pid) 
-    local h = kernel32.OpenProcess(0x800, false, pid)
-    if not h or h==INVALID_HANDLE then return false end 
-    local r = ntdll.NtResumeProcess(h)
-    kernel32.CloseHandle(h)
-    return r>=0 
-end
-
-function M.wait(n, t) 
-    t=t or -1
-    local s=kernel32.GetTickCount64()
-    while true do 
-        local p=find_pid_by_name(n)
-        if p>0 then return p end 
-        if t>=0 and (kernel32.GetTickCount64()-s)>t then return nil end 
-        kernel32.Sleep(100) 
-    end 
-end
-
-function M.wait_close(np, t) 
-    local p=tonumber(np) or find_pid_by_name(np)
-    if p==0 then return true end 
-    local h=kernel32.OpenProcess(0x100000, false, p) -- SYNCHRONIZE
-    if not h or h==INVALID_HANDLE then return true end 
-    local r=kernel32.WaitForSingleObject(h, t or -1)
-    kernel32.CloseHandle(h)
-    return r==0 
-end
-
-function M.enable_privilege() 
-    -- [DEBUG] Silent privilege escalation
-    local ok, err = M.token.enable_privilege("SeDebugPrivilege") 
-end
-
--- [DEBUG] Temporarily protect execution to avoid hang on load
-local ok, err = pcall(M.enable_privilege)
--- if not ok then print("[PROCESS] Failed to auto-enable privilege: " .. tostring(err)) end
 
 return M

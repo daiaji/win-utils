@@ -1,112 +1,75 @@
 local ffi = require 'ffi'
 local kernel32 = require 'ffi.req' 'Windows.sdk.kernel32'
-local util = require 'win-utils.util'
-
 local M = {}
-local C = ffi.C
 
-local function fill(buf, size, pattern)
-    for i = 0, size - 1 do buf[i] = pattern end
-end
-
--- 完整的读写验证逻辑
--- @param drive: PhysicalDrive 对象
--- @param cb: 进度回调
--- @param stop_on_error: 遇错即停
--- @param patterns: 写入模式数组 (e.g. {0xAA, 0x55})，若为 nil 则只读
+-- patterns: array of bytes, e.g., {0x55, 0xAA, 0x00}. If nil, read-only.
 function M.check(drive, cb, stop_on_error, patterns)
-    if not drive then return false, "Invalid drive" end
+    local buf_size = 1024 * 1024 -- 1MB
+    local buf = kernel32.VirtualAlloc(nil, buf_size, 0x1000, 4)
+    if not buf then return false, "Alloc failed" end
     
-    -- 默认只读模式
-    if not patterns or #patterns == 0 then patterns = { "READ" } end
-    
-    local bs = 512 * 1024 -- 512KB Block
-    local pMem = kernel32.VirtualAlloc(nil, bs, 0x1000, 0x04)
-    if not pMem then return false, "Alloc failed" end
-    ffi.gc(pMem, function(p) kernel32.VirtualFree(p, 0, 0x8000) end)
-    
-    local pVerify = nil
-    -- 如果有写入测试，分配验证缓冲区
-    if type(patterns[1]) == "number" then
-        pVerify = kernel32.VirtualAlloc(nil, bs, 0x1000, 0x04)
-        if not pVerify then return false, "Alloc verify failed" end
-        ffi.gc(pVerify, function(p) kernel32.VirtualFree(p, 0, 0x8000) end)
+    -- Verify buffer if writing
+    local buf_v = nil
+    if patterns and #patterns > 0 then
+        buf_v = kernel32.VirtualAlloc(nil, buf_size, 0x1000, 4)
     end
     
     local total = drive.size
-    local stats = { bad = 0, read = 0, write = 0, corrupt = 0 }
-    local rw_bytes = ffi.new("DWORD[1]")
+    local r_bytes = ffi.new("DWORD[1]")
     local li = ffi.new("LARGE_INTEGER")
+    
+    -- Default to read-only scan if no patterns
+    if not patterns or #patterns == 0 then patterns = { "READ" } end
+    
     local success = true
     local msg = nil
     
-    for pass_idx, pat in ipairs(patterns) do
+    for _, pat in ipairs(patterns) do
         local is_write = (type(pat) == "number")
-        local done = 0
+        local pos = 0
         
-        if is_write then fill(ffi.cast("uint8_t*", pMem), bs, pat) end
+        if is_write then ffi.fill(buf, buf_size, pat) end
         
-        li.QuadPart = 0
-        kernel32.SetFilePointerEx(drive:get(), li, nil, C.FILE_BEGIN)
-        
-        while done < total do
-            local chunk = math.min(bs, total - done)
+        while pos < total do
+            local chunk = math.min(buf_size, total - pos)
+            -- Align chunk
             if chunk % drive.sector_size ~= 0 then 
                 chunk = math.ceil(chunk / drive.sector_size) * drive.sector_size 
             end
             
-            local block_fail = false
+            li.QuadPart = pos
+            kernel32.SetFilePointerEx(drive.handle, li, nil, 0)
             
-            -- Write Phase
             if is_write then
-                if kernel32.WriteFile(drive:get(), pMem, chunk, rw_bytes, nil) == 0 or rw_bytes[0] ~= chunk then
-                    stats.write = stats.write + 1
-                    stats.bad = stats.bad + 1
-                    block_fail = true
-                    if stop_on_error then success = false; msg = "Write error"; break end
-                    -- 重置指针以便读取
-                    li.QuadPart = done + chunk
-                    kernel32.SetFilePointerEx(drive:get(), li, nil, C.FILE_BEGIN)
-                else
-                    -- Rewind for verify
-                    li.QuadPart = done
-                    kernel32.SetFilePointerEx(drive:get(), li, nil, C.FILE_BEGIN)
+                if kernel32.WriteFile(drive.handle, buf, chunk, r_bytes, nil) == 0 then
+                    success = false; msg = "Write error at " .. pos; break
+                end
+                
+                -- Verify
+                li.QuadPart = pos
+                kernel32.SetFilePointerEx(drive.handle, li, nil, 0)
+                if kernel32.ReadFile(drive.handle, buf_v, chunk, r_bytes, nil) == 0 then
+                    success = false; msg = "Read back error at " .. pos; break
+                end
+                if ffi.C.memcmp(buf, buf_v, chunk) ~= 0 then
+                    success = false; msg = "Corruption at " .. pos; break
+                end
+            else
+                if kernel32.ReadFile(drive.handle, buf, chunk, r_bytes, nil) == 0 then
+                    success = false; msg = "Read error at " .. pos; break
                 end
             end
             
-            -- Read/Verify Phase
-            if not block_fail then
-                local dest = is_write and pVerify or pMem
-                if kernel32.ReadFile(drive:get(), dest, chunk, rw_bytes, nil) == 0 or rw_bytes[0] ~= chunk then
-                    stats.read = stats.read + 1
-                    stats.bad = stats.bad + 1
-                    if stop_on_error then success = false; msg = "Read error"; break end
-                    
-                    li.QuadPart = done + chunk
-                    kernel32.SetFilePointerEx(drive:get(), li, nil, C.FILE_BEGIN)
-                else
-                    if is_write and ffi.C.memcmp(pMem, pVerify, chunk) ~= 0 then
-                        stats.corrupt = stats.corrupt + 1
-                        stats.bad = stats.bad + 1
-                        if stop_on_error then success = false; msg = "Corruption detected"; break end
-                    end
-                end
-            end
-            
-            done = done + chunk
-            local total_prog = ((pass_idx - 1) * total + done) / (total * #patterns)
-            
-            if cb and not cb(total_prog, stats.bad, stats.read, stats.write, stats.corrupt) then
-                success = false; msg = "Cancelled"; break
-            end
+            pos = pos + chunk
+            if cb and not cb(pos/total) then success = false; msg = "Cancelled"; break end
         end
         if not success then break end
     end
     
-    ffi.gc(pMem, nil); kernel32.VirtualFree(pMem, 0, 0x8000)
-    if pVerify then ffi.gc(pVerify, nil); kernel32.VirtualFree(pVerify, 0, 0x8000) end
+    kernel32.VirtualFree(buf, 0, 0x8000)
+    if buf_v then kernel32.VirtualFree(buf_v, 0, 0x8000) end
     
-    return success, msg, stats
+    return success, msg
 end
 
 return M

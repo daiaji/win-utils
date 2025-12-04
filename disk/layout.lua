@@ -1,227 +1,144 @@
 local ffi = require 'ffi'
-local bit = require 'bit'
-local util = require 'win-utils.util'
 local defs = require 'win-utils.disk.defs'
 local types = require 'win-utils.disk.types'
+local util = require 'win-utils.core.util'
 local ole32 = require 'ffi.req' 'Windows.sdk.ole32'
 
 local M = {}
-local C = ffi.C
 
--- 辅助：获取原始布局结构
-local function get_raw_layout(drive)
-    return util.ioctl(drive:get(), defs.IOCTL.DISK_GET_DRIVE_LAYOUT_EX, nil, 0, "DRIVE_LAYOUT_INFORMATION_EX_FULL")
+local function get_raw(d)
+    local sz = ffi.sizeof("DRIVE_LAYOUT_INFORMATION_EX") + 128*ffi.sizeof("PARTITION_INFORMATION_EX")
+    local buf = ffi.new("uint8_t[?]", sz)
+    if not d:ioctl(defs.IOCTL.GET_LAYOUT, nil, 0, buf, sz) then return nil end
+    return ffi.cast("DRIVE_LAYOUT_INFORMATION_EX_FULL*", buf), sz
 end
 
--- 辅助：应用布局
-local function set_layout(drive, layout)
-    local sz = ffi.sizeof("DRIVE_LAYOUT_INFORMATION_EX_FULL")
-    if not util.ioctl(drive:get(), defs.IOCTL.DISK_SET_DRIVE_LAYOUT_EX, layout, sz) then
-        return false, util.format_error()
-    end
-    util.ioctl(drive:get(), defs.IOCTL.DISK_UPDATE_PROPERTIES)
+local function set_raw(d, l, sz)
+    if not d:ioctl(defs.IOCTL.SET_LAYOUT, l, sz) then return false end
+    d:ioctl(defs.IOCTL.UPDATE)
     return true
 end
 
-function M.get_raw_layout(drive) return get_raw_layout(drive) end
-
-function M.get_info(drive)
-    local layout = get_raw_layout(drive)
-    if not layout then return nil, "GetLayout failed" end
-    
-    local info = { style = (layout.PartitionStyle == 0) and "MBR" or "GPT", partitions = {} }
-    if info.style == "MBR" then 
-        info.signature = layout.Mbr.Signature 
-    else 
-        info.disk_id = layout.Gpt.DiskId 
-    end
-    
-    for i = 0, layout.PartitionCount - 1 do
-        local p = layout.PartitionEntry[i]
-        -- 过滤 MBR 空分区
-        if not (info.style == "MBR" and p.Mbr.PartitionType == 0) then
-            local item = {
-                number = p.PartitionNumber,
-                index = i + 1,
-                offset = tonumber(p.StartingOffset.QuadPart),
-                length = tonumber(p.PartitionLength.QuadPart)
-            }
-            if info.style == "MBR" then
-                item.type = p.Mbr.PartitionType
-                item.active = p.Mbr.BootIndicator ~= 0
-                item.hidden = p.Mbr.HiddenSectors
-            else
-                item.type_guid = p.Gpt.PartitionType
-                item.id = p.Gpt.PartitionId
-                item.attr = p.Gpt.Attributes -- cdata int64
-                item.name = util.from_wide(p.Gpt.Name)
-            end
-            table.insert(info.partitions, item)
+function M.get(d)
+    local raw = get_raw(d)
+    if not raw then return nil end
+    local res = { style = (raw.PartitionStyle==1) and "GPT" or "MBR", parts={} }
+    for i=0, raw.PartitionCount-1 do
+        local p = raw.PartitionEntry[i]
+        local valid = (res.style=="GPT") and (p.PartitionLength.QuadPart > 0) or (p.Mbr.PartitionType ~= 0)
+        if valid then
+            table.insert(res.parts, {
+                num = p.PartitionNumber, off = tonumber(p.StartingOffset.QuadPart), len = tonumber(p.PartitionLength.QuadPart),
+                type = (res.style=="GPT") and util.guid_to_str(p.Gpt.PartitionType) or p.Mbr.PartitionType,
+                attr = (res.style=="GPT") and p.Gpt.Attributes or 0
+            })
         end
     end
-    return info
+    return res
 end
 
-function M.set_active(drive, part_idx, active)
-    local layout = get_raw_layout(drive)
-    if not layout then return false end
-    if layout.PartitionStyle ~= 0 then return false, "Not MBR" end
+function M.apply(d, scheme, parts)
+    local sz = ffi.sizeof("DRIVE_LAYOUT_INFORMATION_EX_FULL")
+    local l = ffi.new("DRIVE_LAYOUT_INFORMATION_EX_FULL")
+    local cr = ffi.new("CREATE_DISK")
+    cr.PartitionStyle = (scheme=="GPT") and 1 or 0
+    if scheme=="GPT" then ole32.CoCreateGuid(cr.Gpt.DiskId); cr.Gpt.MaxPartitionCount=128 else cr.Mbr.Signature=os.time() end
     
-    local found = false
-    for i = 0, layout.PartitionCount - 1 do
-        local p = layout.PartitionEntry[i]
-        if p.Mbr.PartitionType ~= 0 then
-            if active then p.Mbr.BootIndicator = 0 end -- 清除其他激活标记
-            if p.PartitionNumber == part_idx then
-                p.Mbr.BootIndicator = active and 0x80 or 0
-                p.RewritePartition = 1
-                found = true
-            end
+    d:ioctl(defs.IOCTL.CREATE, cr)
+    d:ioctl(defs.IOCTL.UPDATE)
+    
+    l.PartitionStyle = cr.PartitionStyle
+    l.PartitionCount = #parts
+    if scheme=="GPT" then
+        l.Gpt.DiskId = cr.Gpt.DiskId; l.Gpt.StartingUsableOffset.QuadPart = 34*d.sector_size
+        l.Gpt.UsableLength.QuadPart = d.size - 67*d.sector_size
+    else l.Mbr.Signature = cr.Mbr.Signature end
+    
+    for i, p in ipairs(parts) do
+        local e = l.PartitionEntry[i-1]
+        e.PartitionStyle = l.PartitionStyle
+        e.StartingOffset.QuadPart = p.offset
+        e.PartitionLength.QuadPart = p.size
+        e.PartitionNumber = i
+        e.RewritePartition = 1
+        if scheme=="GPT" then
+            e.Gpt.PartitionType = util.guid_from_str(p.gpt_type)
+            ole32.CoCreateGuid(e.Gpt.PartitionId)
+            local n = util.to_wide(p.name or ""); ffi.copy(e.Gpt.Name, n, ffi.sizeof(n))
+            e.Gpt.Attributes = p.attr or 0
+        else
+            e.Mbr.PartitionType = p.mbr_type
+            e.Mbr.BootIndicator = p.active and 0x80 or 0
         end
     end
-    if not found then return false, "Partition not found" end
-    return set_layout(drive, layout)
-end
-
-function M.set_partition_type(drive, part_idx, type_id)
-    local layout = get_raw_layout(drive)
-    if not layout then return false end
     
-    local found = false
-    for i = 0, layout.PartitionCount - 1 do
-        local p = layout.PartitionEntry[i]
-        if p.PartitionNumber == part_idx then
-            if layout.PartitionStyle == 1 then -- GPT
-                if type(type_id) ~= "string" then return false, "GPT requires GUID string" end
-                p.Gpt.PartitionType = util.guid_from_str(type_id)
-            else
-                if type(type_id) ~= "number" then return false, "MBR requires int ID" end
-                p.Mbr.PartitionType = type_id
-            end
-            p.RewritePartition = 1
-            found = true
-            break
-        end
-    end
-    if not found then return false, "Partition not found" end
-    return set_layout(drive, layout)
-end
-
-function M.set_partition_attributes(drive, part_idx, attrs)
-    local layout = get_raw_layout(drive)
-    if not layout then return false end
-    if layout.PartitionStyle ~= 1 then return false, "Not GPT" end
-    
-    local found = false
-    for i = 0, layout.PartitionCount - 1 do
-        local p = layout.PartitionEntry[i]
-        if p.PartitionNumber == part_idx then
-            p.Gpt.Attributes = attrs
-            p.RewritePartition = 1
-            found = true
-            break
-        end
-    end
-    if not found then return false, "Partition not found" end
-    return set_layout(drive, layout)
+    return set_raw(d, l, sz)
 end
 
 function M.calculate_partition_plan(drive, scheme, opts)
     opts = opts or {}
     local parts = {}
     local ONE_MB = 1048576
-    local offset = ONE_MB -- 1MB Alignment
-    local total = drive.size
-    
-    -- GPT Footer space
-    local limit = total
+    local off = ONE_MB
+    local limit = drive.size
     if scheme == "GPT" then limit = limit - (33 * drive.sector_size) end
     
     if scheme == "GPT" and opts.create_msr then
         local sz = 128 * ONE_MB
-        table.insert(parts, { 
-            type="MSR", offset=offset, size=sz, 
-            gpt_type=types.GPT.MSR, name="Microsoft Reserved Partition" 
-        })
-        offset = offset + sz
+        table.insert(parts, { type="MSR", offset=off, size=sz, gpt_type=types.GPT.MSR, name="Microsoft Reserved Partition" })
+        off = off + sz
     end
     
     if opts.create_esp then
         local sz = 260 * ONE_MB
-        table.insert(parts, { 
-            type="ESP", offset=offset, size=sz, 
-            gpt_type=types.GPT.ESP, mbr_type=types.MBR.ESP, 
-            name="EFI System Partition" 
-        })
-        offset = offset + sz
+        table.insert(parts, { type="ESP", offset=off, size=sz, gpt_type=types.GPT.ESP, mbr_type=types.MBR.ESP, name="EFI System Partition" })
+        off = off + sz
     end
     
-    local remain = limit - offset
-    if opts.cluster_size then 
-        remain = math.floor(remain / opts.cluster_size) * opts.cluster_size 
-    end
+    local rem = limit - off
+    if opts.cluster_size then rem = math.floor(rem / opts.cluster_size) * opts.cluster_size end
     
-    -- Data Partition
-    if remain > 0 then
-        table.insert(parts, { 
-            type="DATA", offset=offset, size=remain, 
-            gpt_type=types.GPT.BASIC_DATA, mbr_type=types.MBR.NTFS, 
-            name="Basic Data Partition" 
-        })
+    if rem > 0 then
+        table.insert(parts, { type="DATA", offset=off, size=rem, gpt_type=types.GPT.DATA, mbr_type=types.MBR.NTFS, name="Basic Data Partition" })
     end
     return parts
 end
 
-function M.apply_partition_plan(drive, scheme, parts)
-    -- 1. Initialize Disk
-    local create = ffi.new("CREATE_DISK")
-    create.PartitionStyle = (scheme == "GPT") and 1 or 0
-    if scheme == "GPT" then 
-        ole32.CoCreateGuid(create.Gpt.DiskId)
-        create.Gpt.MaxPartitionCount = 128
-    else 
-        create.Mbr.Signature = os.time() 
-    end
-    
-    if not util.ioctl(drive:get(), defs.IOCTL.DISK_CREATE_DISK, create) then 
-        return false, "Init failed: " .. util.format_error() 
-    end
-    util.ioctl(drive:get(), defs.IOCTL.DISK_UPDATE_PROPERTIES)
-    
-    -- 2. Construct Layout
-    local layout = ffi.new("DRIVE_LAYOUT_INFORMATION_EX_FULL")
-    layout.PartitionStyle = create.PartitionStyle
-    layout.PartitionCount = #parts
-    
-    if scheme == "GPT" then
-        layout.Gpt.DiskId = create.Gpt.DiskId
-        layout.Gpt.MaxPartitionCount = 128
-        layout.Gpt.StartingUsableOffset.QuadPart = 34 * drive.sector_size
-        layout.Gpt.UsableLength.QuadPart = drive.size - (67 * drive.sector_size)
-    else
-        layout.Mbr.Signature = create.Mbr.Signature
-    end
-    
-    for i, p in ipairs(parts) do
-        local e = layout.PartitionEntry[i-1]
-        e.PartitionStyle = layout.PartitionStyle
-        e.StartingOffset.QuadPart = p.offset
-        e.PartitionLength.QuadPart = p.size
-        e.PartitionNumber = i
-        e.RewritePartition = 1
-        
-        if scheme == "GPT" then
-            e.Gpt.PartitionType = util.guid_from_str(p.gpt_type)
-            ole32.CoCreateGuid(e.Gpt.PartitionId)
-            local wn = util.to_wide(p.name)
-            ffi.copy(e.Gpt.Name, wn, math.min(72, ffi.sizeof(wn)))
-        else
-            e.Mbr.PartitionType = p.mbr_type
-            e.Mbr.BootIndicator = 0
+function M.set_active(d, idx, act)
+    local l, sz = get_raw(d)
+    if not l or l.PartitionStyle ~= 0 then return false end
+    for i=0, l.PartitionCount-1 do
+        local p = l.PartitionEntry[i]
+        if p.Mbr.PartitionType ~= 0 then
+            p.Mbr.BootIndicator = (p.PartitionNumber == idx and act) and 0x80 or 0
+            p.RewritePartition = 1
         end
     end
-    
-    return set_layout(drive, layout)
+    return set_raw(d, l, sz)
+end
+
+function M.set_partition_attributes(d, idx, attr)
+    local l, sz = get_raw(d)
+    if not l or l.PartitionStyle ~= 1 then return false end
+    for i=0, l.PartitionCount-1 do
+        local p = l.PartitionEntry[i]
+        if p.PartitionNumber == idx then p.Gpt.Attributes = attr; p.RewritePartition = 1 end
+    end
+    return set_raw(d, l, sz)
+end
+
+function M.set_partition_type(d, idx, tid)
+    local l, sz = get_raw(d)
+    if not l then return false end
+    for i=0, l.PartitionCount-1 do
+        local p = l.PartitionEntry[i]
+        if p.PartitionNumber == idx then
+            if l.PartitionStyle == 1 then p.Gpt.PartitionType = util.guid_from_str(tid)
+            else p.Mbr.PartitionType = tid end
+            p.RewritePartition = 1
+        end
+    end
+    return set_raw(d, l, sz)
 end
 
 return M
