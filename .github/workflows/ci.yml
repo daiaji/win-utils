@@ -12,13 +12,13 @@ on:
   workflow_dispatch:
 
 env:
-  # [Change] 更新缓存 Key 以强制重新编译 (添加了 52compat 标识)
+  # 保持缓存 Key 不变，继续使用上次编译好的结果
   LUAJIT_CACHE_KEY: windows-luajit-2.1-52compat-v1
   LUAJIT_BIN_DIR: ${{ github.workspace }}\luajit_build
 
 jobs:
   # ===========================================================================
-  # Job 1: Build Keeper
+  # Job 1: Build Keeper (保持不变)
   # ===========================================================================
   build-luajit:
     name: Ensure LuaJIT Cache
@@ -48,8 +48,6 @@ jobs:
         run: |
           echo "::notice ::Cache miss! Compiling LuaJIT (5.2 Compat)..."
           cd vendor/luajit/src
-          
-          REM [Change] 使用 lua52compat 替代 static
           call msvcbuild.bat lua52compat
           if %errorlevel% neq 0 exit /b %errorlevel%
           
@@ -61,7 +59,7 @@ jobs:
           copy jit\*.lua "%LUAJIT_BIN_DIR%\jit\"
 
   # ===========================================================================
-  # Job 2: Test Suite
+  # Job 2: Test Suite (修复路径逻辑)
   # ===========================================================================
   test-suite:
     name: Run Tests
@@ -86,6 +84,7 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           
+          # 创建运行时目录
           $stage = New-Item -ItemType Directory -Path "stage" -Force
           $bin   = New-Item -ItemType Directory -Path "stage/bin" -Force
           $lua   = New-Item -ItemType Directory -Path "stage/lua" -Force
@@ -107,9 +106,22 @@ jobs:
               Copy-Item "vendor/lua-ffi-bindings/*" $ffiDest -Recurse -Exclude ".git"
           }
           
-          # 3. Package
+          # 3. Package (Win-Utils) [关键修复]
+          # 目标路径始终是 stage/lua/win-utils
           $pkgDest = New-Item -ItemType Directory -Path "$lua/win-utils" -Force
-          Copy-Item "win-utils/*" $pkgDest -Recurse
+          
+          if (Test-Path "win-utils\init.lua") {
+              # 情况 A: 仓库结构是 repo/win-utils/init.lua
+              Write-Host "Detected nested structure (win-utils subfolder)."
+              Copy-Item "win-utils\*" $pkgDest -Recurse
+          } elseif (Test-Path "init.lua") {
+              # 情况 B: 仓库结构是扁平的 repo/init.lua
+              Write-Host "Detected flat structure (init.lua at root)."
+              # 复制当前目录下的所有内容，但排除构建目录、git 目录和 vendor 目录
+              Get-ChildItem -Path . -Exclude ".git", ".github", "stage", "luajit_build", "vendor", "test_sandbox" | Copy-Item -Destination $pkgDest -Recurse
+          } else {
+              Write-Error "Cannot locate init.lua in root or win-utils subdirectory."
+          }
           
           # 4. LuaUnit
           Invoke-WebRequest "https://raw.githubusercontent.com/bluebird75/luaunit/master/luaunit.lua" -OutFile "$lua/luaunit.lua"
@@ -119,6 +131,7 @@ jobs:
       - name: Run Tests
         shell: cmd
         env:
+          # 注意：LUA_PATH 现在统一指向 stage 目录
           LUA_PATH: ${{ env.STAGE_PATH }}\lua\?.lua;${{ env.STAGE_PATH }}\lua\?\init.lua;;
         run: |
           "${{ env.STAGE_PATH }}\bin\luajit.exe" "win-utils\tests\run_tests.lua" -v
