@@ -10,17 +10,11 @@ function TestDisk:setUp()
         print("\n[WARN] Non-Admin environment: Skipping physical disk tests")
     end
     
-    -- [CI FIX] 即使是 Admin，在容器中 PhysicalDrive0 也可能不存在
-    -- 简单的探测：尝试列出磁盘，如果列表为空，则标记为无磁盘环境
     local drives = win.disk.physical.list()
     self.has_drives = (#drives > 0)
-    if not self.has_drives then
-        print("[WARN] No physical drives detected (Virtualization/Container?)")
-    end
 end
 
 function TestDisk:test_Physical_List()
-    -- list() 应该总是返回 table，即使为空
     local drives = win.disk.physical.list()
     lu.assertIsTable(drives)
 end
@@ -29,10 +23,7 @@ function TestDisk:test_Layout_IOCTL()
     if not self.is_admin or not self.has_drives then return end
     
     local pd = win.disk.physical.open(0, "r")
-    if not pd then 
-        print("[INFO] Could not open Drive 0 (Exclusive lock?)")
-        return 
-    end
+    if not pd then return end 
     
     local layout = win.disk.layout.get(pd)
     pd:close()
@@ -43,23 +34,40 @@ function TestDisk:test_Layout_IOCTL()
     end
 end
 
+-- [找回的部分] BitLocker 检测
+function TestDisk:test_BitLocker()
+    if not self.is_admin then return end
+    
+    -- 尝试检测 C: (系统盘通常存在)
+    -- CI 环境下 C: 可能是虚拟的，不一定有标准的 VBR
+    local ok, status = pcall(function() 
+        return win.disk.bitlocker.get_status("C:") 
+    end)
+    
+    if ok and status then
+        lu.assertIsString(status)
+        lu.assertTrue(status == "Locked" or status == "None")
+        
+        local unlocked = win.disk.bitlocker.is_unlocked("C:")
+        lu.assertIsBoolean(unlocked)
+    else
+        print("[INFO] BitLocker check skipped (Virtual Volume/No Access)")
+    end
+end
+
 function TestDisk:test_VHD_Lifecycle()
-    -- VHD 需要 Admin 权限，且依赖 VirtDisk 服务（CI 中可能被禁用）
     if not self.is_admin then return end
     
     local vhd_path = os.getenv("TEMP") .. "\\test_" .. os.time() .. ".vhdx"
     
-    -- 1. Create
     local h, err = win.disk.vhd.create(vhd_path, 10 * 1024 * 1024)
     if not h then
-        print("\n[SKIP] VHD Create failed (VirtDisk service likely disabled in CI): " .. tostring(err))
+        print("[SKIP] VHD Create failed (VirtDisk disabled?): " .. tostring(err))
         return
     end
     lu.assertNotNil(h)
     
-    -- 2. Attach
     local ok = win.disk.vhd.attach(h)
-    -- Attach 可能会因为缺少驱动而失败，视为环境限制而非代码错误
     if not ok then
         print("[INFO] VHD Created but Attach failed (Driver missing)")
     else

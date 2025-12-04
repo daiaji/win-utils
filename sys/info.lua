@@ -5,35 +5,33 @@ local reg = require 'win-utils.reg.init'
 
 local M = {}
 
--- 检测启动模式
--- 返回: "UEFI" 或 "BIOS"
+-- [Modern LuaJIT] 检测固件类型 (UEFI / BIOS)
 function M.get_firmware_type()
-    -- 尝试调用 GetFirmwareEnvironmentVariableW
-    -- 只要 API 存在且不返回 ERROR_INVALID_FUNCTION (1)，即为 UEFI 环境
-    -- 即使返回 ERROR_PRIVILEGE_NOT_HELD (1314)，也说明系统支持 UEFI 变量
-    
-    local dummy_guid = "{00000000-0000-0000-0000-000000000000}"
+    -- 利用 GetFirmwareEnvironmentVariableW 的错误码特性
+    -- 这是一个比 GetFirmwareType API 更兼容老系统的方法
     local dummy_name = util.to_wide("NonExistentVar")
+    local dummy_guid = util.to_wide("{00000000-0000-0000-0000-000000000000}")
     
     kernel32.SetLastError(0)
-    
-    -- 尝试读取一个不存在的变量
-    kernel32.GetFirmwareEnvironmentVariableW(dummy_name, util.to_wide(dummy_guid), nil, 0)
+    kernel32.GetFirmwareEnvironmentVariableW(dummy_name, dummy_guid, nil, 0)
     local err = kernel32.GetLastError()
     
-    if err == 1 then -- ERROR_INVALID_FUNCTION
+    -- ERROR_INVALID_FUNCTION (1) = Legacy BIOS
+    -- ERROR_VARIABLE_NOT_FOUND (203) = UEFI (支持变量但找不到)
+    -- ERROR_PRIVILEGE_NOT_HELD (1314) = UEFI (支持但没权限)
+    if err == 1 then 
         return "BIOS"
     else
         return "UEFI"
     end
 end
 
--- 检测是否在 WinPE 环境下
--- WinPE 在 HKLM\System\CurrentControlSet\Control\MiniNT 键值存在
+-- 检测是否为 WinPE (预安装环境)
 function M.is_winpe()
-    local key = reg.open_key("HKLM", "System\\CurrentControlSet\\Control\\MiniNT")
-    if key then
-        key:close()
+    -- WinPE 特征键值: HKLM\System\CurrentControlSet\Control\MiniNT
+    local k = reg.open_key("HKLM", "System\\CurrentControlSet\\Control\\MiniNT")
+    if k then
+        k:close()
         return true
     end
     return false
