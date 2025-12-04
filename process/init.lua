@@ -34,24 +34,23 @@ M.constants = {
 }
 
 -- [Helper] 获取进程路径
+-- Win10+ 仅使用 QueryFullProcessImageNameW
 local function get_process_path(pid, handle)
-    local hProc = handle or kernel32.OpenProcess(0x1000, false, pid) -- QUERY_LIMITED
+    -- 0x1000 = PROCESS_QUERY_LIMITED_INFORMATION
+    local hProc = handle or kernel32.OpenProcess(0x1000, false, pid) 
     if not hProc or hProc == INVALID_HANDLE then return "" end
     
     local buf = ffi.new("wchar_t[1024]")
     local size = ffi.new("DWORD[1]", 1024)
-    local res = 0
+    local path = ""
     
-    -- 优先尝试 QueryFullProcessImageName (WinVista+)
+    -- Win10+ Standard API
     if kernel32.QueryFullProcessImageNameW(hProc, 0, buf, size) ~= 0 then 
-        res = 1
-    -- 回退到 GetModuleFileNameEx (PSAPI)
-    elseif psapi.GetModuleFileNameExW(hProc, nil, buf, 1024) > 0 then 
-        res = 1 
+        path = util.from_wide(buf)
     end
     
     if not handle then kernel32.CloseHandle(hProc) end
-    return res ~= 0 and util.from_wide(buf) or ""
+    return path
 end
 
 -- [Helper] 获取命令行
