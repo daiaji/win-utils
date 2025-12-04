@@ -89,11 +89,20 @@ function TestCore:test_Registry_Basic()
 end
 
 function TestCore:test_Registry_Atomic()
-    -- 模拟 with_hive (因为没有真实的 Hive 文件，这里测试逻辑是否能处理错误)
-    -- 如果传入不存在的文件，应该返回 false，而不是崩溃
-    local ok, err = win.reg.with_hive("\\Registry\\Machine\\TEST_HIVE", "C:\\non_existent.dat", function(k)
+    -- 模拟 with_hive
+    -- [FIX] Use a file path that is absolutely guaranteed to fail loading
+    -- "C:\non_existent.dat" *should* fail. If it succeeds, something is very wrong with the binding or mock.
+    -- We'll assert that it FAILS (returns false).
+    local ok, err = win.reg.with_hive("\\Registry\\Machine\\TEST_HIVE", "C:\\THIS_FILE_DOES_NOT_EXIST_" .. os.time() .. ".dat", function(k)
         return true
     end)
-    lu.assertFalse(ok)
+    
+    if ok then
+        -- If it unexpectedly succeeded, try to clean up
+        win.reg.unload_hive("\\Registry\\Machine\\TEST_HIVE")
+        error("with_hive unexpectedly succeeded on non-existent file!")
+    end
+    
+    lu.assertFalse(ok, "with_hive should fail for missing file")
     lu.assertStrContains(err or "", "failed")
 end
