@@ -8,15 +8,23 @@ local NULL_HANDLE = ffi.cast("HANDLE", 0)
 local SafeHandle = class()
 
 function SafeHandle:init(handle, closer)
-    -- io.write(string.format("[HANDLE] init: %s\n", tostring(handle)))
-    -- io.stdout:flush()
+    -- [DEBUG] Enhanced Logging
+    io.write(string.format("[HANDLE] init entry. Handle: %s\n", tostring(handle)))
+    io.stdout:flush()
+    
     self.handle = handle
     
     -- [CRITICAL FIX] Capture closer in local scope to avoid 'self' capture in GC
     local close_func = closer or kernel32.CloseHandle
     self._closer = close_func 
     
+    -- io.write(string.format("[HANDLE] Closer func: %s\n", tostring(close_func)))
+    -- io.stdout:flush()
+
     if self:is_valid() then
+        -- io.write("[HANDLE] Handle is valid, attaching GC...\n")
+        -- io.stdout:flush()
+        
         -- FFI GC Anchor
         ffi.gc(self.handle, function(h)
             if h ~= INVALID and h ~= NULL_HANDLE then 
@@ -25,6 +33,12 @@ function SafeHandle:init(handle, closer)
                 close_func(h) 
             end
         end)
+        
+        -- io.write("[HANDLE] GC attached.\n")
+        -- io.stdout:flush()
+    else
+        io.write("[HANDLE] Handle is INVALID or NULL, skipping GC.\n")
+        io.stdout:flush()
     end
 end
 

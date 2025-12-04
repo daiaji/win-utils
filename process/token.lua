@@ -31,6 +31,7 @@ function M.open_process_token(pid, access)
     print(string.format("[TOKEN] Token opened: %s", tostring(hToken[0])))
     
     -- [DEBUG] Separate handle creation
+    print("[TOKEN] Creating SafeHandle...")
     local safe = Handle.new(hToken[0])
     print("[TOKEN] Handle wrapped successfully")
     return safe
@@ -65,7 +66,10 @@ function M.enable_privilege(name)
     local pid = kernel32.GetCurrentProcessId()
     
     local hToken, err = M.open_process_token(pid, C.PROCESS_QUERY_INFORMATION)
-    if not hToken then return false, err end
+    if not hToken then 
+        print("[TOKEN] Failed to open token: " .. tostring(err))
+        return false, err 
+    end
     
     print("[TOKEN] Calling set_privilege...")
     local ok = M.set_privilege(hToken, name, true)
