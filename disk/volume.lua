@@ -112,7 +112,8 @@ function M.open(path, write)
     local acc = write and bit.bor(C.GENERIC_READ, C.GENERIC_WRITE) or C.GENERIC_READ
     local h = kernel32.CreateFileW(util.to_wide(p), acc, 3, nil, 3, 0, nil)
     if h == ffi.cast("HANDLE", -1) then return nil, util.format_error() end
-    return Handle.new(h)
+    -- [FIX] Handle(h)
+    return Handle(h)
 end
 
 function M.extend(vol_handle, size_mb)

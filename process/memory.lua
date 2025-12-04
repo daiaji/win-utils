@@ -32,7 +32,8 @@ function M.list_regions(pid)
     local hProc = kernel32.OpenProcess(0x1000, false, pid)
     if not hProc then hProc = kernel32.OpenProcess(0x400, false, pid) end
     if not hProc or hProc == ffi.cast("HANDLE", -1) then return nil end
-    local safe = Handle.new(hProc)
+    -- [FIX] Handle(hProc)
+    local safe = Handle(hProc)
     
     local res = {}
     local addr = ffi.cast("void*", 0)

@@ -14,13 +14,15 @@ local function close_svc(h) advapi32.CloseServiceHandle(h) end
 local function open_scm(acc)
     local h = advapi32.OpenSCManagerW(nil, nil, acc)
     if not h then return nil, util.format_error() end
-    return Handle.new(h, close_svc)
+    -- [FIX] Handle(h, close_svc)
+    return Handle(h, close_svc)
 end
 
 local function open_svc(scm, name, acc)
     local h = advapi32.OpenServiceW(scm:get(), util.to_wide(name), acc)
     if not h then return nil, util.format_error() end
-    return Handle.new(h, close_svc)
+    -- [FIX] Handle(h, close_svc)
+    return Handle(h, close_svc)
 end
 
 function M.list(drivers)

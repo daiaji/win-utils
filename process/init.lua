@@ -91,7 +91,8 @@ local Process = class()
 
 function Process:init(pid, handle) 
     self.pid = pid
-    if handle then self.obj = Handle.new(handle) end 
+    -- [FIX] Use Handle(handle) instead of Handle.new(handle)
+    if handle then self.obj = Handle(handle) end 
 end
 
 function Process:handle() return self.obj and self.obj:get() end
@@ -322,9 +323,9 @@ end
 
 function M.enable_privilege() 
     -- [DEBUG] Trace privilege enabling
-    print("[PROCESS] Enabling SeDebugPrivilege...")
+    -- print("[PROCESS] Enabling SeDebugPrivilege...")
     local ok, err = M.token.enable_privilege("SeDebugPrivilege") 
-    print(string.format("[PROCESS] SeDebugPrivilege result: %s (Err: %s)", tostring(ok), tostring(err)))
+    -- print(string.format("[PROCESS] SeDebugPrivilege result: %s (Err: %s)", tostring(ok), tostring(err)))
 end
 
 -- [DEBUG] Temporarily protect execution to avoid hang on load

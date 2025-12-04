@@ -10,43 +10,40 @@ local M = {}
 local C = ffi.C
 
 function M.open_process_token(pid, access)
-    print(string.format("[TOKEN] open_process_token pid=%s access=%s", tostring(pid), tostring(access)))
+    -- print(string.format("[TOKEN] open_process_token pid=%s access=%s", tostring(pid), tostring(access)))
     local hProcess = kernel32.OpenProcess(access or C.PROCESS_QUERY_INFORMATION, false, pid)
     if not hProcess then 
-        print("[TOKEN] OpenProcess failed")
+        -- print("[TOKEN] OpenProcess failed")
         return nil, util.format_error() 
     end
     
     local hToken = ffi.new("HANDLE[1]")
-    print("[TOKEN] Calling NtOpenProcessToken...")
+    -- print("[TOKEN] Calling NtOpenProcessToken...")
     local status = ntdll.NtOpenProcessToken(hProcess, bit.bor(0x0020, 0x0008), hToken)
     
     kernel32.CloseHandle(hProcess) 
     
     if status < 0 then 
-        print(string.format("[TOKEN] NtOpenProcessToken failed: 0x%X", status))
+        -- print(string.format("[TOKEN] NtOpenProcessToken failed: 0x%X", status))
         return nil, string.format("0x%X", status) 
     end
     
-    print(string.format("[TOKEN] Token opened: %s", tostring(hToken[0])))
+    -- print(string.format("[TOKEN] Token opened: %s", tostring(hToken[0])))
     
-    -- [DEBUG] Separate handle creation
-    print("[TOKEN] Creating SafeHandle...")
-    -- Handle is the class. Calling it invokes __call -> new -> init.
-    local safe = Handle(hToken[0]) 
-    print("[TOKEN] Handle wrapped successfully")
+    -- [FIX] Use Handle(hToken[0]) instead of Handle.new(...) to avoid ext.class crash
+    local safe = Handle(hToken[0])
     return safe
 end
 
 function M.set_privilege(token_handle, priv_name, enable)
-    print(string.format("[TOKEN] set_privilege %s enable=%s", tostring(priv_name), tostring(enable)))
+    -- print(string.format("[TOKEN] set_privilege %s enable=%s", tostring(priv_name), tostring(enable)))
     
     local raw = (type(token_handle)=="table" and token_handle.get) and token_handle:get() or token_handle
     local luid = ffi.new("LUID_NT")
     
-    print("[TOKEN] LookupPrivilegeValueW...")
+    -- print("[TOKEN] LookupPrivilegeValueW...")
     if advapi32.LookupPrivilegeValueW(nil, util.to_wide(priv_name), ffi.cast("LUID*", luid)) == 0 then 
-        print("[TOKEN] LookupPrivilegeValueW failed")
+        -- print("[TOKEN] LookupPrivilegeValueW failed")
         return false 
     end
 
@@ -55,30 +52,30 @@ function M.set_privilege(token_handle, priv_name, enable)
     tp.Privileges[0].Luid = luid
     tp.Privileges[0].Attributes = enable and 2 or 0
     
-    print("[TOKEN] NtAdjustPrivilegesToken...")
+    -- print("[TOKEN] NtAdjustPrivilegesToken...")
     local status = ntdll.NtAdjustPrivilegesToken(raw, false, tp, ffi.sizeof(tp), nil, nil)
     
-    print(string.format("[TOKEN] Adjust result: 0x%X", status))
+    -- print(string.format("[TOKEN] Adjust result: 0x%X", status))
     return status >= 0
 end
 
 function M.enable_privilege(name)
-    print("[TOKEN] enable_privilege entry: " .. tostring(name))
+    -- print("[TOKEN] enable_privilege entry: " .. tostring(name))
     local pid = kernel32.GetCurrentProcessId()
     
     local hToken, err = M.open_process_token(pid, C.PROCESS_QUERY_INFORMATION)
     if not hToken then 
-        print("[TOKEN] Failed to open token: " .. tostring(err))
+        -- print("[TOKEN] Failed to open token: " .. tostring(err))
         return false, err 
     end
     
-    print("[TOKEN] Calling set_privilege...")
+    -- print("[TOKEN] Calling set_privilege...")
     local ok = M.set_privilege(hToken, name, true)
     
-    print("[TOKEN] Closing token...")
+    -- print("[TOKEN] Closing token...")
     hToken:close()
     
-    print("[TOKEN] Done.")
+    -- print("[TOKEN] Done.")
     return ok
 end
 

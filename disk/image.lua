@@ -15,7 +15,8 @@ function M.burn_dd(image_path, drive, cb)
     
     local hFile = kernel32.CreateFileW(util.to_wide(image_path), C.GENERIC_READ, C.FILE_SHARE_READ, nil, C.OPEN_EXISTING, 0, nil)
     if hFile == ffi.cast("HANDLE", -1) then return false, "Open image failed" end
-    local fileObj = Handle.new(hFile)
+    -- [FIX] Handle(hFile)
+    local fileObj = Handle(hFile)
     
     local size_li = ffi.new("LARGE_INTEGER")
     kernel32.GetFileSizeEx(hFile, size_li)
@@ -44,20 +45,6 @@ function M.burn_dd(image_path, drive, cb)
             -- Zero pad the buffer end if needed
             ffi.fill(ffi.cast("uint8_t*", buf) + data_len, padding, 0)
         end
-        
-        -- 直接传递 buffer 指针和长度给 write_sectors
-        -- 注意：write_sectors 可能会复制 buffer，或者我们修改 write_sectors 支持 raw ptr
-        -- 目前 PhysicalDrive:write_sectors 接受 string 或 cdata(ptr) + length
-        -- 我们这里传 (offset, buf_with_len) 还是?
-        -- PhysicalDrive.write_sectors 签名: (offset, data)
-        -- 如果 data 是 string，取 #data。如果 data 是 cdata，怎么取长度？
-        -- 为了兼容，我们这里使用 ffi.string 转换 (稍微有一点开销，但安全)
-        -- 或者修改 PhysicalDrive 支持 (ptr, len)
-        
-        -- 既然我们要极致性能，这里不应该转 string。
-        -- 但 PhysicalDrive.write_sectors 是这么写的: 
-        -- local size = is_write and #data_or_size ... ffi.copy(buf, data_or_size, size)
-        -- 所以我们只能传 string。对于 1MB 来说，ffi.string 开销可接受。
         
         local chunk_data = ffi.string(buf, data_len + padding)
         if not drive:write_sectors(processed, chunk_data) then

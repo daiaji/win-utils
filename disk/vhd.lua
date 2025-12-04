@@ -23,7 +23,8 @@ function M.create(path, size_bytes)
     local res = C.CreateVirtualDisk(vst, util.to_wide(path), 0x30000, nil, 8, 0, params, nil, h)
     
     if res ~= 0 then return nil, "Create failed: " .. res end
-    return Handle.new(h[0])
+    -- [FIX] Handle(h[0])
+    return Handle(h[0])
 end
 
 function M.open(path)
@@ -35,7 +36,8 @@ function M.open(path)
     local res = C.OpenVirtualDisk(vst, util.to_wide(path), 0x30000, 0, nil, h)
     
     if res ~= 0 then return nil, "Open failed: " .. res end
-    return Handle.new(h[0])
+    -- [FIX] Handle(h[0])
+    return Handle(h[0])
 end
 
 function M.attach(h) 

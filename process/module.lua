@@ -10,7 +10,8 @@ function M.list(pid)
     -- PROCESS_QUERY_INFORMATION(0x400) | PROCESS_VM_READ(0x10)
     local hProc = kernel32.OpenProcess(0x410, false, pid)
     if not hProc then return nil end
-    local procGuard = Handle.new(hProc)
+    -- [FIX] Handle(hProc)
+    local procGuard = Handle(hProc)
     
     local mods = ffi.new("HMODULE[1024]")
     local cb = ffi.new("DWORD[1]")

@@ -3,11 +3,12 @@ local ntdll = require 'ffi.req' 'Windows.sdk.ntdll'
 local kernel32 = require 'ffi.req' 'Windows.sdk.kernel32'
 local util = require 'win-utils.util'
 local native = require 'win-utils.native'
+local Handle = require 'win-utils.handle' -- [FIX] Added require Handle
 
 local M = {}
 local C = ffi.C
 
-print("[HANDLE] Loading...")
+-- print("[HANDLE] Loading...")
 
 local function resolve_nt_path(dos_path)
     local buf = ffi.new("wchar_t[1024]")
@@ -122,5 +123,5 @@ function M.close_remote_handle(pid, handle_val)
     return true
 end
 
-print("[HANDLE] Loaded.")
+-- print("[HANDLE] Loaded.")
 return M

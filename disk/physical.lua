@@ -30,7 +30,9 @@ function PhysicalDrive:init(index, write_access, exclusive)
     end
     
     if h == ffi.cast("HANDLE", -1) then error("Open failed: " .. util.format_error()) end
-    self.obj = Handle.guard(h)
+    -- [FIX] Handle.guard(h)
+    self.obj = Handle.guard(h) 
+    
     self.handle = h
     self.sector_size = 512; self.size = 0
     self:update_geometry()

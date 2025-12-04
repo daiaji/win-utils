@@ -32,6 +32,7 @@ function M.mount(wim_path, mount_path, index, temp_dir)
     
     local hWim = wimgapi.WIMCreateFile(w_wim, acc, wimgapi.C.WIM_OPEN_EXISTING, 0, 0, nil)
     if hWim == nil then return false, "WIMCreateFile failed" end
+    -- [FIX] Handle.guard(hWim, wim_close) (guard is safe static function)
     local safe_hWim = Handle.guard(hWim, wim_close)
     
     if temp_dir then
@@ -40,6 +41,7 @@ function M.mount(wim_path, mount_path, index, temp_dir)
     
     local hImg = wimgapi.WIMLoadImage(hWim, index)
     if hImg == nil then return false, "LoadImage failed" end
+    -- [FIX] Handle.guard
     local safe_hImg = Handle.guard(hImg, wim_close)
     
     if wimgapi.WIMMountImageHandle(hImg, w_mnt, flags) == 0 then return false, "Mount failed: " .. util.format_error() end

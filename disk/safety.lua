@@ -22,7 +22,8 @@ function M.is_system_drive(drive_index)
         0, bit.bor(C.FILE_SHARE_READ, C.FILE_SHARE_WRITE), nil, C.OPEN_EXISTING, 0, nil)
         
     if hVol == ffi.cast("HANDLE", -1) then return false end
-    local safe_hVol = Handle.new(hVol)
+    -- [FIX] Handle(hVol)
+    local safe_hVol = Handle(hVol)
     
     local extents = util.ioctl(hVol, defs.IOCTL.VOLUME_GET_VOLUME_DISK_EXTENTS, nil, 0, "VOLUME_DISK_EXTENTS")
     

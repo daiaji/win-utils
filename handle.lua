@@ -9,8 +9,8 @@ local SafeHandle = class()
 
 function SafeHandle:init(handle, closer)
     -- [DEBUG] Enhanced Logging
-    io.write(string.format("[HANDLE] init entry. Handle: %s\n", tostring(handle)))
-    io.stdout:flush()
+    -- io.write(string.format("[HANDLE] init entry. Handle: %s\n", tostring(handle)))
+    -- io.stdout:flush()
     
     self.handle = handle
     
@@ -28,8 +28,8 @@ function SafeHandle:init(handle, closer)
             end
         end)
     else
-        io.write("[HANDLE] Handle is INVALID or NULL, skipping GC.\n")
-        io.stdout:flush()
+        -- io.write("[HANDLE] Handle is INVALID or NULL, skipping GC.\n")
+        -- io.stdout:flush()
     end
 end
 

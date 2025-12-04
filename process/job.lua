@@ -9,7 +9,8 @@ local Job = class()
 function Job:init(name)
     local h = kernel32.CreateJobObjectW(nil, name and util.to_wide(name) or nil)
     if h == nil then error("CreateJobObject failed: " .. util.format_error()) end
-    self.obj = Handle.new(h)
+    -- [FIX] Handle(h)
+    self.obj = Handle(h)
 end
 
 function Job:set_kill_on_close()

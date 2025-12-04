@@ -13,8 +13,8 @@ local C = ffi.C
 
 -- [DEBUG] Force flush
 local function log(msg)
-    io.write(tostring(msg) .. "\n")
-    io.stdout:flush()
+    -- io.write(tostring(msg) .. "\n")
+    -- io.stdout:flush()
 end
 
 ffi.cdef [[
@@ -32,38 +32,38 @@ local FILE_DISPOSITION_IGNORE_READONLY_ATTRIBUTE = 0x00000010
 
 -- [DEBUG] Local safe to_wide implementation
 local function safe_to_wide(str)
-    log("[SAFE_TO_WIDE] Entry. Str type: " .. type(str))
+    -- log("[SAFE_TO_WIDE] Entry. Str type: " .. type(str))
     if not str then return nil end
     local len = #str
-    log("[SAFE_TO_WIDE] Len: " .. len)
+    -- log("[SAFE_TO_WIDE] Len: " .. len)
     
     -- Check kernel32 binding
     if not kernel32 then log("[SAFE_TO_WIDE] FATAL: kernel32 is nil") return nil end
     if not kernel32.MultiByteToWideChar then log("[SAFE_TO_WIDE] FATAL: MultiByteToWideChar is nil") return nil end
     
-    log("[SAFE_TO_WIDE] Calling MultiByteToWideChar (Calc Len)...")
+    -- log("[SAFE_TO_WIDE] Calling MultiByteToWideChar (Calc Len)...")
     -- CP_UTF8 = 65001
     local req = kernel32.MultiByteToWideChar(65001, 0, str, len, nil, 0)
-    log("[SAFE_TO_WIDE] Req size: " .. tostring(req))
+    -- log("[SAFE_TO_WIDE] Req size: " .. tostring(req))
     
     if req == 0 then 
         log("[SAFE_TO_WIDE] Failed to calc len. Err: " .. kernel32.GetLastError())
         return nil 
     end
     
-    log("[SAFE_TO_WIDE] Allocating buffer...")
+    -- log("[SAFE_TO_WIDE] Allocating buffer...")
     local buf = ffi.new("wchar_t[?]", req + 1)
     
-    log("[SAFE_TO_WIDE] Calling MultiByteToWideChar (Write)...")
+    -- log("[SAFE_TO_WIDE] Calling MultiByteToWideChar (Write)...")
     kernel32.MultiByteToWideChar(65001, 0, str, len, buf, req)
     buf[req] = 0
     
-    log("[SAFE_TO_WIDE] Success.")
+    -- log("[SAFE_TO_WIDE] Success.")
     return buf
 end
 
 local function open_file_native(path, access)
-    log("[NATIVE] Opening: " .. tostring(path))
+    -- log("[NATIVE] Opening: " .. tostring(path))
     
     -- [DEBUG] Call safe_to_wide directly with logs
     local status, wpath = pcall(safe_to_wide, path)
@@ -78,7 +78,7 @@ local function open_file_native(path, access)
         return nil, "Invalid path encoding" 
     end
     
-    log(string.format("[NATIVE] wpath ptr: %s", tostring(wpath)))
+    -- log(string.format("[NATIVE] wpath ptr: %s", tostring(wpath)))
 
     local flag_backup = 0x02000000 -- FILE_FLAG_BACKUP_SEMANTICS
     local flag_exist = 3           -- OPEN_EXISTING
@@ -86,7 +86,7 @@ local function open_file_native(path, access)
     local flags = bit.bor(flag_backup, flag_exist)
     local creation = flag_exist
     
-    log(string.format("[NATIVE] CreateFileW calling... Access=%X Share=%X", access, share))
+    -- log(string.format("[NATIVE] CreateFileW calling... Access=%X Share=%X", access, share))
     
     -- CreateFileW(LPCWSTR, DWORD, DWORD, void*, DWORD, DWORD, HANDLE)
     local hFile = kernel32.CreateFileW(
@@ -99,7 +99,7 @@ local function open_file_native(path, access)
         nil
     )
     
-    log("[NATIVE] CreateFileW returned: " .. tostring(hFile))
+    -- log("[NATIVE] CreateFileW returned: " .. tostring(hFile))
         
     if hFile == ffi.cast("HANDLE", -1) then 
         local err = kernel32.GetLastError()
@@ -107,14 +107,15 @@ local function open_file_native(path, access)
         return nil, util.format_error(err) 
     end
     
-    log("[NATIVE] Wrapping handle...")
-    local hObj = Handle.new(hFile)
-    log("[NATIVE] Handle wrapped.")
+    -- log("[NATIVE] Wrapping handle...")
+    -- [FIX] Use Handle(h) call style
+    local hObj = Handle(hFile)
+    -- log("[NATIVE] Handle wrapped.")
     return hObj
 end
 
 function M.force_delete(path)
-    log("[NATIVE] force_delete entry: " .. tostring(path))
+    -- log("[NATIVE] force_delete entry: " .. tostring(path))
     
     -- 1. 打开文件 (需 DELETE 权限)
     local hFileObj, err = open_file_native(path, 0x00010000) -- DELETE
@@ -123,7 +124,7 @@ function M.force_delete(path)
         return false, "Open failed: " .. tostring(err) 
     end
     
-    log("[NATIVE] Allocating IO_STATUS_BLOCK...")
+    -- log("[NATIVE] Allocating IO_STATUS_BLOCK...")
     -- 2. 尝试使用 POSIX 语义删除 (Win10 1709+)
     local iosb = ffi.new("IO_STATUS_BLOCK")
     local info_ex = ffi.new("FILE_DISPOSITION_INFO_EX")
@@ -134,26 +135,26 @@ function M.force_delete(path)
         FILE_DISPOSITION_IGNORE_READONLY_ATTRIBUTE
     )
     
-    log("[NATIVE] Calling NtSetInformationFile (Class 64)... Handle=" .. tostring(hFileObj:get()))
+    -- log("[NATIVE] Calling NtSetInformationFile (Class 64)... Handle=" .. tostring(hFileObj:get()))
     -- FileDispositionInformationEx = 64
     local status = ntdll.NtSetInformationFile(hFileObj:get(), iosb, info_ex, ffi.sizeof(info_ex), 64)
-    log(string.format("[NATIVE] Class 64 Result: 0x%X", status))
+    -- log(string.format("[NATIVE] Class 64 Result: 0x%X", status))
     
     -- 3. 如果 POSIX 删除失败，尝试传统删除
     if status < 0 then
-        log("[NATIVE] Fallback to classic DeleteFile logic (Class 13)...")
+        -- log("[NATIVE] Fallback to classic DeleteFile logic (Class 13)...")
         local info = ffi.new("FILE_DISPOSITION_INFORMATION")
         info.DeleteFile = 1
         
         -- FileDispositionInformation = 13
         status = ntdll.NtSetInformationFile(hFileObj:get(), iosb, info, ffi.sizeof(info), 13)
-        log(string.format("[NATIVE] Class 13 Result: 0x%X", status))
+        -- log(string.format("[NATIVE] Class 13 Result: 0x%X", status))
     end
     
-    log("[NATIVE] Closing handle...")
+    -- log("[NATIVE] Closing handle...")
     -- RAII Close 触发删除
     hFileObj:close()
-    log("[NATIVE] Handle closed.")
+    -- log("[NATIVE] Handle closed.")
     
     if status < 0 then 
         return false, string.format("Delete failed: 0x%X", status) 
