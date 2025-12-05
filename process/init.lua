@@ -6,13 +6,11 @@ local psapi = require 'ffi.req' 'Windows.sdk.psapi'
 local util = require 'win-utils.core.util'
 local Handle = require 'win-utils.core.handle'
 local class = require 'win-utils.deps'.class
--- [Modern LuaJIT]
 local table_new = require 'table.new'
 local table_ext = require 'ext.table'
 
 local M = {}
 
--- [Lazy Loading Submodules]
 local sub_modules = {
     token   = 'win-utils.process.token',
     job     = 'win-utils.process.job',
@@ -118,6 +116,7 @@ end
 
 function Process:terminate_tree()
     local token = require 'win-utils.process.token'
+    -- [PE Optimization] Token stub automatically returns true
     token.enable_privilege("SeDebugPrivilege")
     local function kill(pid)
         for p in M.each() do
@@ -161,7 +160,6 @@ function M.each()
 end
 
 function M.list() 
-    -- [FIX] Use table.new and inject ext.table methods
     local t = table_new(256, 0)
     setmetatable(t, { __index = table_ext })
     for p in M.each() do 
@@ -172,13 +170,14 @@ end
 
 function M.exists(pid)
     if type(pid) ~= "number" then for p in M.each() do if p.name:lower() == pid:lower() then return p.pid end end return 0 end
-    local h = kernel32.OpenProcess(0x100000, false, pid)
+    local h = kernel32.OpenProcess(0x100000, false, pid) -- SYNCHRONIZE
     if h and h ~= INVALID_HANDLE then
         local r = kernel32.WaitForSingleObject(h, 0)
         kernel32.CloseHandle(h)
         return (r == 258) and pid or 0
     end
-    h = kernel32.OpenProcess(0x1000, false, pid)
+    -- Try Query Info if Sync access denied
+    h = kernel32.OpenProcess(0x1000, false, pid) -- QUERY_LIMITED
     if h and h ~= INVALID_HANDLE then
         local c = ffi.new("DWORD[1]")
         local ok = (kernel32.GetExitCodeProcess(h, c) ~= 0 and c[0] == 259)
@@ -201,6 +200,31 @@ function M.terminate_gracefully(pid, timeout)
     if kernel32.WaitForSingleObject(h, timeout or 3000) == 258 then kernel32.TerminateProcess(h, 0) end
     kernel32.CloseHandle(h)
     return true
+end
+
+-- [Restored] Wait for process start
+function M.wait(name_or_pid, timeout)
+    local start = kernel32.GetTickCount64()
+    timeout = timeout or -1
+    while true do
+        local pid = M.exists(name_or_pid)
+        if pid ~= 0 then return pid end
+        if timeout >= 0 and (kernel32.GetTickCount64() - start) > timeout then return nil end
+        kernel32.Sleep(100)
+    end
+end
+
+-- [Restored] Wait for process exit
+function M.wait_close(name_or_pid, timeout)
+    local pid = M.exists(name_or_pid)
+    if pid == 0 then return true end
+    
+    local h = kernel32.OpenProcess(0x100000, false, pid) -- SYNCHRONIZE
+    if not h then return false end
+    
+    local res = kernel32.WaitForSingleObject(h, timeout or -1)
+    kernel32.CloseHandle(h)
+    return res == 0
 end
 
 return M

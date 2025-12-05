@@ -54,8 +54,6 @@ function TestProcess:test_Wait()
     local duration = os.clock() - start
     
     lu.assertFalse(res, "Wait should timeout")
-    -- 验证确实等了足够久 (Lua os.clock精度可能波动，宽松判断)
-    -- 注意：Windows Sleep精度问题，这里只做基本断言
     
     p:terminate()
     
@@ -98,7 +96,7 @@ function TestProcess:test_List_And_Find()
     lu.assertIsTable(list)
     lu.assertTrue(#list >= 2)
     
-    -- 使用 Lua-Ext 的 findIf 验证
+    -- 使用 Lua-Ext 的 findiIf 验证
     local _, found1 = list:findiIf(function(x) return x.pid == p1.pid end)
     local _, found2 = list:findiIf(function(x) return x.pid == p2.pid end)
     
@@ -106,8 +104,6 @@ function TestProcess:test_List_And_Find()
     lu.assertNotNil(found2)
     
     -- 验证父进程ID (PPID)
-    -- 这里的 PPID 应该是当前测试脚本的进程 (luajit.exe)
-    -- 但 CI 环境下可能复杂，我们只验证它是一个数字
     lu.assertIsNumber(found1.parent_pid)
     
     p1:terminate(); p1:close()
@@ -130,15 +126,11 @@ end
 
 -- 6. 进程树终止 (Terminate Tree)
 function TestProcess:test_Tree_Terminate()
-    -- 启动一个会生成子进程的命令
-    -- cmd.exe -> ping.exe
     local p = win.process.exec(TEST_CMD_LONG, nil, 0)
     lu.assertNotNil(p)
     
-    -- 给一点时间让子进程生成
     ffi.C.Sleep(500)
     
-    -- 查找子进程 (Ping.exe)
     local list = win.process.list()
     local child_pid = nil
     for _, item in ipairs(list) do
@@ -148,9 +140,6 @@ function TestProcess:test_Tree_Terminate()
         end
     end
     
-    -- 在某些极其精简的 PE 或 CI 环境，cmd 可能会直接 exec 而不是 fork，
-    -- 或者 ping 瞬间结束。如果找不到子进程，此测试可能不适用。
-    -- 但为了保证逻辑正确，我们做条件断言。
     if child_pid then
         print("  [DEBUG] Found child process: " .. child_pid)
         lu.assertTrue(win.process.exists(child_pid) > 0)
@@ -169,13 +158,12 @@ function TestProcess:test_Tree_Terminate()
     p:close()
 end
 
--- 7. 令牌信息 (Token Info) - 验证 PE 环境假设
+-- 7. 令牌信息 (Token Info)
 function TestProcess:test_Token_Info()
     local t = win.process.token.open_current(8) -- QUERY
     if t then
         local user = win.process.token.get_user(t)
         lu.assertIsString(user)
-        -- 在 PE 环境下通常是 SYSTEM 或 Admin
         print("  [INFO] Current User: " .. user)
         
         local integrity = win.process.token.get_integrity_level(t)
@@ -185,7 +173,24 @@ function TestProcess:test_Token_Info()
         t:close()
     end
     
-    -- 验证 PE 优化 (始终返回 true)
     lu.assertTrue(win.process.token.is_elevated())
     lu.assertTrue(win.process.token.enable_privilege("SeDebugPrivilege"))
+end
+
+-- 8. [NEW] 静态等待函数测试 (Restored Features)
+function TestProcess:test_Static_Wait_Helpers()
+    -- 测试 wait (等待进程出现)
+    local p = win.process.exec(TEST_CMD_LONG, nil, 0)
+    lu.assertNotNil(p)
+    
+    local found_pid = win.process.wait(p.pid, 1000)
+    lu.assertEquals(found_pid, p.pid)
+    
+    -- 测试 wait_close (等待进程结束)
+    p:terminate()
+    
+    local closed = win.process.wait_close(p.pid, 2000)
+    lu.assertTrue(closed, "wait_close should return true")
+    
+    p:close()
 end
