@@ -116,7 +116,6 @@ end
 
 function Process:terminate_tree()
     local token = require 'win-utils.process.token'
-    -- [PE Optimization] Token stub automatically returns true
     token.enable_privilege("SeDebugPrivilege")
     local function kill(pid)
         for p in M.each() do
@@ -141,6 +140,12 @@ function M.open(pid, access)
     local h = kernel32.OpenProcess(access or 0x1F0FFF, false, pid)
     if not h then return nil end
     return Process(pid, h)
+end
+
+-- [Restored] 获取当前进程对象
+function M.current()
+    local pid = kernel32.GetCurrentProcessId()
+    return M.open(pid)
 end
 
 function M.each()
@@ -170,14 +175,13 @@ end
 
 function M.exists(pid)
     if type(pid) ~= "number" then for p in M.each() do if p.name:lower() == pid:lower() then return p.pid end end return 0 end
-    local h = kernel32.OpenProcess(0x100000, false, pid) -- SYNCHRONIZE
+    local h = kernel32.OpenProcess(0x100000, false, pid)
     if h and h ~= INVALID_HANDLE then
         local r = kernel32.WaitForSingleObject(h, 0)
         kernel32.CloseHandle(h)
         return (r == 258) and pid or 0
     end
-    -- Try Query Info if Sync access denied
-    h = kernel32.OpenProcess(0x1000, false, pid) -- QUERY_LIMITED
+    h = kernel32.OpenProcess(0x1000, false, pid)
     if h and h ~= INVALID_HANDLE then
         local c = ffi.new("DWORD[1]")
         local ok = (kernel32.GetExitCodeProcess(h, c) ~= 0 and c[0] == 259)
@@ -202,7 +206,6 @@ function M.terminate_gracefully(pid, timeout)
     return true
 end
 
--- [Restored] Wait for process start
 function M.wait(name_or_pid, timeout)
     local start = kernel32.GetTickCount64()
     timeout = timeout or -1
@@ -214,14 +217,11 @@ function M.wait(name_or_pid, timeout)
     end
 end
 
--- [Restored] Wait for process exit
 function M.wait_close(name_or_pid, timeout)
     local pid = M.exists(name_or_pid)
     if pid == 0 then return true end
-    
-    local h = kernel32.OpenProcess(0x100000, false, pid) -- SYNCHRONIZE
+    local h = kernel32.OpenProcess(0x100000, false, pid)
     if not h then return false end
-    
     local res = kernel32.WaitForSingleObject(h, timeout or -1)
     kernel32.CloseHandle(h)
     return res == 0

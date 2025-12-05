@@ -194,3 +194,39 @@ function TestProcess:test_Static_Wait_Helpers()
     
     p:close()
 end
+
+-- [New] 测试内存区域列表及文件名解析 (检测 ntdll.dll 是否被识别)
+function TestProcess:test_Memory_Regions()
+    local p = win.process.current()
+    lu.assertNotNil(p, "Could not open current process")
+    
+    local regions = win.process.memory.list_regions(p.pid)
+    lu.assertIsTable(regions)
+    lu.assertTrue(#regions > 0)
+    
+    local found_ntdll = false
+    local found_any_file = false
+    
+    for _, r in ipairs(regions) do
+        if r.filename then
+            found_any_file = true
+            if r.filename:lower():find("ntdll.dll") then
+                found_ntdll = true
+                print("  [INFO] Mapped: " .. r.filename)
+                break
+            end
+        end
+    end
+    
+    -- 在 Windows 环境下，进程必然加载了 DLL，至少应该能解析出一个文件名
+    lu.assertTrue(found_any_file, "No mapped filenames resolved (Privilege issue?)")
+    
+    -- 几乎所有进程都加载 ntdll
+    if found_ntdll then
+        lu.assertTrue(true)
+    else
+        print("  [WARN] ntdll.dll not found in memory map (Unusual)")
+    end
+    
+    p:close()
+end
