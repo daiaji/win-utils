@@ -1,45 +1,191 @@
 local lu = require('luaunit')
 local win = require('win-utils')
+local ffi = require('ffi')
 
 TestProcess = {}
 
-function TestProcess:setUp()
-    self.proc = win.process.exec("cmd.exe /c ping -n 10 127.0.0.1 > NUL", nil, 0)
-end
+-- 测试常量
+local TEST_CMD_LONG = "cmd.exe /c ping -n 30 127.0.0.1 > NUL"
+local TEST_CMD_SHORT = "cmd.exe /c ping -n 3 127.0.0.1 > NUL"
+local TEST_UNICODE_ARG = "测试参数_Arg"
 
+-- 辅助：清理环境
 function TestProcess:tearDown()
-    if self.proc then self.proc:terminate(); self.proc:close() end
+    -- 强杀残留的 cmd/ping
+    local list = win.process.list()
+    if list then
+        for _, p in ipairs(list) do
+            if p.name:lower() == "ping.exe" then
+                win.process.terminate(p.pid)
+            end
+        end
+    end
 end
 
-function TestProcess:test_Basic()
-    if not self.proc then return end
-    local info = self.proc:get_info()
+-- 1. 基础生命周期测试 (Exec, Exists, Terminate)
+function TestProcess:test_Lifecycle()
+    local p = win.process.exec(TEST_CMD_LONG, nil, 0) -- SW_HIDE
+    lu.assertNotNil(p, "Exec failed")
+    lu.assertTrue(p.pid > 0)
+    
+    -- 验证 exists (PID)
+    lu.assertEquals(win.process.exists(p.pid), p.pid)
+    -- 验证 exists (Name)
+    local found_pid = win.process.exists("cmd.exe") -- 注意：exec 返回的是 cmd 的 pid
+    lu.assertTrue(found_pid > 0)
+    
+    -- 终止
+    lu.assertTrue(p:terminate())
+    
+    -- 等待系统回收
+    ffi.C.Sleep(200)
+    lu.assertEquals(win.process.exists(p.pid), 0, "Process should be gone")
+    p:close()
+end
+
+-- 2. 等待逻辑测试 (Wait Timeout vs Success)
+function TestProcess:test_Wait()
+    local p = win.process.exec(TEST_CMD_LONG, nil, 0)
+    lu.assertNotNil(p)
+    
+    -- 测试：超时 (应返回 false)
+    local start = os.clock()
+    local res = p:wait(200) -- 等 200ms
+    local duration = os.clock() - start
+    
+    lu.assertFalse(res, "Wait should timeout")
+    -- 验证确实等了足够久 (Lua os.clock精度可能波动，宽松判断)
+    -- 注意：Windows Sleep精度问题，这里只做基本断言
+    
+    p:terminate()
+    
+    -- 测试：成功等待
+    local p2 = win.process.exec("cmd.exe /c exit 0", nil, 0)
+    lu.assertTrue(p2:wait(2000), "Wait should succeed for quick exit")
+    p2:close()
+    p:close()
+end
+
+-- 3. 信息获取与 Unicode 支持
+function TestProcess:test_Info_And_Unicode()
+    -- 构造带 Unicode 的命令
+    local cmd = string.format('cmd.exe /c "ping -n 1 127.0.0.1 > NUL & rem %s"', TEST_UNICODE_ARG)
+    local p = win.process.exec(cmd, nil, 0)
+    lu.assertNotNil(p)
+    
+    local info = p:get_info()
     lu.assertIsTable(info)
-    lu.assertEquals(info.pid, self.proc.pid)
+    
+    -- 验证路径
+    lu.assertStrContains(info.exe_path:lower(), "cmd.exe")
+    
+    -- 验证命令行 (Unicode)
+    -- 注意：cmd.exe 的行为可能会重构命令行，只要包含关键字即可
+    local cmdline = p:get_command_line()
+    lu.assertStrContains(cmdline, TEST_UNICODE_ARG)
+    
+    p:terminate()
+    p:close()
 end
 
-function TestProcess:test_List()
+-- 4. 进程列表与查找
+function TestProcess:test_List_And_Find()
+    -- 启动两个进程
+    local p1 = win.process.exec(TEST_CMD_LONG, nil, 0)
+    local p2 = win.process.exec(TEST_CMD_LONG, nil, 0)
+    
     local list = win.process.list()
     lu.assertIsTable(list)
+    lu.assertTrue(#list >= 2)
     
-    if self.proc then
-        -- [Lua-Ext] 使用新的 findiIf (极简查找)
-        local _, found = list:findiIf(function(p) return p.pid == self.proc.pid end)
-        lu.assertNotNil(found, "Created process not found in list")
+    -- 使用 Lua-Ext 的 findIf 验证
+    local _, found1 = list:findiIf(function(x) return x.pid == p1.pid end)
+    local _, found2 = list:findiIf(function(x) return x.pid == p2.pid end)
+    
+    lu.assertNotNil(found1)
+    lu.assertNotNil(found2)
+    
+    -- 验证父进程ID (PPID)
+    -- 这里的 PPID 应该是当前测试脚本的进程 (luajit.exe)
+    -- 但 CI 环境下可能复杂，我们只验证它是一个数字
+    lu.assertIsNumber(found1.parent_pid)
+    
+    p1:terminate(); p1:close()
+    p2:terminate(); p2:close()
+end
+
+-- 5. 挂起与恢复 (Suspend/Resume)
+function TestProcess:test_Suspend_Resume()
+    local p = win.process.exec(TEST_CMD_LONG, nil, 0)
+    
+    -- 挂起
+    lu.assertTrue(p:suspend())
+    
+    -- 恢复
+    lu.assertTrue(p:resume())
+    
+    p:terminate()
+    p:close()
+end
+
+-- 6. 进程树终止 (Terminate Tree)
+function TestProcess:test_Tree_Terminate()
+    -- 启动一个会生成子进程的命令
+    -- cmd.exe -> ping.exe
+    local p = win.process.exec(TEST_CMD_LONG, nil, 0)
+    lu.assertNotNil(p)
+    
+    -- 给一点时间让子进程生成
+    ffi.C.Sleep(500)
+    
+    -- 查找子进程 (Ping.exe)
+    local list = win.process.list()
+    local child_pid = nil
+    for _, item in ipairs(list) do
+        if item.name:lower() == "ping.exe" and item.parent_pid == p.pid then
+            child_pid = item.pid
+            break
+        end
     end
+    
+    -- 在某些极其精简的 PE 或 CI 环境，cmd 可能会直接 exec 而不是 fork，
+    -- 或者 ping 瞬间结束。如果找不到子进程，此测试可能不适用。
+    -- 但为了保证逻辑正确，我们做条件断言。
+    if child_pid then
+        print("  [DEBUG] Found child process: " .. child_pid)
+        lu.assertTrue(win.process.exists(child_pid) > 0)
+        
+        -- 杀进程树
+        p:terminate_tree()
+        ffi.C.Sleep(200)
+        
+        -- 验证父子全挂
+        lu.assertEquals(win.process.exists(p.pid), 0, "Parent should remain dead")
+        lu.assertEquals(win.process.exists(child_pid), 0, "Child should be dead")
+    else
+        print("  [WARN] Could not spawn child process for tree test (CI env?)")
+        p:terminate()
+    end
+    p:close()
 end
 
-function TestProcess:test_SuspendResume()
-    if not self.proc then return end
-    lu.assertIsBoolean(self.proc:suspend())
-    lu.assertIsBoolean(self.proc:resume())
-end
-
-function TestProcess:test_Token()
-    local t = win.process.token.open_current(8)
+-- 7. 令牌信息 (Token Info) - 验证 PE 环境假设
+function TestProcess:test_Token_Info()
+    local t = win.process.token.open_current(8) -- QUERY
     if t then
         local user = win.process.token.get_user(t)
-        if user then print("\n[INFO] User: " .. user) end
+        lu.assertIsString(user)
+        -- 在 PE 环境下通常是 SYSTEM 或 Admin
+        print("  [INFO] Current User: " .. user)
+        
+        local integrity = win.process.token.get_integrity_level(t)
+        if integrity then
+            print("  [INFO] Integrity: " .. integrity)
+        end
         t:close()
     end
+    
+    -- 验证 PE 优化 (始终返回 true)
+    lu.assertTrue(win.process.token.is_elevated())
+    lu.assertTrue(win.process.token.enable_privilege("SeDebugPrivilege"))
 end
