@@ -29,22 +29,20 @@ function M.get_args()
     return res
 end
 
--- [Restored] 文件夹选择对话框
+-- [Restored] Alias for backward compatibility
+M.get_arguments = M.get_args
+
 function M.browse(title)
-    -- BIF_RETURNONLYFSDIRS(1) | BIF_NEWDIALOGSTYLE(0x40)
     local bi = ffi.new("BROWSEINFOW")
     bi.ulFlags = 0x41 
     if title then bi.lpszTitle = util.to_wide(title) end
-    
     local pidl = shell32.SHBrowseForFolderW(bi)
     if pidl == nil then return nil end
-    
     local path = ffi.new("wchar_t[260]")
     local res = nil
     if shell32.SHGetPathFromIDListW(pidl, path) ~= 0 then
         res = util.from_wide(path)
     end
-    
     ole32.CoTaskMemFree(pidl)
     return res
 end

@@ -3,16 +3,14 @@ local defs = require 'win-utils.disk.defs'
 local types = require 'win-utils.disk.types'
 local util = require 'win-utils.core.util'
 local ole32 = require 'ffi.req' 'Windows.sdk.ole32'
--- [FIX] Ensure definitions for DRIVE_LAYOUT_INFORMATION_EX are loaded
+local kernel32 = require 'ffi.req' 'Windows.sdk.kernel32'
 require 'ffi.req' 'Windows.sdk.winioctl'
 
 local M = {}
 
 local function get_raw(d)
-    -- Using the extended structure for FFI safety
     local sz = ffi.sizeof("DRIVE_LAYOUT_INFORMATION_EX_FULL")
     local buf = ffi.new("uint8_t[?]", sz)
-    -- IOCTL_DISK_GET_DRIVE_LAYOUT_EX expects standard struct size at least
     if not d:ioctl(defs.IOCTL.GET_LAYOUT, nil, 0, buf, sz) then return nil end
     return ffi.cast("DRIVE_LAYOUT_INFORMATION_EX_FULL*", buf), sz
 end
@@ -45,18 +43,30 @@ function M.apply(d, scheme, parts)
     local sz = ffi.sizeof("DRIVE_LAYOUT_INFORMATION_EX_FULL")
     local l = ffi.new("DRIVE_LAYOUT_INFORMATION_EX_FULL")
     local cr = ffi.new("CREATE_DISK")
+    
+    -- 1. Initialize Disk (Clean MBR/GPT structures)
     cr.PartitionStyle = (scheme=="GPT") and 1 or 0
-    if scheme=="GPT" then ole32.CoCreateGuid(cr.Gpt.DiskId); cr.Gpt.MaxPartitionCount=128 else cr.Mbr.Signature=os.time() end
+    if scheme=="GPT" then 
+        ole32.CoCreateGuid(cr.Gpt.DiskId)
+        cr.Gpt.MaxPartitionCount = 128 
+    else 
+        cr.Mbr.Signature = os.time() 
+    end
     
     d:ioctl(defs.IOCTL.CREATE, cr)
     d:ioctl(defs.IOCTL.UPDATE)
     
+    -- 2. Build Layout
     l.PartitionStyle = cr.PartitionStyle
     l.PartitionCount = #parts
     if scheme=="GPT" then
-        l.Gpt.DiskId = cr.Gpt.DiskId; l.Gpt.StartingUsableOffset.QuadPart = 34*d.sector_size
-        l.Gpt.UsableLength.QuadPart = d.size - 67*d.sector_size
-    else l.Mbr.Signature = cr.Mbr.Signature end
+        l.Gpt.DiskId = cr.Gpt.DiskId
+        l.Gpt.StartingUsableOffset.QuadPart = 34 * d.sector_size
+        l.Gpt.UsableLength.QuadPart = d.size - (67 * d.sector_size)
+        l.Gpt.MaxPartitionCount = 128
+    else 
+        l.Mbr.Signature = cr.Mbr.Signature 
+    end
     
     for i, p in ipairs(parts) do
         local e = l.PartitionEntry[i-1]
@@ -76,7 +86,21 @@ function M.apply(d, scheme, parts)
         end
     end
     
-    return set_raw(d, l, sz)
+    -- 3. Apply Layout
+    if not set_raw(d, l, sz) then return false end
+    
+    -- 4. [RESTORED] Wipe Partition Starts (Robustness against Ghost Volumes)
+    -- Wipes the first sector of each new partition to ensure Windows doesn't see old filesystems.
+    local wipe_buf = kernel32.VirtualAlloc(nil, d.sector_size, 0x1000, 0x04)
+    if wipe_buf then
+        for _, p in ipairs(parts) do
+            -- Ignore errors here, strictly best-effort
+            d:write_sectors(p.offset, ffi.string(wipe_buf, d.sector_size))
+        end
+        kernel32.VirtualFree(wipe_buf, 0, 0x8000)
+    end
+    
+    return true
 end
 
 function M.calculate_partition_plan(drive, scheme, opts)

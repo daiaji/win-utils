@@ -1,8 +1,16 @@
 local ffi = require 'ffi'
 local kernel32 = require 'ffi.req' 'Windows.sdk.kernel32'
+local shell32 = require 'ffi.req' 'Windows.sdk.shell32' -- For SHChangeNotify
 local util = require 'win-utils.core.util'
 local defs = require 'win-utils.disk.defs'
 local M = {}
+
+-- [RESTORED] Notify shell of drive changes
+local function notify()
+    -- SHCNE_DRIVEADD=0x100, SHCNE_DRIVEREMOVED=0x80, SHCNE_ASSOCCHANGED=0x08000000
+    -- Using ASSOCCHANGED as a catch-all refresh is usually effective enough
+    if shell32 then shell32.SHChangeNotify(0x08000000, 0, nil, nil) end
+end
 
 function M.set_automount(en)
     local h = kernel32.CreateFileW(util.to_wide("\\\\.\\MountPointManager"), 0, 3, nil, 3, 0, nil)
@@ -28,10 +36,11 @@ end
 
 function M.mount(drv, path)
     if not path:match("^%\\") then path = "\\??\\"..path end
-    return kernel32.DefineDosDeviceW(0, util.to_wide(drv), util.to_wide(path)) ~= 0
+    local ok = kernel32.DefineDosDeviceW(0, util.to_wide(drv), util.to_wide(path)) ~= 0
+    if ok then notify() end
+    return ok
 end
 
--- 查询挂载点目标 (e.g. "X:" -> "\Device\HarddiskVolume1")
 function M.query(drv)
     local buf = ffi.new("wchar_t[1024]")
     if kernel32.QueryDosDeviceW(util.to_wide(drv), buf, 1024) == 0 then return nil end
@@ -42,12 +51,18 @@ end
 
 function M.force_mount(drv, path)
     local t = path
-    if t:match("^%\\%?%?%\\") then t = t:sub(5) end -- Raw target for DefineDosDevice
+    if t:match("^%\\%?%?%\\") then t = t:sub(5) end
     if not t:match("^%\\") then t = "\\??\\"..t end
-    return kernel32.DefineDosDeviceW(0x9, util.to_wide(drv), util.to_wide(t)) ~= 0
+    local ok = kernel32.DefineDosDeviceW(0x9, util.to_wide(drv), util.to_wide(t)) ~= 0
+    if ok then notify() end
+    return ok
 end
 
-function M.unmount(drv) return kernel32.DefineDosDeviceW(2, util.to_wide(drv), nil) ~= 0 end
+function M.unmount(drv) 
+    local ok = kernel32.DefineDosDeviceW(2, util.to_wide(drv), nil) ~= 0
+    if ok then notify() end
+    return ok
+end
 
 function M.temp_mount(idx, off)
     local layout = require('win-utils.disk.layout')
@@ -69,17 +84,22 @@ function M.unmount_all(idx)
     local vol = require('win-utils.disk.volume')
     local list = vol.list()
     if not list then return end
+    local changed = false
     for _, v in ipairs(list) do
         local h = vol.open(v.guid_path)
         if h then
             local ext = util.ioctl(h:get(), defs.IOCTL.GET_VOL_EXTENTS, nil, 0, "VOLUME_DISK_EXTENTS")
             if ext and ext.NumberOfDiskExtents > 0 and ext.Extents[0].DiskNumber == idx then
-                for _, mp in ipairs(v.mount_points) do M.unmount(mp:sub(1,2)) end
+                for _, mp in ipairs(v.mount_points) do 
+                    M.unmount(mp:sub(1,2)) 
+                    changed = true
+                end
                 util.ioctl(h:get(), defs.IOCTL.DISMOUNT)
             end
             h:close()
         end
     end
+    if changed then notify() end
 end
 
 return M

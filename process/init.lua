@@ -34,10 +34,24 @@ setmetatable(M, {
 M.constants = {
     SW_HIDE=0, SW_SHOWNORMAL=1, SW_SHOW=5, 
     PROCESS_ALL_ACCESS=0x1F0FFF, PROCESS_TERMINATE=1, PROCESS_QUERY_INFORMATION=0x400, 
+    PROCESS_SET_INFORMATION=0x200,
     SYNCHRONIZE=0x100000, PROCESS_SUSPEND_RESUME=0x0800
 }
 
 local INVALID_HANDLE = ffi.cast("HANDLE", -1)
+
+local PRIORITY_MAP = {
+    L = 0x40,   -- IDLE
+    B = 0x4000, -- BELOW_NORMAL
+    N = 0x20,   -- NORMAL
+    A = 0x8000, -- ABOVE_NORMAL
+    H = 0x80,   -- HIGH
+    R = 0x100   -- REALTIME
+}
+
+ffi.cdef [[
+    DWORD WaitForInputIdle(HANDLE hProcess, DWORD dwMilliseconds);
+]]
 
 local function get_cmd_line(pid)
     local hProc = kernel32.OpenProcess(0x410, false, pid)
@@ -90,6 +104,22 @@ function Process:resume() return ntdll.NtResumeProcess(self:handle()) >= 0 end
 function Process:wait(ms) return kernel32.WaitForSingleObject(self:handle(), ms or -1) == 0 end
 function Process:get_path() return get_path(self.pid, self:handle()) end
 function Process:get_command_line() return get_cmd_line(self.pid) end
+function Process:wait_input(ms) return ffi.C.WaitForInputIdle(self:handle(), ms or -1) == 0 end
+
+function Process:set_priority(mode)
+    local val = PRIORITY_MAP[mode and mode:upper() or "N"]
+    if not val then return false, "Invalid priority" end
+    local h = self:handle()
+    local temp_h = nil
+    if not kernel32.SetPriorityClass(h, val) then
+        temp_h = kernel32.OpenProcess(M.constants.PROCESS_SET_INFORMATION, false, self.pid)
+        if not temp_h then return false, "Access denied" end
+        h = temp_h
+    end
+    local res = kernel32.SetPriorityClass(h, val) ~= 0
+    if temp_h then kernel32.CloseHandle(temp_h) end
+    return res
+end
 
 function Process:get_info()
     if self.pid == 0 then return nil end
@@ -142,7 +172,6 @@ function M.open(pid, access)
     return Process(pid, h)
 end
 
--- [Restored] 获取当前进程对象
 function M.current()
     local pid = kernel32.GetCurrentProcessId()
     return M.open(pid)
@@ -189,6 +218,18 @@ function M.exists(pid)
         return ok and pid or 0
     end
     return 0
+end
+
+-- [RESTORED] Find all PIDs by name
+function M.find_all(name)
+    local res = {}
+    local target = name:lower()
+    for p in M.each() do
+        if p.name:lower() == target then
+            table.insert(res, p.pid)
+        end
+    end
+    return res
 end
 
 function M.terminate(pid) local p = M.open(pid, 1); if p then local r = p:terminate(); p:close(); return r end return false end

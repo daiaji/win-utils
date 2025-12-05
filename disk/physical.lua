@@ -93,7 +93,6 @@ function PhysicalDrive:unlock()
     if self.is_locked then self:ioctl(defs.IOCTL.UNLOCK); self.is_locked = false end
 end
 
--- [Fix] Restore zero_fill to prevent crash in clean_all
 function PhysicalDrive:zero_fill(progress_cb)
     local buf_size = 1024 * 1024 -- 1MB
     local buf = kernel32.VirtualAlloc(nil, buf_size, 0x1000, 0x04)
@@ -137,6 +136,40 @@ function PhysicalDrive:zero_fill(progress_cb)
     
     kernel32.VirtualFree(buf, 0, 0x8000)
     return ok, err
+end
+
+-- [Restored] Wipe partition tables (MBR + GPT headers)
+function PhysicalDrive:wipe_layout()
+    local wipe_size = 8 * 1024 * 1024 -- 8MB
+    local written = ffi.new("DWORD[1]")
+    
+    -- Allocate zeroed memory
+    local buf = kernel32.VirtualAlloc(nil, wipe_size, 0x1000, 0x04)
+    if not buf then return false, "Alloc failed" end
+    
+    local ok = true
+    
+    -- 1. Wipe Start
+    local li = ffi.new("LARGE_INTEGER")
+    li.QuadPart = 0
+    if kernel32.SetFilePointerEx(self.handle, li, nil, 0) == 0 or 
+       kernel32.WriteFile(self.handle, buf, wipe_size, written, nil) == 0 then
+        ok = false
+    end
+    
+    -- 2. Wipe End (Backup GPT)
+    if ok and self.size > wipe_size then
+        local end_wipe = 1024 * 1024 -- 1MB at end
+        -- Align offset to sector size
+        li.QuadPart = math.floor((self.size - end_wipe) / self.sector_size) * self.sector_size
+        
+        if kernel32.SetFilePointerEx(self.handle, li, nil, 0) ~= 0 then
+            kernel32.WriteFile(self.handle, buf, end_wipe, written, nil)
+        end
+    end
+    
+    kernel32.VirtualFree(buf, 0, 0x8000)
+    return ok
 end
 
 function PhysicalDrive:get_attributes()
@@ -226,7 +259,6 @@ function PhysicalDrive.list()
     local iface = ffi.new("SP_DEVICE_INTERFACE_DATA"); iface.cbSize = ffi.sizeof(iface)
     local i = 0
     
-    -- [FIX] Hoist declarations to avoid goto jumping into scope
     local req = ffi.new("DWORD[1]")
     local buf, det, h, num, geo
     
@@ -237,7 +269,6 @@ function PhysicalDrive.list()
         i = i + 1; goto next_dev
     end
     
-    -- Reuse req buffer
     setupapi.SetupDiGetDeviceInterfaceDetailW(hInfo, iface, nil, 0, req, nil)
     if req[0] == 0 then i = i + 1; goto next_dev end
     

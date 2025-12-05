@@ -29,6 +29,35 @@ function M.is_system_drive(drive_idx)
     return false
 end
 
+-- [Restored] 检查是否存在活跃页面文件
+function M.has_pagefile(drive_idx)
+    local k = reg.open_key("HKLM", "SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Memory Management")
+    if not k then return false end
+    
+    local files = k:read("PagingFiles")
+    k:close()
+    if not files then return false end
+    if type(files) ~= "table" then files = {files} end
+    
+    for _, path in ipairs(files) do
+        -- 路径通常为 "C:\pagefile.sys" 或 "?:\pagefile.sys"
+        local letter = path:sub(1, 2)
+        if letter:match("^%a:") then
+            local h = native.open_file("\\\\.\\" .. letter, "r", true)
+            if h then
+                local ext = util.ioctl(h:get(), defs.IOCTL.GET_VOL_EXTENTS, nil, 0, "VOLUME_DISK_EXTENTS")
+                h:close()
+                if ext then
+                    for i = 0, ext.NumberOfDiskExtents - 1 do
+                        if ext.Extents[i].DiskNumber == drive_idx then return true end
+                    end
+                end
+            end
+        end
+    end
+    return false
+end
+
 -- 检查写保护注册表策略
 function M.check_write_protect_policy()
     local k = reg.open_key("HKLM", "SYSTEM\\CurrentControlSet\\Control\\StorageDevicePolicies")

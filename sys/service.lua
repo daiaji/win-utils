@@ -56,6 +56,29 @@ function M.list(drivers)
     return res
 end
 
+-- [Restored] Query detailed status
+function M.query(n)
+    local scm = open_scm(1) -- CONNECT
+    if not scm then return nil end
+    local svc = open_svc(scm, n, 4) -- QUERY_STATUS
+    if not svc then return nil end
+    
+    local needed = ffi.new("DWORD[1]")
+    local buf = ffi.new("uint8_t[512]")
+    
+    if advapi32.QueryServiceStatusEx(svc:get(), 0, buf, 512, needed) == 0 then
+        return nil, util.last_error()
+    end
+    
+    local s = ffi.cast("SERVICE_STATUS_PROCESS*", buf)
+    return {
+        status = tonumber(s.dwCurrentState),
+        pid = tonumber(s.dwProcessId),
+        code = tonumber(s.dwWin32ExitCode),
+        svc_code = tonumber(s.dwServiceSpecificExitCode)
+    }
+end
+
 function M.start(n) 
     local scm = open_scm(1) -- CONNECT
     if not scm then return false end
