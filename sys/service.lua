@@ -9,14 +9,17 @@ local table_ext = require 'ext.table'
 local M = {}
 local function close_svc(h) advapi32.CloseServiceHandle(h) end
 
+-- [FIX] 显式检查句柄是否为 0，因为 cdata 指针在 Lua 中始终为 true
 local function open_scm(acc)
-    local h = advapi32.OpenSCManagerW(nil,nil,acc)
-    return h and Handle(h, close_svc) or nil
+    local h = advapi32.OpenSCManagerW(nil, nil, acc)
+    if h == nil or h == ffi.cast("SC_HANDLE", 0) then return nil end
+    return Handle(h, close_svc)
 end
 
 local function open_svc(scm, n, acc)
     local h = advapi32.OpenServiceW(scm:get(), util.to_wide(n), acc)
-    return h and Handle(h, close_svc) or nil
+    if h == nil or h == ffi.cast("SC_HANDLE", 0) then return nil end
+    return Handle(h, close_svc)
 end
 
 function M.list(drivers)
@@ -83,7 +86,6 @@ function M.stop(n)
     return true
 end
 
--- [Restore] set_config
 -- start_type: 2 (Auto), 3 (Manual), 4 (Disabled)
 function M.set_config(n, start_type)
     local scm = open_scm(1)
