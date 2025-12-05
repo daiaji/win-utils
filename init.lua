@@ -1,7 +1,6 @@
 local M = {}
 
 -- [Lua-Ext Integration]
--- 显式加载扩展，确保 table/string/math 拥有 :map, :trim 等高级方法
 require 'ext.table'
 require 'ext.string'
 require 'ext.math'
@@ -29,6 +28,7 @@ local modules = {
         shortcut = 'win-utils.sys.shortcut',
         hotkey   = 'win-utils.sys.hotkey',
         info     = 'win-utils.sys.info',
+        shell    = 'win-utils.sys.shell', -- [New] Export Shell
     }
 }
 

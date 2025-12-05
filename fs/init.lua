@@ -65,10 +65,12 @@ end
 -- [Internal] Recursive Delete
 local function rm_rf(path)
     local raw = require 'win-utils.fs.raw'
+    
+    -- 尝试直接删除 (如果是文件或空目录)
     if raw.delete_posix(path) then return true end
     
     local attr = kernel32.GetFileAttributesW(util.to_wide(path))
-    if attr == 0xFFFFFFFF then return true end
+    if attr == 0xFFFFFFFF then return true end -- 已不存在
     
     if bit.band(attr, 0x10) ~= 0 then -- Directory
         local ok = true
@@ -77,49 +79,55 @@ local function rm_rf(path)
             if is_dir then 
                 if not rm_rf(sub) then ok = false end
             else 
+                -- 强制移除只读属性
+                kernel32.SetFileAttributesW(util.to_wide(sub), 0x80) -- NORMAL
                 if not raw.delete_posix(sub) then ok = false end 
             end
         end
         
         if ok then
-            if bit.band(attr, 1) ~= 0 then raw.set_attributes(path, 0x80) end
+            -- 移除目录自身的只读/隐藏属性
+            kernel32.SetFileAttributesW(util.to_wide(path), 0x80)
             return kernel32.RemoveDirectoryW(util.to_wide(path)) ~= 0
         end
         return false
     end
     
-    if bit.band(attr, 1) ~= 0 then raw.set_attributes(path, 0x80) end
+    -- File fallback
+    kernel32.SetFileAttributesW(util.to_wide(path), 0x80)
     return kernel32.DeleteFileW(util.to_wide(path)) ~= 0
 end
 
+-- [PE Optimized] 递归复制，不保留 ACL
 local function cp_r(src, dst, fail_on_exist)
     local attr = kernel32.GetFileAttributesW(util.to_wide(src))
     if attr == 0xFFFFFFFF then return false, "Source not found" end
     
     if bit.band(attr, 0x10) == 0 then
+        -- File Copy
         return kernel32.CopyFileW(util.to_wide(src), util.to_wide(dst), fail_on_exist and 1 or 0) ~= 0
     else
+        -- Directory Copy
         if kernel32.CreateDirectoryW(util.to_wide(dst), nil) == 0 then
             if kernel32.GetLastError() ~= 183 then return false, "CreateDir failed" end
         end
         for name, is_dir in scandir_native(src) do
-            if not cp_r(src .. "\\" .. name, dst .. "\\" .. name, fail_on_exist) then return false, "Copy failed: " .. name end
+            if not cp_r(src .. "\\" .. name, dst .. "\\" .. name, fail_on_exist) then 
+                return false, "Copy failed: " .. name 
+            end
         end
         return true
     end
 end
 
 function M.copy(src, dst) return cp_r(src, dst, false) end
-function M.move(src, dst) return kernel32.MoveFileExW(util.to_wide(src), util.to_wide(dst), 11) ~= 0 end
+function M.move(src, dst) return kernel32.MoveFileExW(util.to_wide(src), util.to_wide(dst), 11) ~= 0 end -- MOVEFILE_COPY_ALLOWED | MOVEFILE_REPLACE_EXISTING
 function M.delete(path) return rm_rf(path) end
 M.force_delete = M.delete
 
+-- [PE Optimization] 回收站在 PE 环境不可用，直接映射为删除
 function M.recycle(path)
-    local sh = ffi.load("shell32")
-    if not sh then return false, "Recycle bin not available" end
-    local op = ffi.new("SHFILEOPSTRUCTW")
-    op.wFunc = 3; op.pFrom = util.to_wide(path.."\0"); op.fFlags = 0x454
-    return sh.SHFileOperationW(op) == 0
+    return M.delete(path)
 end
 
 function M.get_version(path)

@@ -80,8 +80,6 @@ function M.find_guid_by_partition(drive_index, partition_offset)
     local vols = M.list()
     if not vols then return nil end
     
-    -- 使用 lua-ext 的 find 会更优雅，但此处涉及 IO 操作和资源关闭
-    -- 混合使用传统循环以控制 Handle 生命周期
     for _, v in ipairs(vols) do
         local hVol = M.open(v.guid_path)
         if hVol then
@@ -141,6 +139,18 @@ function M.unmount_all_on_disk(idx)
             hVol:close()
         end
     end
+end
+
+-- [Fix] Restore set_label functionality
+function M.set_label(path, label)
+    local root = path
+    if #root == 2 and root:sub(2,2) == ":" then root = root .. "\\"
+    elseif root:sub(-1) ~= "\\" then root = root .. "\\" end
+    
+    if kernel32.SetVolumeLabelW(util.to_wide(root), util.to_wide(label)) == 0 then
+        return false, util.last_error()
+    end
+    return true
 end
 
 return M

@@ -93,6 +93,52 @@ function PhysicalDrive:unlock()
     if self.is_locked then self:ioctl(defs.IOCTL.UNLOCK); self.is_locked = false end
 end
 
+-- [Fix] Restore zero_fill to prevent crash in clean_all
+function PhysicalDrive:zero_fill(progress_cb)
+    local buf_size = 1024 * 1024 -- 1MB
+    local buf = kernel32.VirtualAlloc(nil, buf_size, 0x1000, 0x04)
+    if not buf then return false, "Alloc failed" end
+    
+    local total = self.size
+    local processed = 0
+    local written = ffi.new("DWORD[1]")
+    local li = ffi.new("LARGE_INTEGER")
+    
+    -- Seek to start
+    li.QuadPart = 0
+    if kernel32.SetFilePointerEx(self.handle, li, nil, 0) == 0 then
+        kernel32.VirtualFree(buf, 0, 0x8000)
+        return false, "Seek failed"
+    end
+    
+    local ok = true
+    local err = nil
+    
+    while processed < total do
+        local chunk = math.min(buf_size, total - processed)
+        -- Sector alignment
+        if chunk % self.sector_size ~= 0 then 
+            chunk = math.ceil(chunk / self.sector_size) * self.sector_size 
+        end
+        
+        if kernel32.WriteFile(self.handle, buf, chunk, written, nil) == 0 then
+            ok = false
+            err = util.last_error()
+            break
+        end
+        
+        processed = processed + written[0]
+        if progress_cb then
+            if not progress_cb(processed / total) then 
+                ok = false; err = "Cancelled"; break 
+            end
+        end
+    end
+    
+    kernel32.VirtualFree(buf, 0, 0x8000)
+    return ok, err
+end
+
 function PhysicalDrive:get_attributes()
     local attr = self:ioctl(defs.IOCTL.GET_ATTRIBUTES, nil, 0, "GET_DISK_ATTRIBUTES")
     if not attr then return nil end

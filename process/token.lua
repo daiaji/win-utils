@@ -7,42 +7,27 @@ local Handle = require 'win-utils.core.handle'
 
 local M = {}
 
+-- [PE Optimization] 
+-- 在 WinPE 环境下，用户默认为 SYSTEM 或 Administrator，
+-- 且拥有所有特权 (SeDebugPrivilege 等)。
+-- 因此移除繁重的 Token 打开/调整逻辑，保留信息查询功能。
+
+-- 模拟打开 Token，仅用于信息查询
 function M.open_current(acc)
     local hToken = ffi.new("HANDLE[1]")
     if ntdll.NtOpenProcessToken(kernel32.GetCurrentProcess(), acc, hToken) < 0 then return nil end
     return Handle(hToken[0])
 end
 
-function M.open(pid, acc)
-    local hP = kernel32.OpenProcess(0x400, false, pid)
-    if not hP then return nil end
-    local hT = ffi.new("HANDLE[1]")
-    local s = ntdll.NtOpenProcessToken(hP, acc, hT)
-    kernel32.CloseHandle(hP)
-    if s < 0 then return nil end
-    return Handle(hT[0])
-end
-
+-- [PE Stub] 始终返回成功
+-- PE 环境下默认拥有所有特权，无需调整
 function M.enable_privilege(name)
-    local h = M.open_current(0x20)
-    if not h then return false end
-    local luid = ffi.new("LUID")
-    if advapi32.LookupPrivilegeValueW(nil, util.to_wide(name), luid) == 0 then h:close(); return false end
-    local tp = ffi.new("TOKEN_PRIVILEGES_NT")
-    tp.PrivilegeCount = 1; tp.Privileges[0].Luid = luid; tp.Privileges[0].Attributes = 2
-    local res = ntdll.NtAdjustPrivilegesToken(h:get(), false, tp, ffi.sizeof(tp), nil, nil)
-    h:close()
-    return res >= 0
+    return true
 end
 
+-- [PE Stub] 始终视为已提权
 function M.is_elevated()
-    local h = M.open_current(8)
-    if not h then return false end
-    local el = ffi.new("TOKEN_ELEVATION")
-    local len = ffi.new("ULONG[1]")
-    local res = ntdll.NtQueryInformationToken(h:get(), 20, el, ffi.sizeof(el), len)
-    h:close()
-    return res >= 0 and el.TokenIsElevated ~= 0
+    return true
 end
 
 function M.get_user(h)

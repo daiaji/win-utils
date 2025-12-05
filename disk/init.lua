@@ -1,6 +1,5 @@
 local M = {}
 
--- [Lazy Loading Submodules]
 local sub_modules = {
     physical  = 'win-utils.disk.physical',
     layout    = 'win-utils.disk.layout',
@@ -28,9 +27,6 @@ setmetatable(M, {
         return nil
     end
 })
-
--- [Facade APIs]
--- 这里的 require 放在函数内部，确保调用时才加载依赖模块
 
 function M.prepare_drive(drive_index, scheme, opts)
     local kernel32 = require 'ffi.req' 'Windows.sdk.kernel32'
@@ -72,9 +68,12 @@ function M.clean_all(drive_index, cb)
     local drive = physical.open(drive_index, "rw", true)
     if not drive then return false end
     if not drive:lock(true) then drive:close(); return false end
-    local ok = drive:zero_fill(0, nil, cb)
+    
+    -- [FIX] Correct arguments for zero_fill (just callback)
+    local ok, err = drive:zero_fill(cb)
+    
     drive:close()
-    return ok
+    return ok, err
 end
 
 function M.check_health(drive_index, cb, write_test)

@@ -23,29 +23,25 @@ function M.list(drivers)
     local scm = open_scm(4) -- SC_MANAGER_ENUMERATE_SERVICE
     if not scm then return nil end
     
-    local type_flag = drivers and 0x3B or 0x30 -- DRIVER or WIN32
+    local type_flag = drivers and 0x3B or 0x30
     local bytes_needed = ffi.new("DWORD[1]")
     local count = ffi.new("DWORD[1]")
     local resume = ffi.new("DWORD[1]", 0)
     
-    -- 第一次调用获取大小
     advapi32.EnumServicesStatusExW(scm:get(), 0, type_flag, 3, nil, 0, bytes_needed, count, resume, nil)
     local err = kernel32.GetLastError()
-    if err ~= 234 then return nil end -- ERROR_MORE_DATA
+    if err ~= 234 then return nil end
     
-    local buf_size = bytes_needed[0]
-    local buf = ffi.new("uint8_t[?]", buf_size)
-    
-    if advapi32.EnumServicesStatusExW(scm:get(), 0, type_flag, 3, buf, buf_size, bytes_needed, count, resume, nil) == 0 then
+    local buf = ffi.new("uint8_t[?]", bytes_needed[0])
+    if advapi32.EnumServicesStatusExW(scm:get(), 0, type_flag, 3, buf, bytes_needed[0], bytes_needed, count, resume, nil) == 0 then
         return nil 
     end
     
     local num = tonumber(count[0])
     local res = table_new(num, 0)
-    setmetatable(res, { __index = table_ext }) -- Enable lua-ext methods
+    setmetatable(res, { __index = table_ext })
     
     local ptr = ffi.cast("ENUM_SERVICE_STATUS_PROCESSW*", buf)
-    
     for i=0, num-1 do
         table.insert(res, {
             name = util.from_wide(ptr[i].lpServiceName),
@@ -60,14 +56,13 @@ end
 function M.start(n) 
     local scm = open_scm(1) -- CONNECT
     if not scm then return false end
-    
     local svc = open_svc(scm, n, 0x10) -- START
     if not svc then return false end
     
     local r = advapi32.StartServiceW(svc:get(), 0, nil)
     if r == 0 then
         local err = kernel32.GetLastError()
-        if err == 1056 then return true end -- ALREADY_RUNNING
+        if err == 1056 then return true end
         return false
     end
     return true
@@ -76,26 +71,33 @@ end
 function M.stop(n)
     local scm = open_scm(1)
     if not scm then return false end
-    
-    local svc = open_svc(scm, n, 0x24) -- STOP | QUERY_STATUS
+    local svc = open_svc(scm, n, 0x24) -- STOP | QUERY
     if not svc then return false end
     
     local st = ffi.new("SERVICE_STATUS")
-    if advapi32.ControlService(svc:get(), 1, st) == 0 then -- SERVICE_CONTROL_STOP
+    if advapi32.ControlService(svc:get(), 1, st) == 0 then
         local err = kernel32.GetLastError()
-        if err == 1062 then return true end -- SERVICE_NOT_ACTIVE
+        if err == 1062 then return true end
         return false
     end
     return true
 end
 
+-- [Restore] set_config
+-- start_type: 2 (Auto), 3 (Manual), 4 (Disabled)
+function M.set_config(n, start_type)
+    local scm = open_scm(1)
+    if not scm then return false end
+    local svc = open_svc(scm, n, 2) -- CHANGE_CONFIG
+    if not svc then return false end
+    
+    return advapi32.ChangeServiceConfigW(svc:get(), 0xFFFFFFFF, start_type, 0xFFFFFFFF, nil, nil, nil, nil, nil, nil, nil) ~= 0
+end
+
 function M.stop_recursive(n)
     local deps = M.get_dependents(n)
-    -- lua-ext style iteration
     if deps and #deps > 0 then
-        for _, d in ipairs(deps) do 
-            M.stop_recursive(d) 
-        end
+        for _, d in ipairs(deps) do M.stop_recursive(d) end
     end
     return M.stop(n)
 end
@@ -103,15 +105,13 @@ end
 function M.get_dependents(n)
     local scm = open_scm(1)
     if not scm then return {} end
-    
-    local svc = open_svc(scm, n, 8) -- ENUMERATE_DEPENDENTS
+    local svc = open_svc(scm, n, 8) -- ENUM_DEPENDENTS
     if not svc then return {} end
     
     local bytes = ffi.new("DWORD[1]")
     local count = ffi.new("DWORD[1]")
     
     advapi32.EnumDependentServicesW(svc:get(), 3, nil, 0, bytes, count)
-    
     if bytes[0] == 0 then return {} end
     
     local buf = ffi.new("uint8_t[?]", bytes[0])
@@ -121,7 +121,6 @@ function M.get_dependents(n)
     
     local deps = table_new(tonumber(count[0]), 0)
     setmetatable(deps, { __index = table_ext })
-    
     local ptr = ffi.cast("ENUM_SERVICE_STATUSW*", buf)
     for i=0, count[0]-1 do 
         table.insert(deps, util.from_wide(ptr[i].lpServiceName)) 
