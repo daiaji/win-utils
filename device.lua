@@ -11,8 +11,9 @@ local C = ffi.C
 local GUID_DISK = ffi.new("GUID", {0x53f56307, 0xb6bf, 0x11d0, {0x94, 0xf2, 0x00, 0xa0, 0xc9, 0x1e, 0xfb, 0x8b}})
 local GUID_USB_HUB = ffi.new("GUID", {0xf18a0e88, 0xc30c, 0x11d0, {0x88, 0x15, 0x00, 0xa0, 0xc9, 0x06, 0xbe, 0xd8}})
 
+-- 辅助：根据 PhysicalDriveIndex 查找设备实例 ID (DevInst)
 local function get_disk_devinst(drive_index)
-    local flags = bit.bor(0x02, 0x10)
+    local flags = bit.bor(0x02, 0x10) -- DIGCF_PRESENT | DIGCF_DEVICEINTERFACE
     local hInfo = setupapi.SetupDiGetClassDevsW(GUID_DISK, nil, nil, flags)
     if hInfo == ffi.cast("HANDLE", -1) then return nil end
     
@@ -21,7 +22,7 @@ local function get_disk_devinst(drive_index)
     local i = 0
     local result = nil
     
-    -- [FIX] Hoist declarations
+    -- 变量提升，避免 goto 跳过初始化
     local req = ffi.new("DWORD[1]")
     local buf, detail, hDev, num
     
@@ -40,6 +41,7 @@ local function get_disk_devinst(drive_index)
     detail.cbSize = ffi.sizeof("SP_DEVICE_INTERFACE_DETAIL_DATA_W")
     
     if setupapi.SetupDiGetDeviceInterfaceDetailW(hInfo, ifaceData, detail, req[0], nil, nil) ~= 0 then
+        -- 打开设备查询编号
         hDev = kernel32.CreateFileW(detail.DevicePath, 0, 3, nil, 3, 0, nil)
         if hDev ~= ffi.cast("HANDLE", -1) then
             num = util.ioctl(hDev, defs.IOCTL.GET_NUM, nil, 0, "STORAGE_DEVICE_NUMBER")
@@ -60,6 +62,7 @@ local function get_disk_devinst(drive_index)
     return result
 end
 
+-- 尝试通过 USB Hub 循环端口电源 (Hard Reset)
 function M.cycle_port(physical_drive_index)
     local dev_inst = get_disk_devinst(physical_drive_index)
     if not dev_inst then return false, "Device not found" end
@@ -69,15 +72,17 @@ function M.cycle_port(physical_drive_index)
     local port = 0
     local hub_inst = 0
     
-    -- [FIX] Hoist declarations for loop
+    -- 变量提升
     local buf = ffi.new("wchar_t[1024]")
     local len = ffi.new("ULONG[1]")
     local type_ptr = ffi.new("ULONG[1]")
     local addr = ffi.new("DWORD[1]")
     local svc
     
+    -- 1. 向上遍历设备树，寻找 USB Hub 父节点
     ::walk_up::
     len[0] = 2048
+    -- CM_DRP_SERVICE = 0x05
     if cfgmgr32.CM_Get_DevNode_Registry_PropertyW(current, 0x05, type_ptr, buf, len, 0) == 0 then
         svc = util.from_wide(buf)
         if svc and svc:upper():find("USBHUB") then
@@ -87,6 +92,7 @@ function M.cycle_port(physical_drive_index)
     end
     
     len[0] = 4
+    -- CM_DRP_ADDRESS = 0x1C (对于 USB 设备，这是端口号)
     if cfgmgr32.CM_Get_DevNode_Registry_PropertyW(current, 0x1C, type_ptr, addr, len, 0) == 0 then
         port = addr[0]
     end
@@ -101,15 +107,14 @@ function M.cycle_port(physical_drive_index)
     ::found_hub::
     if hub_inst == 0 or port == 0 then return false, "USB Hub/Port invalid" end
     
+    -- 2. 找到 Hub 的设备接口路径
     local hub_path = nil
     
-    -- Inline hub path finding
     local hInfo = setupapi.SetupDiGetClassDevsW(GUID_USB_HUB, nil, nil, bit.bor(0x02, 0x10))
     if hInfo ~= ffi.cast("HANDLE", -1) then
         local devData = ffi.new("SP_DEVINFO_DATA"); devData.cbSize = ffi.sizeof(devData)
         local ifaceData = ffi.new("SP_DEVICE_INTERFACE_DATA"); ifaceData.cbSize = ffi.sizeof(ifaceData)
         local i = 0
-        -- Hoist inner loop vars
         local req = ffi.new("DWORD[1]")
         local b, d
         
@@ -135,6 +140,7 @@ function M.cycle_port(physical_drive_index)
 
     if not hub_path then return false, "Hub path not found" end
     
+    -- 3. 发送 IOCTL 命令
     local hHub = kernel32.CreateFileW(util.to_wide(hub_path), C.GENERIC_WRITE, C.FILE_SHARE_WRITE, nil, C.OPEN_EXISTING, 0, nil)
     if hHub == ffi.cast("HANDLE", -1) then return false, "Open Hub failed" end
     
@@ -147,6 +153,7 @@ function M.cycle_port(physical_drive_index)
     return res ~= nil
 end
 
+-- 尝试通过 PnP 禁用/启用设备 (Soft Reset)
 function M.cycle_disk(physical_drive_index)
     local flags = bit.bor(0x02, 0x10) 
     local hInfo = setupapi.SetupDiGetClassDevsW(GUID_DISK, nil, nil, flags)
@@ -159,10 +166,10 @@ function M.cycle_disk(physical_drive_index)
     local i = 0
     local target_dev = nil
     
-    -- Hoist
     local req = ffi.new("DWORD[1]")
     local buf, detail, hDev, num
     
+    -- 1. 查找目标设备
     ::loop::
     if setupapi.SetupDiEnumDeviceInfo(hInfo, i, devData) == 0 then goto done end
     
@@ -200,6 +207,7 @@ function M.cycle_disk(physical_drive_index)
         return false, "Device not found"
     end
     
+    -- 2. 执行状态变更 (Disable -> Enable)
     local params = ffi.new("SP_PROPCHANGE_PARAMS")
     params.ClassInstallHeader.cbSize = ffi.sizeof("SP_CLASSINSTALL_HEADER")
     params.ClassInstallHeader.InstallFunction = 0x12 -- DIF_PROPERTYCHANGE
@@ -220,6 +228,27 @@ function M.cycle_disk(physical_drive_index)
     
     setupapi.SetupDiDestroyDeviceInfoList(hInfo)
     return res ~= 0
+end
+
+-- [Restored] 自动尝试复活设备
+-- 策略：优先尝试物理端口断电重置 (Hard Reset)，如果失败则尝试 PnP 节点重置 (Soft Reset)
+function M.revive(physical_drive_index, wait_ms)
+    -- 1. 尝试 USB 端口级复位 (最彻底，模拟拔插)
+    -- 注意：这会导致设备短暂消失，需要等待系统重新枚举
+    local ok_port, err_port = M.cycle_port(physical_drive_index)
+    if ok_port then 
+        -- 默认等待 2秒 让 PNP 管理器重新上线设备
+        kernel32.Sleep(wait_ms or 2000) 
+        return true, "Hardware Port Cycle" 
+    end
+    
+    -- 2. 如果端口复位失败（例如非 USB 设备，或无法定位 Hub），尝试软件级禁用/启用
+    local ok_disk, err_disk = M.cycle_disk(physical_drive_index)
+    if ok_disk then 
+        return true, "Software PnP Cycle" 
+    end
+    
+    return false, "Revive failed (Port: " .. tostring(err_port) .. ", Disk: " .. tostring(err_disk) .. ")"
 end
 
 return M
