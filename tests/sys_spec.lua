@@ -29,7 +29,7 @@ function TestSys:test_Service_List()
     end
 end
 
--- [New] 测试服务配置修改 (Restored Feature)
+-- [New] 测试服务配置修改
 function TestSys:test_Service_Config()
     -- 这是一个危险操作，我们只测试函数是否存在且能安全调用（针对不存在的服务应返回 false）
     -- 不去修改真实服务的配置以免破坏环境
@@ -63,7 +63,7 @@ function TestSys:test_Shortcut()
     end
 end
 
--- [New] 命令行解析测试 (Restored Feature)
+-- [New] 命令行解析测试 (Parse)
 function TestSys:test_Shell_CmdParse()
     lu.assertNotNil(win.sys.shell, "Shell module not exported")
     
@@ -77,7 +77,24 @@ function TestSys:test_Shell_CmdParse()
     lu.assertEquals(args[3], "argument with spaces")
 end
 
--- [New] UEFI 启动标记测试 (Restored Feature)
+-- [New] 当前进程参数获取测试 (GetArgs)
+function TestSys:test_Shell_GetArgs()
+    local args = win.sys.shell.get_args()
+    lu.assertIsTable(args)
+    
+    -- 任何进程至少有一个参数 (argv[0] = 自身路径)
+    lu.assertTrue(#args >= 1, "Should return at least executable path")
+    
+    print("  [INFO] Current Process Args:")
+    for i, v in ipairs(args) do
+        print(string.format("    [%d] %s", i, v))
+    end
+    
+    -- 验证第一个参数通常包含 .exe 或 .lua (取决于运行方式)
+    lu.assertIsString(args[1])
+end
+
+-- [New] UEFI 启动标记测试
 function TestSys:test_Power_UEFI()
     -- 此测试不会导致立即重启，只是设置 NVRAM 变量
     -- 在不支持 UEFI 的 VM 中可能会失败，断言返回 boolean 即可
