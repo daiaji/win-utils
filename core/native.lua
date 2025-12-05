@@ -1,6 +1,7 @@
 local ffi = require 'ffi'
 local bit = require 'bit' -- LuaJIT BitOp
 local kernel32 = require 'ffi.req' 'Windows.sdk.kernel32'
+local ntdll = require 'ffi.req' 'Windows.sdk.ntdll'
 local util = require 'win-utils.core.util'
 local Handle = require 'win-utils.core.handle'
 local C = require 'win-utils.core.ffi_defs'
@@ -132,6 +133,29 @@ function M.query_variable_size(func, first_arg, info_class, initial_size)
             return nil, status 
         else 
             return buf, size, ret_len[0] 
+        end
+    end
+end
+
+-- [RESTORED] 用于 NtQuerySystemInformation 的专用辅助函数
+-- 它的参数签名不同于 query_variable_size (没有 Handle/FirstArg)
+function M.query_system_info(info_class, initial_size)
+    local size = initial_size or 0x10000
+    local buf = ffi.new("uint8_t[?]", size)
+    local ret_len = ffi.new("ULONG[1]")
+    
+    while true do
+        local status = ntdll.NtQuerySystemInformation(info_class, buf, size, ret_len)
+        
+        if status == 0xC0000004 then -- STATUS_INFO_LENGTH_MISMATCH
+            size = (ret_len[0] == 0) and size * 2 or ret_len[0]
+            -- 64MB Safety Limit
+            if size > 64 * 1024 * 1024 then return nil, "Buffer overflow protection" end
+            buf = ffi.new("uint8_t[?]", size)
+        elseif status < 0 then
+            return nil, status
+        else
+            return buf, size, ret_len[0]
         end
     end
 end
