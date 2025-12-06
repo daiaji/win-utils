@@ -264,21 +264,19 @@ function TestProcess:test_Handles()
     
     -- 系统级句柄列表 (需要提升权限或运气)
     if win.process.token.is_elevated() then
+        print("  [DEBUG] Attempting system handle list (Elevated)...")
         local sys_handles = win.process.handles.list_system()
         lu.assertIsTable(sys_handles)
         
-        print("  [DEBUG] System Handle Count: " .. #sys_handles)
-        
-        -- [DEBUG] 如果为空，打印一下状态以便调试
-        if #sys_handles == 0 then
-            print("  [ERROR] list_system returned empty table!")
-        end
+        local count = #sys_handles
+        print("  [DEBUG] System Handle Count Returned: " .. count)
         
         -- 整个系统的句柄数通常成千上万
-        lu.assertTrue(#sys_handles > 100)
+        -- 如果返回 0，说明逻辑全崩了
+        lu.assertTrue(count > 100, "Expected >100 handles, got " .. count)
         
         -- 检查结构
-        if #sys_handles > 0 then
+        if count > 0 then
             local h = sys_handles[1]
             lu.assertIsNumber(h.pid)
             lu.assertIsNumber(h.val) -- handle value

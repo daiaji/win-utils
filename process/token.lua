@@ -47,11 +47,11 @@ end
 -- 在 PE 中虽然默认拥有特权，但某些特权位默认是 Disabled 的，仍需 Enable 才能生效。
 function M.enable_privilege(name)
     local hToken = M.open_current(0x28) -- ADJUIST_PRIVILEGES | QUERY
-    if not hToken then return false end
+    if not hToken then return false, "OpenToken failed" end
     
     local luid = ffi.new("LUID")
     if advapi32.LookupPrivilegeValueW(nil, util.to_wide(name), luid) == 0 then
-        return false, "Lookup failed"
+        return false, "LookupPrivilegeValue failed: " .. kernel32.GetLastError()
     end
     
     local tp = ffi.new("TOKEN_PRIVILEGES")
@@ -63,8 +63,12 @@ function M.enable_privilege(name)
     local res = advapi32.AdjustTokenPrivileges(hToken:get(), false, tp, 0, nil, nil)
     local err = kernel32.GetLastError()
     
-    if res == 0 or err == 1300 then -- ERROR_NOT_ALL_ASSIGNED = 1300
-        return false, "Not all assigned" 
+    if res == 0 then
+        return false, "AdjustTokenPrivileges API failed: " .. err
+    end
+    
+    if err == 1300 then -- ERROR_NOT_ALL_ASSIGNED = 1300
+        return false, "Not all privileges assigned (ERROR_NOT_ALL_ASSIGNED)" 
     end
     
     return true

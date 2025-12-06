@@ -27,16 +27,26 @@ end
 -- [RESTORED] 列出全系统所有句柄
 -- 这对于分析系统级问题、查找文件占用非常关键，无法被 Process-level API 替代
 function M.list_system()
-    -- [FIX] Explicitly enable SeDebugPrivilege. 
-    -- Even admins need this enabled to query system-wide handles.
-    token.enable_privilege("SeDebugPrivilege")
+    -- [DEBUG LOGGING]
+    local priv_ok, priv_err = token.enable_privilege("SeDebugPrivilege")
+    if not priv_ok then
+        print("  [DEBUG][handles] Failed to enable SeDebugPrivilege: " .. tostring(priv_err))
+    else
+        print("  [DEBUG][handles] SeDebugPrivilege enabled.")
+    end
 
     -- SystemExtendedHandleInformation = 64
-    local buf = native.query_system_info(64, 4 * 1024 * 1024) -- Start with 4MB buffer
-    if not buf then return {} end
+    local buf, final_size, ret_len = native.query_system_info(64, 4 * 1024 * 1024) -- Start with 4MB buffer
+    
+    if not buf then
+        print("  [DEBUG][handles] native.query_system_info returned nil")
+        return {} 
+    end
     
     local info = ffi.cast("SYSTEM_HANDLE_INFORMATION_EX*", buf)
     local count = tonumber(info.NumberOfHandles)
+    
+    print(string.format("  [DEBUG][handles] Native returned count: %d (Size: %d)", count, final_size))
     
     local res = table_new(count, 0)
     setmetatable(res, { __index = table_ext })

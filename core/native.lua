@@ -155,23 +155,34 @@ function M.query_system_info(info_class, initial_size)
     local size = initial_size or 0x10000
     local buf = ffi.new("uint8_t[?]", size)
     local ret_len = ffi.new("ULONG[1]")
+    local attempt = 0
     
     while true do
+        attempt = attempt + 1
         local status = ntdll.NtQuerySystemInformation(info_class, buf, size, ret_len)
         local code = norm_status(status)
         
         if code == 0xC0000004 then 
             local req = ret_len[0]
             if req == 0 then req = size * 2 end
-            -- [FIX] Add padding (64KB) to accommodate new handles created during loop
-            size = req + 64 * 1024 
-            if size > 64 * 1024 * 1024 then return nil, "Buffer overflow protection" end
+            -- Add padding
+            local new_size = req + 64 * 1024 
+            
+            print(string.format("  [DEBUG][native] NtQuerySystemInfo(%d) retry %d: Status=0x%X, Size=%d, Req=%d, New=%d", 
+                info_class, attempt, code, size, req, new_size))
+            
+            size = new_size
+            if size > 64 * 1024 * 1024 then 
+                print("  [DEBUG][native] Buffer overflow protection triggered")
+                return nil, "Buffer overflow protection" 
+            end
             buf = ffi.new("uint8_t[?]", size)
         elseif status < 0 then
-            -- [DEBUG] Print error code to stdout for diagnosis in CI
-            print(string.format("  [ERROR] NtQuerySystemInformation(%d) failed: 0x%08X", info_class, code))
+            print(string.format("  [DEBUG][native] NtQuerySystemInfo(%d) failed: 0x%08X", info_class, code))
             return nil, status
         else
+            -- Success
+            print(string.format("  [DEBUG][native] NtQuerySystemInfo(%d) success. Size=%d, Ret=%d", info_class, size, ret_len[0]))
             return buf, size, ret_len[0]
         end
     end
