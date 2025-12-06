@@ -23,6 +23,16 @@ local function is_filesystem_ready(idx, offset, expected_fs)
     return false
 end
 
+-- 辅助：刷新磁盘
+local function refresh_disk(idx)
+    local physical = require 'win-utils.disk.physical'
+    local d = physical.open(idx, "r", true)
+    if d then 
+        d:refresh()
+        d:close() 
+    end
+end
+
 -- 格式化统一入口
 function M.format(idx, off, fs, lab, opts)
     opts = opts or {}
@@ -33,6 +43,7 @@ function M.format(idx, off, fs, lab, opts)
     local physical = require 'win-utils.disk.physical'
     local layout = require 'win-utils.disk.layout'
     local ntfs = require 'win-utils.fs.ntfs'
+    local kernel32 = require 'ffi.req' 'Windows.sdk.kernel32'
 
     local drive, err = physical.open(idx, "rw", true)
     if not drive then return false, "Open failed: " .. tostring(err) end
@@ -57,13 +68,13 @@ function M.format(idx, off, fs, lab, opts)
     local result = false
     local msg = "Unknown Error"
     
-    -- [FIX] Hoist variable declarations to prevent goto scope errors
+    -- [FIX] Hoist variables
     local ok_vds, msg_vds = false, "Skipped"
     local letter = nil
     
     -- [Rufus Strategy] 格式化前刷新
     drive:refresh()
-    drive:close() -- 必须关闭句柄，否则格式化可能失败
+    drive:close() 
 
     -- Strategy 1: Enhanced FAT32
     if fs_lower == "fat32" and p_size > 32*1024*1024*1024 then
@@ -77,6 +88,11 @@ function M.format(idx, off, fs, lab, opts)
     -- Strategy 2: VDS
     ok_vds, msg_vds = vds.format(idx, off, fs, lab, true, 0, 0)
     if ok_vds then
+        -- [FIX] VDS 成功后，立即强制刷新内核分区表缓存
+        -- 这能解决 "Ghost Success" (VDS 说好了，但 Windows 还是看到 RAW) 的问题
+        refresh_disk(idx)
+        kernel32.Sleep(500) -- 给内核一点时间重新挂载 FS 驱动
+        
         if is_filesystem_ready(idx, off, fs) then
             result = true; msg = "VDS"
             goto done
@@ -104,11 +120,7 @@ function M.format(idx, off, fs, lab, opts)
 
     ::done::
     -- [Rufus Strategy] 格式化后再次刷新
-    local d2 = physical.open(idx, "r", true)
-    if d2 then 
-        d2:refresh()
-        d2:close() 
-    end
+    refresh_disk(idx)
     
     return result, msg
 end
