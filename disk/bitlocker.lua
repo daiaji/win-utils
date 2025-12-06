@@ -1,10 +1,11 @@
 local ffi = require 'ffi'
 local native = require 'win-utils.core.native'
 local kernel32 = require 'ffi.req' 'Windows.sdk.kernel32'
+local util = require 'win-utils.core.util'
 
 local M = {}
 
--- 检查指定盘符或路径是否被 BitLocker 加密
+-- [API] 检查指定盘符或路径是否被 BitLocker 加密
 -- 原理：直接读取卷引导记录 (VBR) 的 OEM ID 字段 (Offset 0x03, Length 8)
 -- 返回: "Locked", "None", 或 nil + error
 function M.get_status(path)
@@ -28,7 +29,7 @@ function M.get_status(path)
     h:close()
 
     if res == 0 or bytes_read[0] < 512 then
-        return nil, "Read VBR failed"
+        return nil, util.last_error("Read VBR failed")
     end
 
     -- 检查 NTFS/FAT32/ExFAT 偏移 0x03 (OEM ID)
@@ -42,14 +43,19 @@ function M.get_status(path)
     return "None"
 end
 
--- 检测卷是否处于“已解锁”状态
--- 即使卷被加密，如果在当前环境下已经解锁（如通过 TPM 或 密码），则可以访问
+-- [API] 检测卷是否处于“已解锁”状态
+-- 返回: true (已解锁/无加密), false (未解锁/无法访问), 或 nil + error
 function M.is_unlocked(path)
-    local status = M.get_status(path)
-    if status ~= "Locked" then return true end -- 未加密视为已解锁
+    local status, err = M.get_status(path)
     
-    -- 尝试列出根目录文件，利用 native 模块
-    -- 只需要能成功打开根目录句柄即可证明已解锁
+    -- 如果状态获取失败，透传错误，而不是假定已解锁
+    if not status then return nil, err end
+    
+    -- 未加密视为已解锁
+    if status ~= "Locked" then return true end 
+    
+    -- 如果被标记为 Locked，尝试列出根目录文件
+    -- 只需要能成功打开根目录句柄即可证明已解锁 (利用 native 模块)
     local root_path = path
     if not root_path:match("\\$") then root_path = root_path .. "\\" end
     

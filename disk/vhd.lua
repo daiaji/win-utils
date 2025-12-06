@@ -18,10 +18,9 @@ function M.create(path, size_bytes)
     params.Version2.MaximumSize = size_bytes
     
     local h = ffi.new("HANDLE[1]")
-    -- [FIX] VirtualDiskAccessMask must be 0 (VIRTUAL_DISK_ACCESS_NONE) when creating
     local res = C.CreateVirtualDisk(vst, util.to_wide(path), 0, nil, 8, 0, params, nil, h)
     
-    if res ~= 0 then return nil, "Create failed: " .. res end
+    if res ~= 0 then return nil, "CreateVirtualDisk failed: " .. res end
     return Handle(h[0])
 end
 
@@ -31,20 +30,30 @@ function M.open(path)
     vst.VendorId = VENDOR_MS
     
     local h = ffi.new("HANDLE[1]")
-    -- 0x30000 = VIRTUAL_DISK_ACCESS_ALL
     local res = C.OpenVirtualDisk(vst, util.to_wide(path), 0x30000, 0, nil, h)
     
-    if res ~= 0 then return nil, "Open failed: " .. res end
+    if res ~= 0 then return nil, "OpenVirtualDisk failed: " .. res end
     return Handle(h[0])
 end
 
-function M.attach(h) return C.AttachVirtualDisk(h:get(), nil, 0, 0, nil, nil) == 0 end
-function M.detach(h) return C.DetachVirtualDisk(h:get(), 0, 0) == 0 end
+function M.attach(h) 
+    local res = C.AttachVirtualDisk(h:get(), nil, 0, 0, nil, nil)
+    if res ~= 0 then return false, "Attach failed: " .. res end
+    return true
+end
+
+function M.detach(h) 
+    local res = C.DetachVirtualDisk(h:get(), 0, 0)
+    if res ~= 0 then return false, "Detach failed: " .. res end
+    return true
+end
 
 function M.expand(h, new_size)
     local p = ffi.new("EXPAND_VIRTUAL_DISK_PARAMETERS")
     p.Version = 1; p.Version1.NewSize = new_size
-    return C.ExpandVirtualDisk(h:get(), 0, p, nil) == 0
+    local res = C.ExpandVirtualDisk(h:get(), 0, p, nil)
+    if res ~= 0 then return false, "Expand failed: " .. res end
+    return true
 end
 
 function M.get_physical_path(h)
@@ -61,7 +70,7 @@ function M.wait_for_physical_path(h, timeout)
     while true do
         local path = M.get_physical_path(h)
         if path then return path end
-        if (kernel32.GetTickCount() - start) > limit then return nil, "Timeout" end
+        if (kernel32.GetTickCount() - start) > limit then return nil, "Timeout waiting for physical path" end
         kernel32.Sleep(100)
     end
 end

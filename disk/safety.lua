@@ -10,15 +10,14 @@ local M = {}
 -- 检查驱动器是否包含当前运行的 Windows
 function M.is_system_drive(drive_idx)
     local buf = ffi.new("wchar_t[260]")
-    if kernel32.GetWindowsDirectoryW(buf, 260) == 0 then return false end
+    if kernel32.GetWindowsDirectoryW(buf, 260) == 0 then return nil, util.last_error() end
     
     -- 获取 C:
     local letter = util.from_wide(buf):sub(1, 2)
-    
     local h = native.open_file("\\\\.\\" .. letter, "r", true)
-    if not h then return false end
+    if not h then return nil, "Failed to open system drive handle" end
     
-    local ext = util.ioctl(h:get(), defs.IOCTL.GET_VOL_EXTENTS, nil, 0, "VOLUME_DISK_EXTENTS")
+    local ext, err = util.ioctl(h:get(), defs.IOCTL.GET_VOL_EXTENTS, nil, 0, "VOLUME_DISK_EXTENTS")
     h:close()
     
     if ext then
@@ -29,7 +28,7 @@ function M.is_system_drive(drive_idx)
     return false
 end
 
--- [Restored] 检查是否存在活跃页面文件
+-- 检查是否存在活跃页面文件
 function M.has_pagefile(drive_idx)
     local k = reg.open_key("HKLM", "SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Memory Management")
     if not k then return false end
@@ -40,7 +39,6 @@ function M.has_pagefile(drive_idx)
     if type(files) ~= "table" then files = {files} end
     
     for _, path in ipairs(files) do
-        -- 路径通常为 "C:\pagefile.sys" 或 "?:\pagefile.sys"
         local letter = path:sub(1, 2)
         if letter:match("^%a:") then
             local h = native.open_file("\\\\.\\" .. letter, "r", true)

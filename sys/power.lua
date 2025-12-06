@@ -6,14 +6,33 @@ local token = require 'win-utils.process.token'
 
 local M = {}
 
-local function priv() token.enable_privilege("SeShutdownPrivilege") end
+local function priv() 
+    if not token.enable_privilege("SeShutdownPrivilege") then
+        return false, "SeShutdownPrivilege required"
+    end
+    return true
+end
 
-function M.shutdown() priv(); ntdll.NtShutdownSystem(2) end -- ShutdownPowerOff
-function M.reboot() priv(); ntdll.NtShutdownSystem(1) end   -- ShutdownReboot
+function M.shutdown() 
+    local ok, err = priv()
+    if not ok then return false, err end
+    local r = ntdll.NtShutdownSystem(2) -- PowerOff
+    if r < 0 then return false, string.format("Shutdown failed: 0x%X", r) end
+    return true
+end
 
--- [Restored] 重启进入 UEFI 设置
+function M.reboot() 
+    local ok, err = priv()
+    if not ok then return false, err end
+    local r = ntdll.NtShutdownSystem(1) -- Reboot
+    if r < 0 then return false, string.format("Reboot failed: 0x%X", r) end
+    return true
+end
+
 function M.boot_to_firmware()
-    token.enable_privilege("SeSystemEnvironmentPrivilege")
+    if not token.enable_privilege("SeSystemEnvironmentPrivilege") then 
+        return false, "SeSystemEnvironmentPrivilege required" 
+    end
     
     local name, anchor = native.to_unicode_string("OsIndications")
     local guid = ffi.new("GUID", {0x8BE4DF61, 0x93CA, 0x11D2, {0xAA, 0x0D, 0x00, 0xE0, 0x98, 0x03, 0x2B, 0x8C}})
@@ -22,28 +41,22 @@ function M.boot_to_firmware()
     local len = ffi.new("ULONG[1]", 8)
     local attr = ffi.new("ULONG[1]")
     
-    -- 1. Read current value
     local status = ntdll.NtQuerySystemEnvironmentValueEx(name, guid, buf, len, attr)
-    
-    -- 0xC0000034 = STATUS_VARIABLE_NOT_FOUND
-    if status == 0xC0000034 then 
-        buf[0] = 0
-        attr[0] = 7 -- NON_VOLATILE | BOOTSERVICE | RUNTIME
+    if status == 0xC0000034 then -- Not Found
+        buf[0] = 0; attr[0] = 7 
     elseif status < 0 then 
-        return false, "Query failed" 
+        return false, string.format("Query failed: 0x%X", status)
     end
     
-    -- 2. Set Bit 0 (EFI_OS_INDICATIONS_BOOT_TO_FW_UI)
-    -- LuaJIT bit op is 32-bit, manual int64 manipulation required or simple addition if low bit is 0
     if bit.band(tonumber(buf[0]), 1) == 0 then
         buf[0] = buf[0] + 1
     end
     
     status = ntdll.NtSetSystemEnvironmentValueEx(name, guid, buf, 8, attr[0])
-    
-    -- keep anchor alive
     local _ = anchor
-    return status >= 0
+    
+    if status < 0 then return false, string.format("Set failed: 0x%X", status) end
+    return true
 end
 
 return M

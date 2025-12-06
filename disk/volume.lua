@@ -13,7 +13,7 @@ local M = {}
 function M.list()
     local name = ffi.new("wchar_t[261]")
     local hFind = kernel32.FindFirstVolumeW(name, 261)
-    if hFind == ffi.cast("HANDLE", -1) then return nil end
+    if hFind == ffi.cast("HANDLE", -1) then return nil, util.last_error("FindFirstVolume") end
     
     local res = table_new(8, 0)
     setmetatable(res, { __index = table_ext })
@@ -25,7 +25,6 @@ function M.list()
         mount_points = {} 
     }
     
-    -- 获取挂载点列表
     local buf = ffi.new("wchar_t[1024]")
     local len = ffi.new("DWORD[1]")
     
@@ -35,15 +34,12 @@ function M.list()
             local mp = util.from_wide(p)
             if not mp or mp == "" then break end
             table.insert(item.mount_points, mp)
-            
-            -- 移动指针到下一个字符串
             while p[0] ~= 0 do p = p + 1 end
             p = p + 1
             if p >= buf + len[0] then break end
         end
     end
     
-    -- 获取卷标和文件系统
     local lab = ffi.new("wchar_t[261]")
     local fs = ffi.new("wchar_t[261]")
     if kernel32.GetVolumeInformationW(name, lab, 261, nil, nil, nil, fs, 261) ~= 0 then
@@ -71,7 +67,7 @@ function M.open(path, write)
     local h = kernel32.CreateFileW(util.to_wide(p), acc, 3, nil, 3, 0, nil)
     
     if h == ffi.cast("HANDLE", -1) then 
-        return nil, util.last_error() 
+        return nil, util.last_error("CreateFile failed") 
     end
     return Handle(h)
 end
@@ -99,7 +95,7 @@ end
 
 function M.find_free_letter()
     local mask = kernel32.GetLogicalDrives()
-    for i = 25, 2, -1 do -- Z: ... C:
+    for i = 25, 2, -1 do 
         if bit.band(mask, bit.lshift(1, i)) == 0 then 
             return string.char(65 + i) .. ":\\" 
         end
@@ -117,7 +113,7 @@ function M.assign(idx, offset, letter)
     if #mount_point == 2 then mount_point = mount_point .. "\\" end
     
     if kernel32.SetVolumeMountPointW(util.to_wide(mount_point), util.to_wide(guid_path)) == 0 then
-        return false, util.last_error()
+        return false, util.last_error("SetVolumeMountPoint failed")
     end
     return true, mount_point
 end
@@ -141,14 +137,13 @@ function M.unmount_all_on_disk(idx)
     end
 end
 
--- [Fix] Restore set_label functionality
 function M.set_label(path, label)
     local root = path
     if #root == 2 and root:sub(2,2) == ":" then root = root .. "\\"
     elseif root:sub(-1) ~= "\\" then root = root .. "\\" end
     
     if kernel32.SetVolumeLabelW(util.to_wide(root), util.to_wide(label)) == 0 then
-        return false, util.last_error()
+        return false, util.last_error("SetVolumeLabel failed")
     end
     return true
 end

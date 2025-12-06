@@ -17,28 +17,22 @@ local function create_reparse_buf(target, print_name)
     local wsub = util.to_wide(sub)
     local wprint = util.to_wide(print_name or target)
     
-    -- Calc lengths in bytes (excluding null)
     local sub_len = 0; while wsub[sub_len]~=0 do sub_len=sub_len+1 end; sub_len=sub_len*2
     local print_len = 0; while wprint[print_len]~=0 do print_len=print_len+1 end; print_len=print_len*2
     
-    -- MOUNT_POINT_REPARSE_BUFFER (Tag + Len + Reserved + Offsets) size is 16 bytes (header is 8)
-    -- But we construct raw buffer:
-    -- Header: Tag(4), DataLen(2), Reserved(2)
-    -- MountPoint: SubstOff(2), SubstLen(2), PrintOff(2), PrintLen(2)
-    local total = 16 + sub_len + print_len + 4 -- +4 for safety/nulls
+    local total = 16 + sub_len + print_len + 4 
     local buf = ffi.new("uint8_t[?]", total)
     local view = ffi.cast("uint32_t*", buf)
     
     view[0] = 0xA0000003 -- IO_REPARSE_TAG_MOUNT_POINT
     local u16 = ffi.cast("uint16_t*", buf)
-    u16[2] = sub_len + print_len + 12 -- ReparseDataLength
-    u16[3] = 0 -- Reserved
+    u16[2] = sub_len + print_len + 12 
+    u16[3] = 0 
     
-    -- Mount Point Struct starts at offset 8
-    u16[4] = 0 -- SubstNameOffset
-    u16[5] = sub_len -- SubstNameLength
-    u16[6] = sub_len + 2 -- PrintNameOffset
-    u16[7] = print_len -- PrintNameLength
+    u16[4] = 0 
+    u16[5] = sub_len 
+    u16[6] = sub_len + 2 
+    u16[7] = print_len 
     
     ffi.copy(buf + 16, wsub, sub_len)
     ffi.copy(buf + 16 + sub_len + 2, wprint, print_len)
@@ -48,17 +42,15 @@ end
 
 function M.mklink(link, target, type)
     if type == "junction" then
-        if kernel32.CreateDirectoryW(util.to_wide(link), nil) == 0 then return false, util.last_error() end
-        local h = native.open_file(link, "w", true) -- Need Write + BackupSemantics + OpenReparse
-        -- native.open_file opens with FILE_FLAG_OPEN_REPARSE_POINT if we add logic? 
-        -- No, standard open_file logic doesn't add OPEN_REPARSE_POINT.
-        -- We must open manually.
-        if h then h:close() end
+        if kernel32.CreateDirectoryW(util.to_wide(link), nil) == 0 then 
+            return false, util.last_error("CreateDirectory failed") 
+        end
         
-        local hDir = kernel32.CreateFileW(util.to_wide(link), 0x40000000, 0, nil, 3, 0x02200000, nil) -- GENERIC_WRITE, OPEN_EXISTING, BACKUP|REPARSE
+        -- GENERIC_WRITE, OPEN_EXISTING, BACKUP|REPARSE
+        local hDir = kernel32.CreateFileW(util.to_wide(link), 0x40000000, 0, nil, 3, 0x02200000, nil) 
         if hDir == ffi.cast("HANDLE", -1) then 
             kernel32.RemoveDirectoryW(util.to_wide(link))
-            return false, util.last_error() 
+            return false, util.last_error("CreateFile failed") 
         end
         
         local buf, sz = create_reparse_buf(target)
@@ -68,14 +60,22 @@ function M.mklink(link, target, type)
         
         if res == 0 then 
             kernel32.RemoveDirectoryW(util.to_wide(link))
-            return false, util.last_error() 
+            return false, util.last_error("DeviceIoControl failed") 
         end
         return true
     end
 
     local wl, wt = util.to_wide(link), util.to_wide(target)
-    if type == "hard" then return kernel32.CreateHardLinkW(wl, wt, nil) ~= 0 end
-    return kernel32.CreateSymbolicLinkW(wl, wt, type == "dir" and 1 or 0) ~= 0
+    if type == "hard" then 
+        if kernel32.CreateHardLinkW(wl, wt, nil) == 0 then
+            return false, util.last_error("CreateHardLink failed")
+        end
+    else
+        if kernel32.CreateSymbolicLinkW(wl, wt, type == "dir" and 1 or 0) == 0 then
+            return false, util.last_error("CreateSymbolicLink failed")
+        end
+    end
+    return true
 end
 
 function M.read_link(path)
@@ -92,14 +92,18 @@ function M.read_link(path)
         local mp = ffi.cast("MOUNT_POINT_REPARSE_BUFFER*", buf)
         return util.from_wide(mp.PathBuffer + mp.SubstituteNameOffset/2, mp.SubstituteNameLength/2), "Junction"
     end
-    return nil, "Unknown"
+    return nil, "Unknown Tag"
 end
 
 function M.unlink(path)
     local a = kernel32.GetFileAttributesW(util.to_wide(path))
     if a == 0xFFFFFFFF or bit.band(a, 0x400) == 0 then return false, "Not a link" end
-    if bit.band(a, 0x10) ~= 0 then return kernel32.RemoveDirectoryW(util.to_wide(path)) ~= 0
-    else return kernel32.DeleteFileW(util.to_wide(path)) ~= 0 end
+    if bit.band(a, 0x10) ~= 0 then 
+        if kernel32.RemoveDirectoryW(util.to_wide(path)) == 0 then return false, util.last_error() end
+    else 
+        if kernel32.DeleteFileW(util.to_wide(path)) == 0 then return false, util.last_error() end
+    end
+    return true
 end
 
 function M.list_streams(path)
@@ -116,19 +120,19 @@ end
 
 function M.set_compression(path, enable)
     local h = native.open_file(path, "rw")
-    if not h then return false end
+    if not h then return false, "Open failed" end
     local st = ffi.new("uint16_t[1]", enable and 1 or 0)
-    local r = util.ioctl(h:get(), 0x9C040, st, 2) -- FSCTL_SET_COMPRESSION
+    local r, err = util.ioctl(h:get(), 0x9C040, st, 2) -- FSCTL_SET_COMPRESSION
     h:close()
-    return r ~= nil
+    return r ~= nil, err
 end
 
 function M.set_sparse(path, enable)
     local h = native.open_file(path, "rw")
-    if not h then return false end
-    local r = util.ioctl(h:get(), 0x900C4) -- FSCTL_SET_SPARSE
+    if not h then return false, "Open failed" end
+    local r, err = util.ioctl(h:get(), 0x900C4) -- FSCTL_SET_SPARSE
     h:close()
-    return r ~= nil
+    return r ~= nil, err
 end
 
 return M

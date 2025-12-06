@@ -11,26 +11,31 @@ local M = {}
 local function get_raw(d)
     local sz = ffi.sizeof("DRIVE_LAYOUT_INFORMATION_EX_FULL")
     local buf = ffi.new("uint8_t[?]", sz)
-    if not d:ioctl(defs.IOCTL.GET_LAYOUT, nil, 0, buf, sz) then return nil end
+    local ok, err = d:ioctl(defs.IOCTL.GET_LAYOUT, nil, 0, buf, sz)
+    if not ok then return nil, err end
     return ffi.cast("DRIVE_LAYOUT_INFORMATION_EX_FULL*", buf), sz
 end
 
 local function set_raw(d, l, sz)
-    if not d:ioctl(defs.IOCTL.SET_LAYOUT, l, sz) then return false end
+    local ok, err = d:ioctl(defs.IOCTL.SET_LAYOUT, l, sz)
+    if not ok then return false, err end
     d:ioctl(defs.IOCTL.UPDATE)
     return true
 end
 
 function M.get(d)
-    local raw = get_raw(d)
-    if not raw then return nil end
+    local raw, err = get_raw(d)
+    if not raw then return nil, err end
+    
     local res = { style = (raw.PartitionStyle==1) and "GPT" or "MBR", parts={} }
     for i=0, raw.PartitionCount-1 do
         local p = raw.PartitionEntry[i]
         local valid = (res.style=="GPT") and (p.PartitionLength.QuadPart > 0) or (p.Mbr.PartitionType ~= 0)
         if valid then
             table.insert(res.parts, {
-                num = p.PartitionNumber, off = tonumber(p.StartingOffset.QuadPart), len = tonumber(p.PartitionLength.QuadPart),
+                num = p.PartitionNumber, 
+                off = tonumber(p.StartingOffset.QuadPart), 
+                len = tonumber(p.PartitionLength.QuadPart),
                 type = (res.style=="GPT") and util.guid_to_str(p.Gpt.PartitionType) or p.Mbr.PartitionType,
                 attr = (res.style=="GPT") and p.Gpt.Attributes or 0
             })
@@ -44,7 +49,6 @@ function M.apply(d, scheme, parts)
     local l = ffi.new("DRIVE_LAYOUT_INFORMATION_EX_FULL")
     local cr = ffi.new("CREATE_DISK")
     
-    -- 1. Initialize Disk (Clean MBR/GPT structures)
     cr.PartitionStyle = (scheme=="GPT") and 1 or 0
     if scheme=="GPT" then 
         ole32.CoCreateGuid(cr.Gpt.DiskId)
@@ -53,10 +57,10 @@ function M.apply(d, scheme, parts)
         cr.Mbr.Signature = os.time() 
     end
     
-    d:ioctl(defs.IOCTL.CREATE, cr)
+    local ok, err = d:ioctl(defs.IOCTL.CREATE, cr)
+    if not ok then return false, "CreateDisk failed: " .. tostring(err) end
     d:ioctl(defs.IOCTL.UPDATE)
     
-    -- 2. Build Layout
     l.PartitionStyle = cr.PartitionStyle
     l.PartitionCount = #parts
     if scheme=="GPT" then
@@ -86,15 +90,11 @@ function M.apply(d, scheme, parts)
         end
     end
     
-    -- 3. Apply Layout
-    if not set_raw(d, l, sz) then return false end
+    if not set_raw(d, l, sz) then return false, util.last_error("SetLayout failed") end
     
-    -- 4. [RESTORED] Wipe Partition Starts (Robustness against Ghost Volumes)
-    -- Wipes the first sector of each new partition to ensure Windows doesn't see old filesystems.
     local wipe_buf = kernel32.VirtualAlloc(nil, d.sector_size, 0x1000, 0x04)
     if wipe_buf then
         for _, p in ipairs(parts) do
-            -- Ignore errors here, strictly best-effort
             d:write_sectors(p.offset, ffi.string(wipe_buf, d.sector_size))
         end
         kernel32.VirtualFree(wipe_buf, 0, 0x8000)
@@ -134,7 +134,9 @@ end
 
 function M.set_active(d, idx, act)
     local l, sz = get_raw(d)
-    if not l or l.PartitionStyle ~= 0 then return false end
+    if not l then return false, "GetLayout failed" end
+    if l.PartitionStyle ~= 0 then return false, "Not MBR" end
+    
     for i=0, l.PartitionCount-1 do
         local p = l.PartitionEntry[i]
         if p.Mbr.PartitionType ~= 0 then
@@ -147,17 +149,23 @@ end
 
 function M.set_partition_attributes(d, idx, attr)
     local l, sz = get_raw(d)
-    if not l or l.PartitionStyle ~= 1 then return false end
+    if not l then return false, "GetLayout failed" end
+    if l.PartitionStyle ~= 1 then return false, "Not GPT" end
+    
     for i=0, l.PartitionCount-1 do
         local p = l.PartitionEntry[i]
-        if p.PartitionNumber == idx then p.Gpt.Attributes = attr; p.RewritePartition = 1 end
+        if p.PartitionNumber == idx then 
+            p.Gpt.Attributes = attr
+            p.RewritePartition = 1 
+        end
     end
     return set_raw(d, l, sz)
 end
 
 function M.set_partition_type(d, idx, tid)
     local l, sz = get_raw(d)
-    if not l then return false end
+    if not l then return false, "GetLayout failed" end
+    
     for i=0, l.PartitionCount-1 do
         local p = l.PartitionEntry[i]
         if p.PartitionNumber == idx then

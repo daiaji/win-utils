@@ -1,6 +1,6 @@
 local ffi = require 'ffi'
-local bit = require 'bit' -- LuaJIT Built-in
-local filesystem = require 'ffi.req' 'Windows.sdk.filesystem' -- 引入绑定
+local bit = require 'bit' 
+local filesystem = require 'ffi.req' 'Windows.sdk.filesystem'
 local physical = require 'win-utils.disk.physical'
 local layout = require 'win-utils.disk.layout'
 
@@ -9,13 +9,22 @@ local M = {}
 local function pad(s, l) return s..string.rep(" ", l-#s) end
 
 function M.format_raw(drive_idx, offset, label)
-    local phys = physical.open(drive_idx, "rw", true)
-    if not phys then return false, "Open failed" end
-    if not phys:lock(true) then phys:close(); return false, "Lock failed" end
+    local phys, err = physical.open(drive_idx, "rw", true)
+    if not phys then return false, "Open failed: " .. tostring(err) end
     
-    local info = layout.get(phys)
+    local locked, lock_err = phys:lock(true)
+    if not locked then 
+        phys:close()
+        return false, "Lock failed: " .. tostring(lock_err) 
+    end
+    
+    local info, layout_err = layout.get(phys)
+    if not info then
+        phys:close()
+        return false, "GetLayout failed: " .. tostring(layout_err)
+    end
+    
     local size = 0
-    -- 使用 lua-ext 风格的迭代（这里保持简单 loop 兼容性）
     for _, p in ipairs(info.parts) do if p.off == offset then size = p.len break end end
     if size == 0 then phys:close(); return false, "Partition not found" end
     
@@ -28,7 +37,6 @@ function M.format_raw(drive_idx, offset, label)
     local fat_ent = math.floor((total_sec - res_sec)/spc)
     local fat_sz = math.ceil((fat_ent * 4) / bps)
     
-    -- 使用绑定层定义的结构体
     local bs = ffi.new("FAT32_BOOT_SECTOR")
     bs.JumpBoot[0]=0xEB; bs.JumpBoot[1]=0x58; bs.JumpBoot[2]=0x90
     ffi.copy(bs.OEMName, "MSWIN4.1", 8)
@@ -57,13 +65,11 @@ function M.format_raw(drive_idx, offset, label)
     local fat_sig = ffi.new("uint32_t[3]", {0x0FFFFFF8, 0x0FFFFFFF, 0x0FFFFFFF})
     local sig_data = ffi.string(fat_sig, 12) .. string.rep("\0", bps-12)
     
-    -- 写 FAT 表
     for i=0, fats-1 do
         local fat_off = offset + (res_sec + i*fat_sz) * bps
         phys:write_sectors(fat_off, sig_data)
     end
     
-    -- 清空根目录
     local root_off = offset + (res_sec + fats*fat_sz) * bps
     phys:write_sectors(root_off, string.rep("\0", spc*bps))
     

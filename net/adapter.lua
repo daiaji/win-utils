@@ -5,7 +5,6 @@ local M = {}
 
 local function sock_to_ip(ptr)
     if ptr == nil then return nil end
-    -- AF_INET = 2
     local family = ffi.cast("short*", ptr)[0]
     if family == 2 then 
         local sin = ffi.cast("uint8_t*", ptr)
@@ -15,8 +14,7 @@ local function sock_to_ip(ptr)
 end
 
 function M.list()
-    -- FLAGS: INCLUDE_PREFIX (0x10) | INCLUDE_GATEWAYS (0x80)
-    local flags = 0x90 
+    local flags = 0x90 -- INCLUDE_PREFIX | INCLUDE_GATEWAYS
     local sz = ffi.new("ULONG[1]", 15000)
     local buf = ffi.new("uint8_t[?]", sz[0])
     
@@ -26,7 +24,7 @@ function M.list()
         res = iphlp.GetAdaptersAddresses(2, flags, nil, ffi.cast("void*", buf), sz)
     end
     
-    if res ~= 0 then return {} end
+    if res ~= 0 then return nil, util.last_error("GetAdaptersAddresses") end
     
     local curr = ffi.cast("IP_ADAPTER_ADDRESSES*", buf)
     local list = {}
@@ -40,7 +38,6 @@ function M.list()
             gateways = {}
         }
         
-        -- Unicast Addresses
         local ua = curr.FirstUnicastAddress
         while ua ~= nil do
             local ip = sock_to_ip(ua.Address.lpSockaddr)
@@ -48,7 +45,6 @@ function M.list()
             ua = ua.Next
         end
         
-        -- Gateways
         local ga = curr.FirstGatewayAddress
         while ga ~= nil do
             local ip = sock_to_ip(ga.Address.lpSockaddr)

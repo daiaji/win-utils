@@ -5,14 +5,14 @@ local kernel32 = require 'ffi.req' 'Windows.sdk.kernel32'
 local cfgmgr32 = require 'ffi.req' 'Windows.sdk.cfgmgr32'
 local util = require 'win-utils.core.util'
 local defs = require 'win-utils.disk.defs'
+local C = ffi.C
 
 local M = {}
-local C = ffi.C
 local GUID_DISK = ffi.new("GUID", {0x53f56307, 0xb6bf, 0x11d0, {0x94, 0xf2, 0x00, 0xa0, 0xc9, 0x1e, 0xfb, 0x8b}})
 local GUID_USB_HUB = ffi.new("GUID", {0xf18a0e88, 0xc30c, 0x11d0, {0x88, 0x15, 0x00, 0xa0, 0xc9, 0x06, 0xbe, 0xd8}})
 
 local function get_disk_devinst(drive_index)
-    local flags = bit.bor(0x02, 0x10) -- DIGCF_PRESENT | DIGCF_DEVICEINTERFACE
+    local flags = bit.bor(0x02, 0x10) 
     local hInfo = setupapi.SetupDiGetClassDevsW(GUID_DISK, nil, nil, flags)
     if hInfo == ffi.cast("HANDLE", -1) then return nil end
     
@@ -53,7 +53,6 @@ local function get_disk_devinst(drive_index)
     return result
 end
 
--- [API] 重置端口 (Hard Reset, cycle_port)
 function M.reset_port(physical_drive_index)
     local dev_inst = get_disk_devinst(physical_drive_index)
     if not dev_inst then return false, "Device not found" end
@@ -110,20 +109,21 @@ function M.reset_port(physical_drive_index)
     if not hub_path then return false, "Hub path not found" end
     
     local hHub = kernel32.CreateFileW(util.to_wide(hub_path), C.GENERIC_WRITE, C.FILE_SHARE_WRITE, nil, C.OPEN_EXISTING, 0, nil)
-    if hHub == ffi.cast("HANDLE", -1) then return false, "Open Hub failed" end
+    if hHub == ffi.cast("HANDLE", -1) then return false, util.last_error("Open Hub failed") end
     
     local params = ffi.new("USB_CYCLE_PORT_PARAMS")
     params.ConnectionIndex = port
-    local res = util.ioctl(hHub, defs.IOCTL.USB_HUB_CYCLE_PORT, params, ffi.sizeof(params), params, ffi.sizeof(params))
+    local res, err = util.ioctl(hHub, defs.IOCTL.USB_HUB_CYCLE_PORT, params, ffi.sizeof(params), params, ffi.sizeof(params))
     kernel32.CloseHandle(hHub)
-    return res ~= nil
+    
+    if not res then return false, err end
+    return true
 end
 
--- [API] 重置驱动 (Soft Reset, cycle_disk)
 function M.reset_driver_state(physical_drive_index)
     local flags = bit.bor(0x02, 0x10) 
     local hInfo = setupapi.SetupDiGetClassDevsW(GUID_DISK, nil, nil, flags)
-    if hInfo == ffi.cast("HANDLE", -1) then return false end
+    if hInfo == ffi.cast("HANDLE", -1) then return false, "SetupDiGetClassDevs failed" end
     
     local devData = ffi.new("SP_DEVINFO_DATA"); devData.cbSize = ffi.sizeof(devData)
     local ifaceData = ffi.new("SP_DEVICE_INTERFACE_DATA"); ifaceData.cbSize = ffi.sizeof(ifaceData)
@@ -168,23 +168,22 @@ function M.reset_driver_state(physical_drive_index)
     params.ClassInstallHeader.InstallFunction = 0x12 -- DIF_PROPERTYCHANGE
     params.Scope = 0x2 -- DICS_FLAG_CONFIGSPECIFIC
     
-    -- Disable
     params.StateChange = 0x2 -- DICS_DISABLE
     setupapi.SetupDiSetClassInstallParamsW(hInfo, target_dev, ffi.cast("PSP_CLASSINSTALL_HEADER", params), ffi.sizeof(params))
     setupapi.SetupDiChangeState(hInfo, target_dev)
     
     kernel32.Sleep(250)
     
-    -- Enable
     params.StateChange = 0x1 -- DICS_ENABLE
     setupapi.SetupDiSetClassInstallParamsW(hInfo, target_dev, ffi.cast("PSP_CLASSINSTALL_HEADER", params), ffi.sizeof(params))
     local res = setupapi.SetupDiChangeState(hInfo, target_dev)
     
     setupapi.SetupDiDestroyDeviceInfoList(hInfo)
-    return res ~= 0
+    
+    if res == 0 then return false, util.last_error("ChangeState failed") end
+    return true
 end
 
--- [API] 智能复位 (Revive)
 function M.reset(physical_drive_index, wait_ms)
     local ok_port, err_port = M.reset_port(physical_drive_index)
     if ok_port then 

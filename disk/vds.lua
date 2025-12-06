@@ -15,13 +15,17 @@ local VdsContext = class()
 function VdsContext:init()
     ole32.CoInitializeEx(nil, 0)
     local ld = ffi.new("void*[1]")
-    if ole32.CoCreateInstance(vds_sdk.CLSID_VdsLoader, nil, 0x17, vds_sdk.IID_IVdsServiceLoader, ld) >= 0 then
+    local hr = ole32.CoCreateInstance(vds_sdk.CLSID_VdsLoader, nil, 0x17, vds_sdk.IID_IVdsServiceLoader, ld)
+    
+    if hr >= 0 then
         self.loader = ffi.cast("IVdsServiceLoader*", ld[0])
         local svc = ffi.new("IVdsService*[1]")
         if self.loader.lpVtbl.LoadService(self.loader, nil, svc) >= 0 then
             self.service = svc[0]
             self.service.lpVtbl.WaitForServiceReady(self.service)
         end
+    else
+        self.err = string.format("CoCreateInstance failed: 0x%X", hr)
     end
 end
 
@@ -41,7 +45,6 @@ function VdsContext:get_disk(idx)
     local unk = ffi.new("IUnknown*[1]")
     local n = ffi.new("ULONG[1]")
     
-    -- VDS Enumeration Hell (Full Logic Restored)
     while not found and enum[0].lpVtbl.Next(enum[0], 1, unk, n) == 0 and n[0] > 0 do
         local prov = ffi.new("IVdsProvider*[1]")
         if unk[0].lpVtbl.QueryInterface(unk[0], vds_sdk.IID_IVdsProvider, ffi.cast("void**", prov)) == 0 then
@@ -88,11 +91,19 @@ function VdsContext:get_disk(idx)
 end
 
 local function vds_op(idx, cb)
-    local ctx = VdsContext(); if not ctx.service then return false, "Init failed" end
+    local ctx = VdsContext()
+    if not ctx.service then 
+        local err = ctx.err or "Service load failed"
+        ctx:close()
+        return false, err 
+    end
+    
     local disk = ctx:get_disk(idx)
     if not disk then ctx:close(); return false, "Disk not found" end
+    
     local adv = ffi.new("IVdsAdvancedDisk*[1]")
-    local ok, msg = false, "IVdsAdvancedDisk not supported"
+    local ok, msg = false, "IVdsAdvancedDisk interface not found"
+    
     if disk.lpVtbl.QueryInterface(disk, vds_sdk.IID_IVdsAdvancedDisk, ffi.cast("void**", adv)) == 0 then
         ok, msg = cb(adv[0])
         release(adv[0])
@@ -116,11 +127,11 @@ function M.create_partition(idx, offset, size, params)
     return vds_op(idx, function(adv)
         local p = ffi.new("CREATE_PARTITION_PARAMETERS")
         if params.style == "MBR" then
-            p.style = 1 -- MBR
+            p.style = 1 
             p.Info.Mbr.PartitionType = params.type or 0x07
             p.Info.Mbr.BootIndicator = params.active and 1 or 0
         else
-            p.style = 2 -- GPT
+            p.style = 2 
             p.Info.Gpt.PartitionType = util.guid_from_str(params.type or "{EBD0A0A2-B9E5-4433-87C0-68B6B72699C7}")
             if params.id then p.Info.Gpt.PartitionId = util.guid_from_str(params.id) end
             p.Info.Gpt.Attributes = params.attributes or 0
@@ -131,7 +142,7 @@ function M.create_partition(idx, offset, size, params)
         end
         
         local async = ffi.new("IVdsAsync*[1]")
-        if adv.lpVtbl.CreatePartition(adv, offset, size, p, async) ~= 0 then return false, "Create call failed" end
+        if adv.lpVtbl.CreatePartition(adv, offset, size, p, async) ~= 0 then return false, "CreatePartition call failed" end
         local hr, out = ffi.new("HRESULT[1]"), ffi.new("VDS_ASYNC_OUTPUT")
         async[0].lpVtbl.Wait(async[0], hr, out)
         release(async[0])
@@ -141,15 +152,21 @@ end
 
 function M.format(idx, offset, fs, label, quick, cluster, rev)
     local guid = volume_lib.find_guid_by_partition(idx, offset)
-    if not guid then return false, "Volume not found" end
+    if not guid then return false, "Volume GUID not found for partition" end
     local wguid = util.to_wide(guid:sub(-1)=="\\" and guid or guid.."\\")
     
-    local ctx = VdsContext(); if not ctx.service then return false end
+    local ctx = VdsContext()
+    if not ctx.service then 
+        local err = ctx.err or "Init failed"
+        ctx:close()
+        return false, err 
+    end
+    
     local disk = ctx:get_disk(idx)
-    if not disk then ctx:close(); return false end
+    if not disk then ctx:close(); return false, "Disk object not found" end
     
     local pack = ffi.new("IVdsPack*[1]")
-    local ok, msg = false, "Vol not found"
+    local ok, msg = false, "Volume not found in VDS"
     
     if disk.lpVtbl.GetPack(disk, pack) == 0 then
         local enum = ffi.new("IEnumVdsObject*[1]")
@@ -170,6 +187,8 @@ function M.format(idx, offset, fs, label, quick, cluster, rev)
                                         async[0].lpVtbl.Wait(async[0], hr, out)
                                         release(async[0])
                                         ok = (hr[0] >= 0); msg = ok and "Success" or string.format("0x%X", hr[0])
+                                    else
+                                        msg = "FormatEx2 call failed"
                                     end
                                 end
                                 ole32.CoTaskMemFree(paths[0][i])

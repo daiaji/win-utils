@@ -7,10 +7,12 @@ local M = {}
 
 function M.list(pid)
     local h = kernel32.OpenProcess(0x410, false, pid)
-    if not h then return {} end
+    if not h then return nil, util.last_error() end
+    
     local mods = ffi.new("HMODULE[1024]")
     local cb = ffi.new("DWORD[1]")
     local res = {}
+    
     if psapi.EnumProcessModulesEx(h, mods, ffi.sizeof(mods), cb, 3) ~= 0 then
         local count = cb[0] / ffi.sizeof("HMODULE")
         local buf = ffi.new("wchar_t[1024]")
@@ -19,7 +21,11 @@ function M.list(pid)
                 table.insert(res, util.from_wide(buf))
             end
         end
+    else
+        kernel32.CloseHandle(h)
+        return nil, util.last_error("EnumProcessModulesEx failed")
     end
+    
     kernel32.CloseHandle(h)
     return res
 end

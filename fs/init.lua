@@ -41,28 +41,22 @@ local function scandir_native(path)
     local buf_size = 4096
     local buf = ffi.new("uint8_t[?]", buf_size)
     local io = ffi.new("IO_STATUS_BLOCK")
-    
     local first_call = true
     local current_ptr = nil
     local done = false
     
     return function()
         if done then return nil end
-        
         while true do
             if current_ptr then
                 local info = ffi.cast("FILE_DIRECTORY_INFORMATION*", current_ptr)
                 local name = util.from_wide(info.FileName, info.FileNameLength / 2)
                 local attr = info.FileAttributes
                 local size = info.EndOfFile.QuadPart
-                
                 local next_off = info.NextEntryOffset
                 if next_off == 0 then current_ptr = nil
                 else current_ptr = current_ptr + next_off end
-                
-                if name ~= "." and name ~= ".." then 
-                    return name, attr, tonumber(size)
-                end
+                if name ~= "." and name ~= ".." then return name, attr, tonumber(size) end
             else
                 local status = ntdll.NtQueryDirectoryFile(h:get(), nil, nil, nil, io, buf, buf_size, 1, false, nil, first_call)
                 first_call = false
@@ -76,7 +70,6 @@ end
 local function is_link_attr(attr) return bit.band(attr, FILE_ATTRIBUTE_REPARSE_POINT) ~= 0 end
 local function is_dir_attr(attr) return bit.band(attr, FILE_ATTRIBUTE_DIRECTORY) ~= 0 end
 
--- [API] 创建目录 (递归)
 function M.mkdir(path, opts)
     opts = opts or {}
     local make_parents = opts.parents or opts.p
@@ -93,14 +86,12 @@ function M.mkdir(path, opts)
     local parts = util.split_path(path)
     local current = ""
     local start_idx = 1
-    
     if path:match("^%a:\\") then current = parts[1] .. "\\"; start_idx = 2
     elseif path:match("^\\\\") then current = "\\\\" .. parts[1] .. "\\" .. parts[2] .. "\\"; start_idx = 3
     elseif path:match("^\\") then current = "\\" end
 
     for i = start_idx, #parts do
         current = current .. parts[i]
-        -- [FIX] 必须使用 M.is_dir 而非内部 helper，确保 INVALID_FILE_ATTRIBUTES 检查生效
         if not M.is_dir(current) then
             if kernel32.CreateDirectoryW(util.to_wide(current), nil) == 0 then
                 if kernel32.GetLastError() ~= 183 then 
@@ -113,12 +104,11 @@ function M.mkdir(path, opts)
     return true
 end
 
--- [Internal] 递归拷贝
 local function cp_r(src, dst, opts)
     opts = opts or {}
     local raw = get_raw()
     local src_info, err = raw.get_file_info(src)
-    if not src_info then return false, "Source inaccessible" end
+    if not src_info then return false, "Source inaccessible: " .. tostring(err) end
     local attr = src_info.attr
     
     if is_link_attr(attr) then
@@ -133,9 +123,7 @@ local function cp_r(src, dst, opts)
     if is_dir_attr(attr) then
         local src_norm = util.normalize_path(src):lower()
         local dst_norm = util.normalize_path(dst):lower()
-        if dst_norm:find(src_norm, 1, true) == 1 then
-            return false, "Recursion detected"
-        end
+        if dst_norm:find(src_norm, 1, true) == 1 then return false, "Recursion detected" end
         
         if kernel32.CreateDirectoryW(util.to_wide(dst), nil) == 0 and kernel32.GetLastError() ~= 183 then
             return false, util.last_error()
@@ -158,10 +146,8 @@ local function cp_r(src, dst, opts)
     return true
 end
 
--- [API] 拷贝文件/目录
 function M.copy(src, dst, opts) return cp_r(src, dst, opts or {}) end
 
--- [Internal] 递归删除
 local function rm_rf(path)
     local raw = get_raw()
     local attr = kernel32.GetFileAttributesW(util.to_wide(path))
@@ -189,10 +175,8 @@ local function rm_rf(path)
     return true
 end
 
--- [API] 删除文件/目录
 function M.delete(path) return rm_rf(path) end
 
--- [API] 移动文件
 function M.move(src, dst, opts)
     opts = opts or {}
     local flags = 10 -- COPY_ALLOWED | WRITE_THROUGH
@@ -201,15 +185,12 @@ function M.move(src, dst, opts)
     if kernel32.MoveFileExW(util.to_wide(src), util.to_wide(dst), flags) ~= 0 then return true end
     
     if kernel32.GetLastError() == 17 then -- ERROR_NOT_SAME_DEVICE
-        if M.copy(src, dst, opts) then
-            return M.delete(src)
-        end
+        if M.copy(src, dst, opts) then return M.delete(src) end
         return false, "Copy failed during cross-drive move"
     end
     return false, util.last_error()
 end
 
--- [API] 获取磁盘空间信息 (原 df)
 function M.get_space_info(path)
     local wpath = util.to_wide(path or ".")
     local free_user = ffi.new("ULARGE_INTEGER")
@@ -231,7 +212,6 @@ function M.get_space_info(path)
     }
 end
 
--- [API] 获取目录大小/使用量 (原 du)
 function M.get_usage_info(path, opts)
     opts = opts or {}
     local raw = get_raw()
@@ -267,7 +247,6 @@ function M.get_usage_info(path, opts)
     return stats
 end
 
--- [API] 查找文件 (Iterator)
 function M.find(path, opts)
     opts = opts or {}
     path = util.normalize_path(path)
@@ -278,22 +257,18 @@ function M.find(path, opts)
         while head <= tail do
             local curr = q[head]
             head = head + 1
-            
             local attr = kernel32.GetFileAttributesW(util.to_wide(curr))
             if attr ~= INVALID_FILE_ATTRIBUTES then
                 local is_d = is_dir_attr(attr)
-                
                 if is_d and opts.recursive ~= false and not is_link_attr(attr) then
                     for name in scandir_native(curr) do
                         tail = tail + 1
                         q[tail] = curr .. "\\" .. name
                     end
                 end
-                
                 local match = true
                 if opts.type == "f" and is_d then match = false end
                 if opts.type == "d" and not is_d then match = false end
-                
                 if match then return curr, attr end
             end
         end
@@ -301,7 +276,6 @@ function M.find(path, opts)
     end
 end
 
--- [API] 安全擦除文件 (原 shred)
 function M.wipe(path, opts)
     opts = opts or {}
     local passes = opts.passes or 3
@@ -334,22 +308,15 @@ function M.wipe(path, opts)
     return M.delete(path)
 end
 
--- [API] 创建链接
 function M.link(target, linkname, opts)
     opts = opts or {}
     local ntfs = get_ntfs()
-    
     local type = "file"
     if M.is_dir(target) then type = "dir" end
-    
-    if opts.symbolic then
-        return ntfs.mklink(linkname, target, type)
-    else
-        return ntfs.mklink(linkname, target, "hard")
-    end
+    if opts.symbolic then return ntfs.mklink(linkname, target, type)
+    else return ntfs.mklink(linkname, target, "hard") end
 end
 
--- [API] 更新时间戳 (原 touch)
 function M.update_timestamps(path)
     local h = kernel32.CreateFileW(util.to_wide(path), bit.bor(0x80000000, 0x40000000), 0, nil, 4, 0x80, nil)
     if h == ffi.cast("HANDLE", -1) then return false, util.last_error() end
@@ -360,22 +327,15 @@ function M.update_timestamps(path)
     return true
 end
 
--- [API] 基础查询
 function M.exists(path) return kernel32.GetFileAttributesW(util.to_wide(path)) ~= INVALID_FILE_ATTRIBUTES end
-
--- [FIX] 正确处理 INVALID_FILE_ATTRIBUTES (0xFFFFFFFF)
--- 在 Lua 中，DWORD 是 uint32，0xFFFFFFFF 不等于 -1。
--- 如果文件不存在，GetFileAttributes 返回 0xFFFFFFFF，如果直接位运算可能会误判。
 function M.is_dir(path) 
     local a = kernel32.GetFileAttributesW(util.to_wide(path))
     return a ~= INVALID_FILE_ATTRIBUTES and is_dir_attr(a) 
 end
-
 function M.is_link(path) 
     local a = kernel32.GetFileAttributesW(util.to_wide(path))
     return a ~= INVALID_FILE_ATTRIBUTES and is_link_attr(a) 
 end
-
 function M.scandir(path) return scandir_native(path) end
 function M.stat(path)
     local raw = get_raw()

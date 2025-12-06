@@ -10,7 +10,7 @@ local M = {}
 
 function M.open_internal(path, access, share, creation, flags)
     local wpath = util.to_wide(path)
-    if not wpath then return nil, "Invalid path" end
+    if not wpath then return nil, "Invalid path encoding" end
     
     local h = kernel32.CreateFileW(wpath, access, share, nil, creation, flags, nil)
     if h == ffi.cast("HANDLE", -1) then 
@@ -54,7 +54,7 @@ function M.open_device(path, mode, share_mode)
         share = share_mode
     elseif share_mode == "exclusive" then
         share = 0
-    elseif share_mode == true then 
+    elseif share_mode == "read" or share_mode == true then
         share = C.FILE_SHARE_READ 
     else
         share = bit.bor(C.FILE_SHARE_READ, C.FILE_SHARE_WRITE)
@@ -64,17 +64,12 @@ function M.open_device(path, mode, share_mode)
     return M.open_internal(p, access, share, C.OPEN_EXISTING, flags)
 end
 
--- [NEW] 健壮的设备打开逻辑 (Rufus 策略)
--- 包含 150 次重试循环，应对磁盘忙、AV扫描等瞬态锁定
 function M.open_device_robust(path, mode, share_mode)
     local h, err
     -- 150 * 100ms = 15s Timeout
     for i = 1, 150 do
         h, err = M.open_device(path, mode, share_mode)
         if h then return h end
-        
-        -- 仅在特定错误下重试？Rufus 的逻辑是只要失败就重试，因为设备初始化状态复杂
-        -- 我们简单休眠并重试
         kernel32.Sleep(100)
     end
     return nil, "Open timeout after 150 retries: " .. tostring(err)
@@ -113,7 +108,6 @@ function M.dos_path_to_nt_path(dos_path)
     return "\\??\\" .. dos_path
 end
 
--- [Fix] 使用 ffi.cast 规范化 signed 32-bit status 为 unsigned
 local function norm_status(s)
     return tonumber(ffi.cast("uint32_t", s))
 end
@@ -133,18 +127,14 @@ function M.query_variable_size(func, first_arg, info_class, initial_size)
         
         local code = norm_status(status)
         
-        -- STATUS_INFO_LENGTH_MISMATCH (0xC0000004)
-        -- STATUS_BUFFER_OVERFLOW (0x80000005)
-        -- STATUS_BUFFER_TOO_SMALL (0xC0000023)
         if code == 0xC0000004 or code == 0x80000005 or code == 0xC0000023 then
             local req = ret_len[0]
             if req == 0 then req = size * 2 end
-            -- [FIX] Add padding to reduce retry loop race conditions
-            size = req + 16 * 1024 
+            size = req + 16 * 1024 -- Padding
             if size > 64*1024*1024 then return nil, "Buffer overflow protection" end
             buf = ffi.new("uint8_t[?]", size)
         elseif status < 0 then 
-            return nil, status 
+            return nil, string.format("NTSTATUS: 0x%08X", code)
         else 
             return buf, size, ret_len[0] 
         end
@@ -163,12 +153,11 @@ function M.query_system_info(info_class, initial_size)
         if code == 0xC0000004 then 
             local req = ret_len[0]
             if req == 0 then req = size * 2 end
-            -- [FIX] Add padding (64KB) to accommodate new handles created during loop
-            size = req + 64 * 1024 
+            size = req + 64 * 1024 -- Padding
             if size > 64 * 1024 * 1024 then return nil, "Buffer overflow protection" end
             buf = ffi.new("uint8_t[?]", size)
         elseif status < 0 then
-            return nil, status
+            return nil, string.format("NtQuerySystemInformation(0x%X) Failed: 0x%08X", info_class, code)
         else
             return buf, size, ret_len[0]
         end

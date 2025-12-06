@@ -9,12 +9,11 @@ local class = require 'win-utils.deps'.class
 local table_new = require 'table.new'
 local table_ext = require 'ext.table'
 local jit = require 'jit' 
--- [Dependency] Token is needed for privilege escalation logic within kill/open
 local token = require 'win-utils.process.token' 
 
 local M = {}
 
--- Lazy load sub-modules
+-- Lazy load
 local sub_modules = {
     token   = 'win-utils.process.token',
     job     = 'win-utils.process.job',
@@ -45,25 +44,15 @@ M.constants = {
 local INVALID_HANDLE = ffi.cast("HANDLE", -1)
 
 local PRIORITY_MAP = {
-    L = 0x40,   -- IDLE
-    B = 0x4000, -- BELOW_NORMAL
-    N = 0x20,   -- NORMAL
-    A = 0x8000, -- ABOVE_NORMAL
-    H = 0x80,   -- HIGH
-    R = 0x100   -- REALTIME
+    L = 0x40, B = 0x4000, N = 0x20, A = 0x8000, H = 0x80, R = 0x100
 }
 
---------------------------------------------------------------------------------
--- Internal Helpers
---------------------------------------------------------------------------------
-
 local function get_cmd_line(pid)
-    local hProc = kernel32.OpenProcess(0x410, false, pid) -- QUERY_INFO | VM_READ
+    local hProc = kernel32.OpenProcess(0x410, false, pid)
     if not hProc or hProc == INVALID_HANDLE then return "" end
     
     local cmd = ""
     local pbi = ffi.new("PROCESS_BASIC_INFORMATION")
-    -- Check for ProcessParameters (PEB)
     if ntdll.NtQueryInformationProcess(hProc, 0, pbi, ffi.sizeof(pbi), nil) >= 0 and pbi.PebBaseAddress ~= nil then
         local peb = ffi.new("PEB")
         if kernel32.ReadProcessMemory(hProc, pbi.PebBaseAddress, peb, ffi.sizeof(peb), nil) ~= 0 then
@@ -87,7 +76,7 @@ local function get_path(pid, handle)
     local h = handle
     local close_me = false
     if not h then 
-        h = kernel32.OpenProcess(0x1000, false, pid) -- QUERY_LIMITED_INFO
+        h = kernel32.OpenProcess(0x1000, false, pid)
         if not h or h == INVALID_HANDLE then return "" end
         close_me = true
     end
@@ -99,47 +88,41 @@ local function get_path(pid, handle)
     return path
 end
 
---------------------------------------------------------------------------------
--- Class: Process
---------------------------------------------------------------------------------
-
 local Process = class()
 
 function Process:init(pid, h) 
     self.pid = pid
-    self.obj = Handle(h) -- RAII Wrapper
+    self.obj = Handle(h)
 end
 
 function Process:handle() return self.obj:get() end
 function Process:close() self.obj:close() end
 
--- Basic Operations
-function Process:terminate(code) return kernel32.TerminateProcess(self:handle(), code or 0) ~= 0 end
+function Process:terminate(code) 
+    if kernel32.TerminateProcess(self:handle(), code or 0) == 0 then
+        return false, util.last_error("TerminateProcess failed")
+    end
+    return true
+end
+
 function Process:suspend() return ntdll.NtSuspendProcess(self:handle()) >= 0 end
 function Process:resume() return ntdll.NtResumeProcess(self:handle()) >= 0 end
 function Process:wait(ms) return kernel32.WaitForSingleObject(self:handle(), ms or -1) == 0 end
-
--- [FIX] Use user32 lib correctly
 function Process:wait_input(ms) return user32.WaitForInputIdle(self:handle(), ms or -1) == 0 end
 
--- Info Getters
 function Process:get_path() return get_path(self.pid, self:handle()) end
 function Process:get_command_line() return get_cmd_line(self.pid) end
 
 function Process:set_priority(mode)
     local val = PRIORITY_MAP[mode and mode:upper() or "N"]
     if not val then return false, "Invalid priority" end
-    
     local h = self:handle()
     local temp_h = nil
-    
-    -- Try setting with current handle; if failed (likely due to access rights), try opening specific handle
     if not kernel32.SetPriorityClass(h, val) then
         temp_h = kernel32.OpenProcess(M.constants.PROCESS_SET_INFORMATION, false, self.pid)
-        if not temp_h then return false, "Access denied" end
+        if not temp_h then return false, util.last_error("Access denied") end
         h = temp_h
     end
-    
     local res = kernel32.SetPriorityClass(h, val) ~= 0
     if temp_h then kernel32.CloseHandle(temp_h) end
     return res
@@ -148,66 +131,48 @@ end
 function Process:get_info()
     if self.pid == 0 then return nil end
     local info = { pid = self.pid }
-    
-    -- Try existing handle or open new one
     local h = self:handle() 
     local temp_h = nil
     if not h then 
         h = kernel32.OpenProcess(0x410, false, self.pid)
         temp_h = h
     end
-    
     if h and h ~= INVALID_HANDLE then
         local pbi = ffi.new("PROCESS_BASIC_INFORMATION")
         if ntdll.NtQueryInformationProcess(h, 0, pbi, ffi.sizeof(pbi), nil) >= 0 then
             info.parent_pid = tonumber(pbi.InheritedFromUniqueProcessId)
         end
-        
         local pmc = ffi.new("PROCESS_MEMORY_COUNTERS_EX"); pmc.cb = ffi.sizeof(pmc)
         if psapi.GetProcessMemoryInfo(h, pmc, ffi.sizeof(pmc)) ~= 0 then
             info.memory_usage_bytes = tonumber(pmc.WorkingSetSize)
         end
-        
         local sess = ffi.new("DWORD[1]")
         if kernel32.ProcessIdToSessionId(self.pid, sess) ~= 0 then info.session_id = sess[0] end
-        
         info.exe_path = get_path(self.pid, h)
-        
         if temp_h then kernel32.CloseHandle(temp_h) end
     end
     info.command_line = get_cmd_line(self.pid)
     return info
 end
 
--- [NEW] OOP Interface for Unified Kill
-function Process:kill(mode)
-    return M.kill(self.pid, mode)
-end
-
---------------------------------------------------------------------------------
--- Static Functions
---------------------------------------------------------------------------------
+function Process:kill(mode) return M.kill(self.pid, mode) end
 
 function M.exec(cmd, workdir, show)
     local si = ffi.new("STARTUPINFOW"); si.cb = ffi.sizeof(si); si.dwFlags = 1; si.wShowWindow = show or 1
     local pi = ffi.new("PROCESS_INFORMATION")
-    
     if kernel32.CreateProcessW(nil, util.to_wide(cmd), nil, nil, false, 0, nil, util.to_wide(workdir), si, pi) == 0 then 
-        return nil 
+        return nil, util.last_error()
     end
-    
     kernel32.CloseHandle(pi.hThread)
     return Process(tonumber(pi.dwProcessId), pi.hProcess)
 end
 
--- [ROBUST] Open with Auto-Elevation Fallback
 function M.open(pid, access)
     access = access or 0x1F0FFF -- PROCESS_ALL_ACCESS
     local h = kernel32.OpenProcess(access, false, pid)
     
     if not h then
         local err = kernel32.GetLastError()
-        -- 5 = ERROR_ACCESS_DENIED
         if err == 5 then 
             if token.enable_privilege("SeDebugPrivilege") then
                 h = kernel32.OpenProcess(access, false, pid)
@@ -215,34 +180,24 @@ function M.open(pid, access)
         end
     end
     
-    if not h then return nil end
+    if not h then return nil, util.last_error() end
     return Process(pid, h)
 end
 
-function M.current()
-    return M.open(kernel32.GetCurrentProcessId())
-end
+function M.current() return M.open(kernel32.GetCurrentProcessId()) end
 
--- Iterator: Returns plain tables {pid, name, parent_pid, thread_count}
 function M.each()
     local hSnap = kernel32.CreateToolhelp32Snapshot(2, 0)
     if hSnap == INVALID_HANDLE then return function() end end
-    
-    -- [RAII] Handle ensures CloseHandle is called even if loop breaks
     local safe_snap = Handle(hSnap)
-    
     local pe = ffi.new("PROCESSENTRY32W"); pe.dwSize = ffi.sizeof(pe)
     local first = true
-    
     return function()
         if not safe_snap:valid() then return nil end
-        
         local res
         if first then res = kernel32.Process32FirstW(safe_snap:get(), pe); first = false
         else res = kernel32.Process32NextW(safe_snap:get(), pe) end
-        
         if res == 0 then safe_snap:close(); return nil end
-        
         return { 
             pid = tonumber(pe.th32ProcessID), 
             name = util.from_wide(pe.szExeFile), 
@@ -252,7 +207,6 @@ function M.each()
     end
 end
 
--- Returns ext.table
 function M.list() 
     local t = table_new(256, 0)
     setmetatable(t, { __index = table_ext })
@@ -267,15 +221,12 @@ function M.exists(pid)
         return 0 
     end
     
-    -- Fast check using SYNCHRONIZE
     local h = kernel32.OpenProcess(0x100000, false, pid)
     if h and h ~= INVALID_HANDLE then
         local r = kernel32.WaitForSingleObject(h, 0)
         kernel32.CloseHandle(h)
         return (r == 258) and pid or 0
     end
-    
-    -- Fallback check using QUERY_LIMITED
     h = kernel32.OpenProcess(0x1000, false, pid)
     if h and h ~= INVALID_HANDLE then
         local c = ffi.new("DWORD[1]")
@@ -295,38 +246,31 @@ function M.find_all(name)
     return res
 end
 
--- Simple Wrappers
 function M.terminate(pid) 
-    local p = M.open(pid, 1); if p then local r=p:terminate(); p:close(); return r end; return false 
-end
-function M.suspend(pid) 
-    local p = M.open(pid, 0x800); if p then local r=p:suspend(); p:close(); return r end; return false 
-end
-function M.resume(pid) 
-    local p = M.open(pid, 0x800); if p then local r=p:resume(); p:close(); return r end; return false 
+    local p = M.open(pid, 1); 
+    if p then 
+        local r, err = p:terminate(); p:close(); return r, err 
+    end
+    return false, "Process not found" 
 end
 
--- [SAFETY] JIT-Safe Window enumeration
 function M.terminate_gracefully(pid, timeout)
-    local h = kernel32.OpenProcess(0x100001, false, pid) -- SYNCHRONIZE | TERMINATE
-    
+    local h = kernel32.OpenProcess(0x100001, false, pid)
     if not h and kernel32.GetLastError() == 5 then
         token.enable_privilege("SeDebugPrivilege")
         h = kernel32.OpenProcess(0x100001, false, pid)
     end
-    if not h then return false end
+    if not h then return false, util.last_error() end
 
     local ptr = ffi.new("DWORD[1]")
-    
-    jit.off() -- Critical: EnumWindows callback crash protection
+    jit.off()
     local cb = ffi.cast("WNDENUMPROC", function(w, l)
         local ok = pcall(function()
             user32.GetWindowThreadProcessId(w, ptr)
-            if ptr[0] == pid then user32.PostMessageW(w, 0x0010, 0, 0) end -- WM_CLOSE
+            if ptr[0] == pid then user32.PostMessageW(w, 0x0010, 0, 0) end
         end)
         return 1
     end)
-
     user32.EnumWindows(cb, 0)
     cb:free()
     jit.on()
@@ -334,58 +278,36 @@ function M.terminate_gracefully(pid, timeout)
     if kernel32.WaitForSingleObject(h, timeout or 3000) == 258 then
         kernel32.TerminateProcess(h, 0)
     end
-    
     kernel32.CloseHandle(h)
     return true
 end
 
--- [OPTIMIZATION] Optimized Tree Kill (Single Snapshot)
--- O(N) complexity instead of O(N^2) or O(N*Depth)
 local function terminate_tree_optimized(root_pid)
-    -- 1. Take *one* snapshot
-    local snapshot = M.list() -- returns ext.table list of {pid, parent_pid, ...}
-    
-    -- 2. Build Parent -> Children map
+    local snapshot = M.list()
     local child_map = {}
     for _, p in ipairs(snapshot) do
         local ppid = p.parent_pid
         if not child_map[ppid] then child_map[ppid] = {} end
         table.insert(child_map[ppid], p.pid)
     end
-    
-    -- 3. Recursive collector (Memory only, no system calls)
     local to_kill = {}
     local function collect(pid)
         table.insert(to_kill, pid)
         local children = child_map[pid]
         if children then
-            for _, child_pid in ipairs(children) do
-                collect(child_pid)
-            end
+            for _, child_pid in ipairs(children) do collect(child_pid) end
         end
     end
-    
     collect(root_pid)
-    
-    -- 4. Execute Kill (Reverse order usually better? Or explicit tree killing order doesn't matter much for TerminateProcess)
     token.enable_privilege("SeDebugPrivilege")
-    for _, pid in ipairs(to_kill) do
-        M.terminate(pid)
-    end
-    
+    for _, pid in ipairs(to_kill) do M.terminate(pid) end
     return true
 end
 
--- [NEW] Unified Kill API
--- @param mode: "force" (default), "soft" (graceful), "tree" (recursive)
 function M.kill(pid, mode)
-    if mode == "soft" then
-        return M.terminate_gracefully(pid)
-    elseif mode == "tree" then
-        return terminate_tree_optimized(pid)
-    else
-        return M.terminate(pid)
-    end
+    if mode == "soft" then return M.terminate_gracefully(pid)
+    elseif mode == "tree" then return terminate_tree_optimized(pid)
+    else return M.terminate(pid) end
 end
 
 function M.wait(name_or_pid, timeout)

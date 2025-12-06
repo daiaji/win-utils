@@ -6,75 +6,52 @@ local reg = require 'win-utils.reg.init'
 
 local M = {}
 
--- [get] Get Environment Variable
 function M.get(name)
     local wname = util.to_wide(name)
     local size = kernel32.GetEnvironmentVariableW(wname, nil, 0)
-    if size == 0 then return nil end
+    if size == 0 then 
+        if kernel32.GetLastError() == 203 then return nil end -- ERROR_ENVVAR_NOT_FOUND
+        return nil, util.last_error() 
+    end
     
     local buf = ffi.new("wchar_t[?]", size)
-    kernel32.GetEnvironmentVariableW(wname, buf, size)
+    if kernel32.GetEnvironmentVariableW(wname, buf, size) == 0 then
+        return nil, util.last_error()
+    end
     return util.from_wide(buf)
 end
 
--- [set] Set Process Environment Variable
 function M.set(name, value)
-    return kernel32.SetEnvironmentVariableW(util.to_wide(name), value and util.to_wide(value) or nil) ~= 0
+    if kernel32.SetEnvironmentVariableW(util.to_wide(name), value and util.to_wide(value) or nil) == 0 then
+        return false, util.last_error()
+    end
+    return true
 end
 
--- [set_persistent] Set User/System Variable + Broadcast
--- scope: "User" (Default) or "System" (Requires Admin)
 function M.set_persistent(name, value, scope)
     scope = scope or "User"
-    local key_path
-    
-    if scope == "System" then
-        key_path = "SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment"
-    else
-        key_path = "Environment" -- HKCU
-    end
-    
-    -- 1. Write Registry
+    local key_path = (scope == "System") and "SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment" or "Environment"
     local root = (scope == "System") and "HKLM" or "HKCU"
-    local k = reg.open_key(root, key_path)
-    if not k then return false, "Failed to open registry key" end
     
-    local ok
-    if value then
-        ok = k:write(name, value, "expand_sz") -- Use REG_EXPAND_SZ usually
-    else
-        ok = k:delete_value(name)
-    end
+    local k, err = reg.open_key(root, key_path)
+    if not k then return false, "Registry Open Failed: " .. tostring(err) end
+    
+    local ok, w_err
+    if value then ok, w_err = k:write(name, value, "expand_sz")
+    else ok, w_err = k:delete_value(name) end
     k:close()
     
-    if not ok then return false, "Registry write failed" end
-    
-    -- 2. Broadcast WM_SETTINGCHANGE
-    -- HWND_BROADCAST = 0xFFFF
-    -- WM_SETTINGCHANGE = 0x001A
-    -- SMTO_ABORTIFHUNG = 0x0002
+    if not ok then return false, "Registry Write Failed: " .. tostring(w_err) end
     
     local HWND_BROADCAST = ffi.cast("HWND", 0xFFFF)
     local msg_ptr = util.to_wide("Environment")
+    local res_ptr = ffi.new("uintptr_t[1]") -- DWORD_PTR
     
-    -- [FIX] Use correct pointer type for result (PDWORD_PTR -> DWORD_PTR*)
-    -- Using DWORD[1] on x64 would cause stack corruption as SendMessageTimeoutW writes 8 bytes.
-    local res_ptr = ffi.new("DWORD_PTR[1]")
+    if user32.SendMessageTimeoutW(HWND_BROADCAST, 0x001A, 0, ffi.cast("intptr_t", msg_ptr), 0x0002, 5000, res_ptr) == 0 then
+        return false, util.last_error("Broadcast failed")
+    end
     
-    -- SendMessageTimeoutW(HWND, Msg, wParam, lParam, flags, timeout, result)
-    user32.SendMessageTimeoutW(
-        HWND_BROADCAST, 
-        0x001A, 
-        0, 
-        ffi.cast("LPARAM", msg_ptr), 
-        0x0002, 
-        5000, 
-        res_ptr
-    )
-    
-    -- 锚定字符串防止 GC
     local _ = msg_ptr
-    
     return true
 end
 

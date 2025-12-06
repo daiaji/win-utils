@@ -6,14 +6,34 @@ local error_mod = require 'win-utils.core.error'
 local M = {}
 local CP_UTF8 = 65001
 
--- [Modern LuaJIT] String Conversion
+-- [Universal Error Helpers] ---------------------------------------------------
+
+-- 检查 BOOL 返回值，失败时返回 false, err_msg
+function M.check_bool(res, context)
+    if res ~= 0 and res ~= false then return true end
+    local msg, code = error_mod.last_error(context)
+    return false, msg, code
+end
+
+-- 检查 HANDLE 返回值，失败时返回 nil, err_msg
+-- 兼容 0 和 -1 (INVALID_HANDLE_VALUE) 两种失败模式
+function M.check_handle(h, context)
+    local val = ffi.cast("intptr_t", h)
+    if val == 0 or val == -1 then
+        local msg, code = error_mod.last_error(context)
+        return nil, msg, code
+    end
+    return h
+end
+
+-- [String Conversion] ---------------------------------------------------------
+
 function M.to_wide(str)
     if not str then return nil end
     local len = #str
     local req = kernel32.MultiByteToWideChar(CP_UTF8, 0, str, len, nil, 0)
     if req == 0 then return nil end 
     
-    -- VLA allocation is fast in LuaJIT
     local buf = ffi.new("wchar_t[?]", req + 1)
     kernel32.MultiByteToWideChar(CP_UTF8, 0, str, len, buf, req)
     buf[req] = 0
@@ -31,7 +51,8 @@ function M.from_wide(wstr, len)
     return ffi.string(buf, req)
 end
 
--- GUID Helpers
+-- [GUID Helpers] --------------------------------------------------------------
+
 function M.guid_to_str(g)
     local d4 = ""
     for i=0,7 do d4=d4..string.format("%02X", g.Data4[i]) end
@@ -52,7 +73,8 @@ function M.guid_from_str(s)
     return g
 end
 
--- IOCTL Helper
+-- [IOCTL Helper] --------------------------------------------------------------
+
 function M.ioctl(handle, code, in_obj, in_size, out_type, out_size)
     local in_ptr, in_bytes = nil, 0
     if in_obj then
@@ -77,49 +99,28 @@ function M.ioctl(handle, code, in_obj, in_size, out_type, out_size)
     return (out_buf or true), bytes_ret[0]
 end
 
-function M.last_error() return error_mod.last_error() end
+function M.last_error(p) return error_mod.last_error(p) end
 
--- [NEW] Path Splitter for mkdir -p
+-- [Path Helpers] --------------------------------------------------------------
+
 function M.split_path(path)
     local parts = {}
-    -- 简单处理：将路径按分隔符拆分
-    -- 注意：Lua 模式匹配不直接支持由 \ 或 / 分割
     for part in path:gmatch("[^\\/]+") do
         table.insert(parts, part)
     end
     return parts
 end
 
--- [NEW] Path Normalization
--- Fixes issue with double backslashes which breaks some string comparisons
 function M.normalize_path(path)
     if not path then return nil end
-    
-    -- 1. Unify separators to backslash
     local res = path:gsub("/", "\\")
-    
-    -- 2. Detect UNC prefix (\\Server)
     local is_unc = res:match("^\\\\")
-    
-    -- 3. Collapse multiple backslashes (\\ -> \)
     res = res:gsub("\\+", "\\")
-    
-    -- 4. Restore UNC prefix if needed (because step 3 collapsed \\Server to \Server)
     if is_unc then 
-        -- If it became \Server..., prepend another \
-        if res:sub(1,1) == "\\" then
-            res = "\\" .. res
-        else
-            res = "\\\\" .. res
-        end
+        if res:sub(1,1) == "\\" then res = "\\" .. res else res = "\\\\" .. res end
     end
-    
-    -- 5. Trim trailing backslash (except for root drives C:\)
     res = res:gsub("\\+$", "")
-    
-    -- 6. Ensure drive root has backslash (C: -> C:\)
     if #res == 2 and res:sub(2,2) == ":" then res = res .. "\\" end
-    
     return res
 end
 

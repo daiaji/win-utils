@@ -1,6 +1,7 @@
 local M = {}
 
 -- [Lua-Ext Integration]
+-- 确保基础扩展被加载
 require 'ext.table'
 require 'ext.string'
 require 'ext.math'
@@ -15,9 +16,11 @@ local modules = {
     process  = 'win-utils.process.init',
     disk     = 'win-utils.disk.init',
     net      = 'win-utils.net.init',
+    sys      = 'win-utils.sys.init',
+    
+    -- [Standalone Modules]
     wim      = 'win-utils.wim',
-    device   = 'win-utils.device',
-    sys      = 'win-utils.sys.init'
+    device   = 'win-utils.device'
 }
 
 setmetatable(M, {

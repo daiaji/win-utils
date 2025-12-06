@@ -9,22 +9,25 @@ local table_ext = require 'ext.table'
 local M = {}
 local function close_svc(h) advapi32.CloseServiceHandle(h) end
 
--- [FIX] 显式检查句柄是否为 0，因为 cdata 指针在 Lua 中始终为 true
 local function open_scm(acc)
     local h = advapi32.OpenSCManagerW(nil, nil, acc)
-    if h == nil or h == ffi.cast("SC_HANDLE", 0) then return nil end
+    if h == nil or h == ffi.cast("SC_HANDLE", 0) then 
+        return nil, util.last_error("OpenSCManager failed") 
+    end
     return Handle(h, close_svc)
 end
 
 local function open_svc(scm, n, acc)
     local h = advapi32.OpenServiceW(scm:get(), util.to_wide(n), acc)
-    if h == nil or h == ffi.cast("SC_HANDLE", 0) then return nil end
+    if h == nil or h == ffi.cast("SC_HANDLE", 0) then 
+        return nil, util.last_error("OpenService failed")
+    end
     return Handle(h, close_svc)
 end
 
 function M.list(drivers)
-    local scm = open_scm(4) -- SC_MANAGER_ENUMERATE_SERVICE
-    if not scm then return nil end
+    local scm, err = open_scm(4) -- SC_MANAGER_ENUMERATE_SERVICE
+    if not scm then return nil, err end
     
     local type_flag = drivers and 0x3B or 0x30
     local bytes_needed = ffi.new("DWORD[1]")
@@ -32,12 +35,12 @@ function M.list(drivers)
     local resume = ffi.new("DWORD[1]", 0)
     
     advapi32.EnumServicesStatusExW(scm:get(), 0, type_flag, 3, nil, 0, bytes_needed, count, resume, nil)
-    local err = kernel32.GetLastError()
-    if err ~= 234 then return nil end
+    local err_code = kernel32.GetLastError()
+    if err_code ~= 234 then return nil, util.last_error("EnumServices Size") end
     
     local buf = ffi.new("uint8_t[?]", bytes_needed[0])
     if advapi32.EnumServicesStatusExW(scm:get(), 0, type_flag, 3, buf, bytes_needed[0], bytes_needed, count, resume, nil) == 0 then
-        return nil 
+        return nil, util.last_error("EnumServices failed")
     end
     
     local num = tonumber(count[0])
@@ -56,18 +59,17 @@ function M.list(drivers)
     return res
 end
 
--- [Restored] Query detailed status
 function M.query(n)
-    local scm = open_scm(1) -- CONNECT
-    if not scm then return nil end
-    local svc = open_svc(scm, n, 4) -- QUERY_STATUS
-    if not svc then return nil end
+    local scm, err = open_scm(1) -- CONNECT
+    if not scm then return nil, err end
+    local svc, err2 = open_svc(scm, n, 4) -- QUERY_STATUS
+    if not svc then return nil, err2 end
     
     local needed = ffi.new("DWORD[1]")
     local buf = ffi.new("uint8_t[512]")
     
     if advapi32.QueryServiceStatusEx(svc:get(), 0, buf, 512, needed) == 0 then
-        return nil, util.last_error()
+        return nil, util.last_error("QueryStatus failed")
     end
     
     local s = ffi.cast("SERVICE_STATUS_PROCESS*", buf)
@@ -80,51 +82,45 @@ function M.query(n)
 end
 
 function M.start(n) 
-    local scm = open_scm(1) -- CONNECT
-    if not scm then return false end
-    local svc = open_svc(scm, n, 0x10) -- START
-    if not svc then return false end
+    local scm, err = open_scm(1)
+    if not scm then return false, err end
+    local svc, err2 = open_svc(scm, n, 0x10) -- START
+    if not svc then return false, err2 end
     
     local r = advapi32.StartServiceW(svc:get(), 0, nil)
     if r == 0 then
-        local err = kernel32.GetLastError()
-        if err == 1056 then return true end
-        return false
+        local err_code = kernel32.GetLastError()
+        if err_code == 1056 then return true end -- ERROR_SERVICE_ALREADY_RUNNING
+        return false, util.last_error("StartService failed")
     end
     return true
 end
 
 function M.stop(n)
-    local scm = open_scm(1)
-    if not scm then return false end
-    local svc = open_svc(scm, n, 0x24) -- STOP | QUERY
-    if not svc then return false end
+    local scm, err = open_scm(1)
+    if not scm then return false, err end
+    local svc, err2 = open_svc(scm, n, 0x24) -- STOP | QUERY
+    if not svc then return false, err2 end
     
     local st = ffi.new("SERVICE_STATUS")
     if advapi32.ControlService(svc:get(), 1, st) == 0 then
-        local err = kernel32.GetLastError()
-        if err == 1062 then return true end
-        return false
+        local err_code = kernel32.GetLastError()
+        if err_code == 1062 then return true end -- ERROR_SERVICE_NOT_ACTIVE
+        return false, util.last_error("ControlService failed")
     end
     return true
 end
 
--- start_type: 2 (Auto), 3 (Manual), 4 (Disabled)
 function M.set_config(n, start_type)
-    local scm = open_scm(1)
-    if not scm then return false end
-    local svc = open_svc(scm, n, 2) -- CHANGE_CONFIG
-    if not svc then return false end
+    local scm, err = open_scm(1)
+    if not scm then return false, err end
+    local svc, err2 = open_svc(scm, n, 2) -- CHANGE_CONFIG
+    if not svc then return false, err2 end
     
-    return advapi32.ChangeServiceConfigW(svc:get(), 0xFFFFFFFF, start_type, 0xFFFFFFFF, nil, nil, nil, nil, nil, nil, nil) ~= 0
-end
-
-function M.stop_recursive(n)
-    local deps = M.get_dependents(n)
-    if deps and #deps > 0 then
-        for _, d in ipairs(deps) do M.stop_recursive(d) end
+    if advapi32.ChangeServiceConfigW(svc:get(), 0xFFFFFFFF, start_type, 0xFFFFFFFF, nil, nil, nil, nil, nil, nil, nil) == 0 then
+        return false, util.last_error("ChangeConfig failed")
     end
-    return M.stop(n)
+    return true
 end
 
 function M.get_dependents(n)
@@ -141,7 +137,7 @@ function M.get_dependents(n)
     
     local buf = ffi.new("uint8_t[?]", bytes[0])
     if advapi32.EnumDependentServicesW(svc:get(), 3, ffi.cast("ENUM_SERVICE_STATUSW*", buf), bytes[0], bytes, count) == 0 then
-        return {}
+        return {} -- Should we return error? Empty deps is common, let's keep simple.
     end
     
     local deps = table_new(tonumber(count[0]), 0)

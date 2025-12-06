@@ -1,11 +1,11 @@
 local ffi = require 'ffi'
 local bit = require 'bit'
 local user32 = require 'ffi.req' 'Windows.sdk.user32'
+local util = require 'win-utils.core.util'
 
 local M = {}
-local anchors = {} -- 防止回调被 GC
+local anchors = {} 
 
--- [Restore] Complete implementation with callbacks and safety
 function M.reg(id, modifiers, key, cb)
     if not cb or type(cb) ~= "function" then return false, "Callback required" end
     
@@ -25,22 +25,24 @@ function M.reg(id, modifiers, key, cb)
         vk = bit.band(user32.VkKeyScanW(string.byte(key:upper())), 0xFF)
     end
     
-    if user32.RegisterHotKey(nil, id, mod_flag, vk) == 0 then return false end
+    if user32.RegisterHotKey(nil, id, mod_flag, vk) == 0 then 
+        return false, util.last_error("RegisterHotKey failed")
+    end
     anchors[id] = cb
     return true
 end
 
 function M.unreg(id)
     anchors[id] = nil
-    return user32.UnregisterHotKey(nil, id) ~= 0
+    if user32.UnregisterHotKey(nil, id) == 0 then
+        return false, util.last_error("UnregisterHotKey failed")
+    end
+    return true
 end
 
--- [Restore] Safe Dispatcher
 function M.dispatch(id)
     local cb = anchors[id]
-    if cb then
-        xpcall(cb, debug.traceback)
-    end
+    if cb then xpcall(cb, debug.traceback) end
 end
 
 return M

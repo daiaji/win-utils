@@ -11,8 +11,8 @@ local sub_modules = {
     info     = 'win-utils.sys.info',
     shell    = 'win-utils.sys.shell',
     io       = 'win-utils.sys.io',
-    path     = 'win-utils.sys.path', -- [NEW]
-    env      = 'win-utils.sys.env'   -- [NEW]
+    path     = 'win-utils.sys.path',
+    env      = 'win-utils.sys.env'
 }
 
 setmetatable(M, {

@@ -4,19 +4,14 @@ local util = require 'win-utils.core.util'
 
 local M = {}
 
--- [which] Locate executable in PATH
--- Emulates standard `where` or `which` behavior
 function M.which(name)
     local buf_len = 1024
     local buf = ffi.new("wchar_t[?]", buf_len)
     local file_part = ffi.new("LPWSTR[1]")
     
-    -- SearchPathW(path, filename, ext, buflen, buf, filepart)
-    -- path=NULL means use system search order
-    -- ext=NULL means look for exact match or append default ext
-    
-    local res = kernel32.SearchPathW(nil, util.to_wide(name), nil, buf_len, buf, file_part)
-    if res == 0 then return nil end
+    if kernel32.SearchPathW(nil, util.to_wide(name), nil, buf_len, buf, file_part) == 0 then
+        return nil -- Not found is not an error in 'which' context usually, but nil is correct
+    end
     
     return util.from_wide(buf)
 end

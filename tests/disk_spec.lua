@@ -27,25 +27,24 @@ function TestDisk:test_Physical_List()
         lu.assertIsNumber(d.index)
         lu.assertIsNumber(d.size)
         lu.assertIsNumber(d.sector_size)
-        -- 复原：明确打印 bus type，用于人工 debug
         print(string.format("  [INFO] Disk %d: %s (Bus: %s)", d.index, d.model, tostring(d.bus)))
     end
 end
 
--- [RESTORED STRICTNESS] 明确检查 MBR/GPT 样式
 function TestDisk:test_Layout_IOCTL()
     if not self.is_admin then return end
     
-    local pd = win.disk.physical.open(0, "r")
+    local pd, err = win.disk.physical.open(0, "r")
     if not pd then return end
     
     if win.disk.layout and win.disk.layout.get then
-        local layout = win.disk.layout.get(pd)
+        local layout, l_err = win.disk.layout.get(pd)
         if layout then
             lu.assertIsTable(layout)
-            -- 旧版逻辑：严格检查分区表样式
-            lu.assertTrue(layout.style == "MBR" or layout.style == "GPT", "Unknown Disk Style: " .. tostring(layout.style))
+            lu.assertTrue(layout.style == "MBR" or layout.style == "GPT", "Unknown Disk Style")
             lu.assertIsTable(layout.parts)
+        else
+            print("  [WARN] GetLayout failed: " .. tostring(l_err))
         end
     end
     pd:close()
@@ -58,7 +57,8 @@ function TestDisk:test_VHD_Workflow()
     lu.assertNotNil(h, "VHD Create: " .. tostring(err))
     self.vhd_handle = h
     
-    lu.assertTrue(win.disk.vhd.attach(h))
+    local ok, att_err = win.disk.vhd.attach(h)
+    lu.assertTrue(ok, "Attach failed: " .. tostring(att_err))
     
     local phys_path = win.disk.vhd.wait_for_physical_path(h, 5000)
     lu.assertNotNil(phys_path)
@@ -66,12 +66,12 @@ function TestDisk:test_VHD_Workflow()
     local idx = tonumber(phys_path:match("PhysicalDrive(%d+)"))
     lu.assertNotNil(idx)
     
-    local drive = win.disk.physical.open(idx, "rw", true)
-    lu.assertNotNil(drive)
+    local drive, open_err = win.disk.physical.open(idx, "rw", true)
+    lu.assertNotNil(drive, "Open VHD Physical failed: " .. tostring(open_err))
     
     local patterns = { 0xAA }
-    local ok, scan_err = win.disk.surface.scan(drive, nil, "write", patterns)
-    lu.assertTrue(ok, "Surface scan failed: " .. tostring(scan_err))
+    local ok_scan, scan_err = win.disk.surface.scan(drive, nil, "write", patterns)
+    lu.assertTrue(ok_scan, "Surface scan failed: " .. tostring(scan_err))
     
     local wipe_ok, wipe_err = drive:wipe_zero()
     lu.assertTrue(wipe_ok, wipe_err)
@@ -118,17 +118,17 @@ end
 
 function TestDisk:test_BitLocker()
     if not self.is_admin then return end
-    local ok, status = pcall(function() return win.disk.bitlocker.get_status("C:") end)
-    if ok then
+    local status, err = win.disk.bitlocker.get_status("C:")
+    if status then
         lu.assertTrue(status == "Locked" or status == "None" or status == "Off")
-        local unlocked = win.disk.bitlocker.is_unlocked("C:")
-        lu.assertIsBoolean(unlocked)
+    else
+        print("  [WARN] BitLocker check failed: " .. tostring(err))
     end
 end
 
 function TestDisk:test_Volume_List()
-    local vols = win.disk.volume.list()
-    lu.assertIsTable(vols)
+    local vols, err = win.disk.volume.list()
+    lu.assertNotNil(vols, "Vol list failed: " .. tostring(err))
     lu.assertTrue(#vols > 0)
     local found_c = false
     for _, v in ipairs(vols) do

@@ -8,13 +8,14 @@ local sub_modules = {
     format    = 'win-utils.disk.format',
     vds       = 'win-utils.disk.vds',
     vhd       = 'win-utils.disk.vhd',
-    surface   = 'win-utils.disk.surface', -- [Renamed from badblocks]
+    surface   = 'win-utils.disk.surface', 
     image     = 'win-utils.disk.image',
     esp       = 'win-utils.disk.esp',
     defs      = 'win-utils.disk.defs',
     types     = 'win-utils.disk.types',
     bitlocker = 'win-utils.disk.bitlocker',
-    volume    = 'win-utils.disk.volume'
+    volume    = 'win-utils.disk.volume',
+    safety    = 'win-utils.disk.safety'
 }
 
 setmetatable(M, {
@@ -38,27 +39,43 @@ function M.prepare_drive(drive_index, scheme, opts)
 
     mount.unmount_all_on_disk(drive_index)
     
-    local drive = physical.open(drive_index, "rw", true)
-    if not drive then return false, "Open failed" end
-    if not drive:lock(true) then drive:close(); return false, "Lock failed" end
+    local drive, err = physical.open(drive_index, "rw", true)
+    if not drive then return false, "Open failed: " .. tostring(err) end
+    
+    local locked, lock_err = drive:lock(true)
+    if not locked then 
+        drive:close()
+        return false, "Lock failed: " .. tostring(lock_err) 
+    end
     
     local wiped = drive:wipe_layout()
     drive:close()
     if not wiped then return false, "Wipe layout failed" end
     
-    vds.clean(drive_index)
+    -- VDS Clean is robust for refreshing system view
+    local v_ok, v_err = vds.clean(drive_index)
+    if not v_ok then return false, "VDS Clean failed: " .. tostring(v_err) end
+    
     kernel32.Sleep(500)
     
-    drive = physical.open(drive_index, "rw", true)
-    if not drive then return false, "Re-open failed" end
-    if not drive:lock(true) then drive:close(); return false, "Re-lock failed" end
+    -- Re-open for layout application
+    drive, err = physical.open(drive_index, "rw", true)
+    if not drive then return false, "Re-open failed: " .. tostring(err) end
+    
+    locked, lock_err = drive:lock(true)
+    if not locked then 
+        drive:close()
+        return false, "Re-lock failed: " .. tostring(lock_err) 
+    end
     
     local plan = layout.calculate_partition_plan(drive, scheme, opts)
-    local ok = layout.apply(drive, scheme, plan)
+    local ok, apply_err = layout.apply(drive, scheme, plan)
     drive:close()
     
+    if not ok then return false, "Layout apply failed: " .. tostring(apply_err) end
+    
     kernel32.Sleep(1000)
-    return ok, plan
+    return true, plan
 end
 
 function M.clean_all(drive_index, cb)
@@ -66,14 +83,19 @@ function M.clean_all(drive_index, cb)
     local physical = require 'win-utils.disk.physical'
     
     mount.unmount_all_on_disk(drive_index)
-    local drive = physical.open(drive_index, "rw", true)
-    if not drive then return false end
-    if not drive:lock(true) then drive:close(); return false end
+    local drive, err = physical.open(drive_index, "rw", true)
+    if not drive then return false, "Open failed: " .. tostring(err) end
     
-    local ok, err = drive:wipe_zero(cb)
+    local locked, lock_err = drive:lock(true)
+    if not locked then 
+        drive:close()
+        return false, "Lock failed: " .. tostring(lock_err) 
+    end
     
+    local ok, w_err = drive:wipe_zero(cb)
     drive:close()
-    return ok, err
+    
+    return ok, w_err
 end
 
 function M.check_health(drive_index, cb, write_test)
@@ -83,9 +105,14 @@ function M.check_health(drive_index, cb, write_test)
     
     if write_test then mount.unmount_all_on_disk(drive_index) end
     local mode = write_test and "rw" or "r"
-    local drive = physical.open(drive_index, mode, true)
-    if not drive then return false end
-    if not drive:lock(true) then drive:close(); return false end
+    
+    local drive, err = physical.open(drive_index, mode, true)
+    if not drive then return false, "Open failed: " .. tostring(err) end
+    
+    if not drive:lock(true) then 
+        drive:close()
+        return false, "Lock failed" 
+    end
     
     local patterns = write_test and {0x55, 0xAA, 0x00, 0xFF} or nil
     local ok, msg = surface.scan(drive, cb, write_test and "write" or "read", patterns)
@@ -94,16 +121,9 @@ function M.check_health(drive_index, cb, write_test)
 end
 
 function M.rescan()
-    local vds = require 'win-utils.disk.vds'
-    local ctx = vds.create_context() -- 注意: vds.lua 需确保导出 create_context 或修正此处
-    -- 在 vds.lua 未导出 create_context 的情况下，通常使用隐式创建
-    -- 这里假设 vds 模块内部逻辑
-    -- [Fix] vds.lua 中使用的是 VdsContext 类，未导出 create_context 函数，需修正调用
-    -- 由于 vds.lua 内部使用 VdsContext，但该类是 local 的。
-    -- 我们需要 hack 一下或者依赖 vds 模块提供的具体功能函数。
-    -- 目前 vds 模块没有导出 rescan 相关的 helper。
-    -- 暂且留空或标记 TODO，或者修改 vds.lua 导出 VdsContext
-    return false, "Not implemented"
+    -- VDS Refresh logic is internal or not fully exposed via helpers yet.
+    -- Returning specific error instead of generic false.
+    return false, "Not implemented via VDS helpers"
 end
 
 function M.sync()
