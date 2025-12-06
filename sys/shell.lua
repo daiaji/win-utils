@@ -1,8 +1,37 @@
 local ffi = require 'ffi'
+local bit = require 'bit'
 local shell32 = require 'ffi.req' 'Windows.sdk.shell32'
 local kernel32 = require 'ffi.req' 'Windows.sdk.kernel32'
 local ole32 = require 'ffi.req' 'Windows.sdk.ole32'
 local util = require 'win-utils.core.util'
+
+-- [CDEF] ShellExecuteEx Structs
+if not pcall(function() return ffi.sizeof("SHELLEXECUTEINFOW") end) then
+    ffi.cdef[[
+        typedef struct _SHELLEXECUTEINFOW {
+            DWORD     cbSize;
+            ULONG     fMask;
+            HWND      hwnd;
+            LPCWSTR   lpVerb;
+            LPCWSTR   lpFile;
+            LPCWSTR   lpParameters;
+            LPCWSTR   lpDirectory;
+            int       nShow;
+            HINSTANCE hInstApp;
+            void      *lpIDList;
+            LPCWSTR   lpClass;
+            HKEY      hkeyClass;
+            DWORD     dwHotKey;
+            union {
+                HANDLE hIcon;
+                HANDLE hMonitor;
+            } DUMMYUNIONNAME;
+            HANDLE    hProcess;
+        } SHELLEXECUTEINFOW;
+        
+        BOOL ShellExecuteExW(SHELLEXECUTEINFOW *pExecInfo);
+    ]]
+end
 
 local M = {}
 
@@ -29,7 +58,7 @@ function M.get_args()
     return res
 end
 
--- [Restored] Alias for backward compatibility
+-- Alias for backward compatibility
 M.get_arguments = M.get_args
 
 function M.browse(title)
@@ -45,6 +74,72 @@ function M.browse(title)
     end
     ole32.CoTaskMemFree(pidl)
     return res
+end
+
+-- ========================================================================
+-- Coreutils: Shell Execution
+-- ========================================================================
+
+-- [exec] Execute file, URL, or open directory using Shell API
+-- In WinPE (System Authority), this simply launches the process.
+-- @param path: Executable, Document, URL, or Directory path.
+-- @param args: (Optional) Arguments string.
+-- @param show: (Optional) SW_SHOW* constant (default: 1).
+-- @param verb: (Optional) "open", "edit", "print", etc. Default is based on file type.
+function M.exec(path, args, show, verb)
+    local info = ffi.new("SHELLEXECUTEINFOW")
+    info.cbSize = ffi.sizeof(info)
+    info.fMask = 0x40 -- SEE_MASK_NOCLOSEPROCESS (populate hProcess)
+    
+    local w_path = util.to_wide(path)
+    local w_args = args and util.to_wide(args) or nil
+    local w_verb = verb and util.to_wide(verb) or nil
+    
+    info.lpFile = w_path
+    info.lpParameters = w_args
+    info.lpVerb = w_verb
+    info.nShow = show or 1 -- SW_SHOWNORMAL
+    
+    -- GC Anchors
+    local _ = {w_path, w_args, w_verb}
+    
+    local res = ffi.C.ShellExecuteExW(info) ~= 0
+    
+    -- If successful and we got a process handle, close it to avoid leaks
+    -- (We don't return the handle as this function is fire-and-forget style like 'start')
+    if info.hProcess ~= nil then 
+        kernel32.CloseHandle(info.hProcess) 
+    end
+    
+    return res
+end
+
+-- [restart_self] Helper to restart current script/exe
+function M.restart_self()
+    local my_args = M.get_args()
+    if #my_args == 0 then return false end
+    
+    local exe = my_args[1]
+    local params_tbl = {}
+    
+    for i=2, #my_args do
+        local a = my_args[i]
+        if a:find(" ") and not a:match('^".*"$') then 
+            a = '"' .. a .. '"' 
+        end
+        table.insert(params_tbl, a)
+    end
+    
+    local params = table.concat(params_tbl, " ")
+    
+    -- Use M.exec to launch self
+    local ok = M.exec(exe, params)
+    
+    if ok then
+        -- Exit current process
+        kernel32.ExitProcess(0)
+    end
+    return ok
 end
 
 return M

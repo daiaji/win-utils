@@ -6,7 +6,7 @@ local ntdll = require 'ffi.req' 'Windows.sdk.ntdll'
 local util = require 'win-utils.core.util'
 local native = require 'win-utils.core.native'
 
--- [Lazy Load]
+-- [Lazy Load] 避免循环依赖
 local function get_ntfs() return require 'win-utils.fs.ntfs' end
 local function get_raw() return require 'win-utils.fs.raw' end
 
@@ -16,7 +16,7 @@ local sub_modules = {
     native = 'win-utils.fs.raw',
     ntfs   = 'win-utils.fs.ntfs',
     path   = 'win-utils.fs.path',
-    acl    = 'win-utils.fs.acl'
+    -- [REMOVED] acl is explicitly excluded for PE environment
 }
 
 setmetatable(M, {
@@ -31,7 +31,7 @@ setmetatable(M, {
     end
 })
 
--- Constants
+-- 常量定义
 local FILE_ATTRIBUTE_DIRECTORY     = 0x10
 local FILE_ATTRIBUTE_REPARSE_POINT = 0x400
 local FILE_ATTRIBUTE_READONLY      = 0x01
@@ -140,6 +140,7 @@ local function cp_r(src, dst, opts)
     
     -- Directory
     if is_dir(attr) then
+        -- Loop detection
         local src_norm = util.normalize_path(src):lower()
         local dst_norm = util.normalize_path(dst):lower()
         if dst_norm:find(src_norm, 1, true) == 1 then
@@ -150,7 +151,7 @@ local function cp_r(src, dst, opts)
             return false, util.last_error()
         end
         
-        for name, _ in scandir_native(src) do
+        for name in scandir_native(src) do
             local ok, err = cp_r(src .. "\\" .. name, dst .. "\\" .. name, opts)
             if not ok then return false, err end
         end
@@ -165,6 +166,8 @@ local function cp_r(src, dst, opts)
     -- File
     local r = kernel32.CopyFileW(util.to_wide(src), util.to_wide(dst), opts.no_clobber and 1 or 0)
     if r == 0 then return false, util.last_error() end
+    
+    -- Attributes are copied by CopyFileW automatically.
     return true
 end
 
@@ -178,7 +181,7 @@ local function rm_rf(path)
     
     if is_dir(attr) and not is_link(attr) then
         local ok = true
-        for name, _ in scandir_native(path) do
+        for name in scandir_native(path) do
             if not rm_rf(path .. "\\" .. name) then ok = false end
         end
         if not ok then return false, "Clean dir failed" end
@@ -205,7 +208,7 @@ function M.recycle(path) return rm_rf(path) end
 function M.move(src, dst, opts)
     opts = opts or {}
     local flags = 10 -- COPY_ALLOWED | WRITE_THROUGH
-    if not opts.no_clobber then flags = flags + 1 end -- REPLACE_EXISTING
+    if not opts.no_clobber then flags = flags + 1 end
     
     if kernel32.MoveFileExW(util.to_wide(src), util.to_wide(dst), flags) ~= 0 then return true end
     
@@ -223,11 +226,8 @@ end
 -- ========================================================================
 
 -- [df] Disk Free
--- returns: { free_bytes, total_bytes, free_total_bytes, percent_free }
 function M.df(path)
     local wpath = util.to_wide(path or ".")
-    
-    -- ULARGE_INTEGER (uint64)
     local free_user = ffi.new("ULARGE_INTEGER")
     local total = ffi.new("ULARGE_INTEGER")
     local free_total = ffi.new("ULARGE_INTEGER")
@@ -242,13 +242,12 @@ function M.df(path)
     return {
         free_bytes = free_val,
         total_bytes = total_val,
-        free_total_bytes = tonumber(free_total.QuadPart), -- Free bytes on disk (ignore quota)
+        free_total_bytes = tonumber(free_total.QuadPart),
         percent_free = (total_val > 0) and (free_val / total_val) or 0
     }
 end
 
 -- [du] Disk Usage
--- opts: { apparent_size = bool }
 function M.du(path, opts)
     opts = opts or {}
     local raw = get_raw()
@@ -258,7 +257,7 @@ function M.du(path, opts)
         local info, err = raw.get_file_info(p)
         if not info then return end
         
-        -- Inode deduplication
+        -- Deduplication
         local id = string.format("%d:%s", info.vol_serial, tostring(info.file_index))
         if stats.seen[id] then return end
         stats.seen[id] = true
@@ -289,7 +288,6 @@ function M.du(path, opts)
 end
 
 -- [find] Iterator
--- opts: { type="f"|"d", recursive=bool }
 function M.find(path, opts)
     opts = opts or {}
     path = util.normalize_path(path)
