@@ -266,13 +266,18 @@ function TestProcess:test_Handles()
     if win.process.token.is_elevated() then
         local sys_handles = win.process.handles.list_system()
         lu.assertIsTable(sys_handles)
+        
+        print("  [DEBUG] System Handle Count: " .. #sys_handles)
+        
         -- 整个系统的句柄数通常成千上万
         lu.assertTrue(#sys_handles > 100)
         
         -- 检查结构
-        local h = sys_handles[1]
-        lu.assertIsNumber(h.pid)
-        lu.assertIsNumber(h.handle)
-        lu.assertIsNumber(h.object_addr)
+        if #sys_handles > 0 then
+            local h = sys_handles[1]
+            lu.assertIsNumber(h.pid)
+            lu.assertIsNumber(h.val) -- handle value
+            lu.assertIsNumber(h.obj) -- pointer value (addr)
+        end
     end
 end

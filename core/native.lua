@@ -113,9 +113,11 @@ function M.dos_path_to_nt_path(dos_path)
     return "\\??\\" .. dos_path
 end
 
--- [Fix] 规范化 signed 32-bit status 为 unsigned 以进行比较
+-- [Fix] 使用 ffi.cast 规范化 signed 32-bit status 为 unsigned
+-- LuaJIT bit op 操作是有符号的，简单的数学运算在 double 上也可能出问题
+-- 显式 cast 是最安全的方法
 local function norm_status(s)
-    return (s < 0) and (s + 0x100000000) or s
+    return tonumber(ffi.cast("uint32_t", s))
 end
 
 function M.query_variable_size(func, first_arg, info_class, initial_size)

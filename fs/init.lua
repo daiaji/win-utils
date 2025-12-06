@@ -73,8 +73,8 @@ local function scandir_native(path)
     end
 end
 
-local function is_link(attr) return bit.band(attr, FILE_ATTRIBUTE_REPARSE_POINT) ~= 0 end
-local function is_dir(attr) return bit.band(attr, FILE_ATTRIBUTE_DIRECTORY) ~= 0 end
+local function is_link_attr(attr) return bit.band(attr, FILE_ATTRIBUTE_REPARSE_POINT) ~= 0 end
+local function is_dir_attr(attr) return bit.band(attr, FILE_ATTRIBUTE_DIRECTORY) ~= 0 end
 
 -- [API] 创建目录 (递归)
 function M.mkdir(path, opts)
@@ -100,6 +100,7 @@ function M.mkdir(path, opts)
 
     for i = start_idx, #parts do
         current = current .. parts[i]
+        -- [FIX] 必须使用 M.is_dir 而非内部 helper，确保 INVALID_FILE_ATTRIBUTES 检查生效
         if not M.is_dir(current) then
             if kernel32.CreateDirectoryW(util.to_wide(current), nil) == 0 then
                 if kernel32.GetLastError() ~= 183 then 
@@ -120,16 +121,16 @@ local function cp_r(src, dst, opts)
     if not src_info then return false, "Source inaccessible" end
     local attr = src_info.attr
     
-    if is_link(attr) then
+    if is_link_attr(attr) then
         local ntfs = get_ntfs()
         local target, type = ntfs.read_link(src)
         if target then
-            return ntfs.mklink(dst, target, type == "Junction" and "junction" or (is_dir(attr) and "dir" or "file"))
+            return ntfs.mklink(dst, target, type == "Junction" and "junction" or (is_dir_attr(attr) and "dir" or "file"))
         end
         return false, "Read link failed"
     end
     
-    if is_dir(attr) then
+    if is_dir_attr(attr) then
         local src_norm = util.normalize_path(src):lower()
         local dst_norm = util.normalize_path(dst):lower()
         if dst_norm:find(src_norm, 1, true) == 1 then
@@ -166,7 +167,7 @@ local function rm_rf(path)
     local attr = kernel32.GetFileAttributesW(util.to_wide(path))
     if attr == INVALID_FILE_ATTRIBUTES then return true end
     
-    if is_dir(attr) and not is_link(attr) then
+    if is_dir_attr(attr) and not is_link_attr(attr) then
         local ok = true
         for name in scandir_native(path) do
             if not rm_rf(path .. "\\" .. name) then ok = false end
@@ -178,7 +179,7 @@ local function rm_rf(path)
         kernel32.SetFileAttributesW(util.to_wide(path), 0x80)
     end
     
-    if is_dir(attr) and not is_link(attr) then
+    if is_dir_attr(attr) and not is_link_attr(attr) then
         if kernel32.RemoveDirectoryW(util.to_wide(path)) == 0 then return false, util.last_error() end
     else
         if not raw.delete_posix(path) then
@@ -244,9 +245,9 @@ function M.get_usage_info(path, opts)
         if stats.seen[id] then return end
         stats.seen[id] = true
         
-        if is_dir(info.attr) then
+        if is_dir_attr(info.attr) then
             stats.dirs = stats.dirs + 1
-            if not is_link(info.attr) then 
+            if not is_link_attr(info.attr) then 
                 for name in scandir_native(p) do recurse(p .. "\\" .. name) end
             end
         else
@@ -280,9 +281,9 @@ function M.find(path, opts)
             
             local attr = kernel32.GetFileAttributesW(util.to_wide(curr))
             if attr ~= INVALID_FILE_ATTRIBUTES then
-                local is_d = is_dir(attr)
+                local is_d = is_dir_attr(attr)
                 
-                if is_d and opts.recursive ~= false and not is_link(attr) then
+                if is_d and opts.recursive ~= false and not is_link_attr(attr) then
                     for name in scandir_native(curr) do
                         tail = tail + 1
                         q[tail] = curr .. "\\" .. name
@@ -361,15 +362,27 @@ end
 
 -- [API] 基础查询
 function M.exists(path) return kernel32.GetFileAttributesW(util.to_wide(path)) ~= INVALID_FILE_ATTRIBUTES end
-function M.is_dir(path) local a = kernel32.GetFileAttributesW(util.to_wide(path)); return a ~= -1 and is_dir(a) end
-function M.is_link(path) local a = kernel32.GetFileAttributesW(util.to_wide(path)); return a ~= -1 and is_link(a) end
+
+-- [FIX] 正确处理 INVALID_FILE_ATTRIBUTES (0xFFFFFFFF)
+-- 在 Lua 中，DWORD 是 uint32，0xFFFFFFFF 不等于 -1。
+-- 如果文件不存在，GetFileAttributes 返回 0xFFFFFFFF，如果直接位运算可能会误判。
+function M.is_dir(path) 
+    local a = kernel32.GetFileAttributesW(util.to_wide(path))
+    return a ~= INVALID_FILE_ATTRIBUTES and is_dir_attr(a) 
+end
+
+function M.is_link(path) 
+    local a = kernel32.GetFileAttributesW(util.to_wide(path))
+    return a ~= INVALID_FILE_ATTRIBUTES and is_link_attr(a) 
+end
+
 function M.scandir(path) return scandir_native(path) end
 function M.stat(path)
     local raw = get_raw()
     local info, err = raw.get_file_info(path)
     if not info then return nil, err end
-    info.is_dir = is_dir(info.attr)
-    info.is_link = is_link(info.attr)
+    info.is_dir = is_dir_attr(info.attr)
+    info.is_link = is_link_attr(info.attr)
     return info
 end
 
