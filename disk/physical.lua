@@ -54,8 +54,17 @@ end
 
 function PhysicalDrive:lock(force)
     -- FSCTL_ALLOW_EXTENDED_DASD_IO
-    local ok, err = self:ioctl(defs.IOCTL.DASD)
-    if not ok then return false, "DASD IOCTL failed: " .. tostring(err) end
+    -- [Note] 物理磁盘句柄通常不需要此操作，或者不支持 (Error 87/1)。
+    -- 我们仅尝试调用，如果失败且错误码不是“参数错误(87)”或“功能无效(1)”，则记录警告但不终止。
+    -- 只有“拒绝访问(5)”才是真正的阻断性错误。
+    local ok, err, code = self:ioctl(defs.IOCTL.DASD)
+    if not ok then 
+        local c = tonumber(code)
+        if c == 5 then -- Access Denied
+            return false, "DASD IOCTL Access Denied: " .. tostring(err)
+        end
+        -- Ignore 87 (Invalid Parameter), 1 (Invalid Function), 50 (Not Supported)
+    end
     
     local attempts = 0
     local max_attempts = 150
@@ -64,13 +73,27 @@ function PhysicalDrive:lock(force)
     ::retry::
     attempts = attempts + 1
     
-    if self:ioctl(defs.IOCTL.LOCK) then
+    -- FSCTL_LOCK_VOLUME
+    local l_ok, l_err, l_code = self:ioctl(defs.IOCTL.LOCK)
+    if l_ok then
         self.is_locked = true
         return true
+    else
+        -- [Note] 物理磁盘锁定失败常见原因：
+        -- 5: Access Denied (有文件打开)
+        -- 32: Sharing Violation
+        -- 如果返回 87/1/50，说明该句柄类型不支持锁定命令，但既然我们已独占打开，
+        -- 就可以认为已隐式锁定。
+        local lc = tonumber(l_code)
+        if lc == 87 or lc == 1 or lc == 50 then 
+             self.is_locked = true
+             return true
+        end
+        err_msg = l_err
     end
     
     if attempts >= max_attempts then
-        err_msg = util.last_error("Lock Volume Timeout")
+        err_msg = util.last_error("Lock Volume Timeout (Last: " .. tostring(err_msg) .. ")")
         goto fail
     end
     
