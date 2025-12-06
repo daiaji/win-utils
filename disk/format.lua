@@ -1,5 +1,28 @@
 local M = {}
 
+-- 辅助：检查卷是否已拥有有效的文件系统
+local function is_filesystem_ready(idx, offset, expected_fs)
+    local volume = require 'win-utils.disk.volume'
+    local guid = volume.find_guid_by_partition(idx, offset)
+    if not guid then return false end
+    
+    local kernel32 = require 'ffi.req' 'Windows.sdk.kernel32'
+    local ffi = require 'ffi'
+    local util = require 'win-utils.core.util'
+    
+    local path = util.to_wide(guid:sub(-1)=="\\" and guid or guid.."\\")
+    local fs_buf = ffi.new("wchar_t[261]")
+    
+    -- 尝试读取卷信息
+    if kernel32.GetVolumeInformationW(path, nil, 0, nil, nil, nil, fs_buf, 261) ~= 0 then
+        local detected = util.from_wide(fs_buf)
+        if detected and detected:upper() == expected_fs:upper() then
+            return true
+        end
+    end
+    return false
+end
+
 -- 格式化统一入口
 function M.format(idx, off, fs, lab, opts)
     opts = opts or {}
@@ -34,16 +57,26 @@ function M.format(idx, off, fs, lab, opts)
         local ok, f_err = fat32.format_raw(idx, off, lab)
         if ok then return true, "Lua FAT32" end
         -- 记录错误但继续尝试其他策略
-        -- print("Lua FAT32 failed: " .. tostring(f_err)) 
     end
     
     -- Strategy 2: VDS (Modern System API)
     -- 最稳健，无需分配盘符，支持所有文件系统
     local ok_vds, msg_vds = vds.format(idx, off, fs, lab, true, 0, 0)
-    if ok_vds then return true, "VDS" end
+    
+    -- [FIX] VDS "Ghost Success" Check
+    -- 即使 VDS 返回成功，也要验证文件系统是否真的就绪。如果 VDS 只是把卷标为了 RAW，我们需要回退。
+    if ok_vds then
+        if is_filesystem_ready(idx, off, fs) then
+            return true, "VDS"
+        else
+            -- VDS 说成功了，但卷还是 RAW，强制失败以触发 FMIFS 回退
+            ok_vds = false
+            msg_vds = "VDS succeeded but filesystem is RAW (Verification failed)"
+        end
+    end
     
     -- Strategy 3: Legacy (Mount + FMIFS)
-    -- 如果 VDS 失败（例如服务不可用），回退到传统的挂载+API格式化
+    -- 如果 VDS 失败（例如服务不可用，或出现上述幽灵成功），回退到传统的挂载+API格式化
     local letter = mount.temp_mount(idx, off)
     if letter then
         local ok_fmifs, msg_fmifs = fmifs.format(letter, fs, lab)
