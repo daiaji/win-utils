@@ -168,6 +168,8 @@ function M.query_system_info(info_class, initial_size)
             if size > 64 * 1024 * 1024 then return nil, "Buffer overflow protection" end
             buf = ffi.new("uint8_t[?]", size)
         elseif status < 0 then
+            -- [DEBUG] Print error code to stdout for diagnosis in CI
+            print(string.format("  [ERROR] NtQuerySystemInformation(%d) failed: 0x%08X", info_class, code))
             return nil, status
         else
             return buf, size, ret_len[0]

@@ -3,6 +3,7 @@ local ntdll = require 'ffi.req' 'Windows.sdk.ntdll'
 local kernel32 = require 'ffi.req' 'Windows.sdk.kernel32'
 local native = require 'win-utils.core.native'
 local util = require 'win-utils.core.util'
+local token = require 'win-utils.process.token'
 local table_new = require 'table.new'
 local table_ext = require 'ext.table'
 
@@ -26,8 +27,12 @@ end
 -- [RESTORED] 列出全系统所有句柄
 -- 这对于分析系统级问题、查找文件占用非常关键，无法被 Process-level API 替代
 function M.list_system()
+    -- [FIX] Explicitly enable SeDebugPrivilege. 
+    -- Even admins need this enabled to query system-wide handles.
+    token.enable_privilege("SeDebugPrivilege")
+
     -- SystemExtendedHandleInformation = 64
-    local buf = native.query_system_info(64, 1024*1024)
+    local buf = native.query_system_info(64, 4 * 1024 * 1024) -- Start with 4MB buffer
     if not buf then return {} end
     
     local info = ffi.cast("SYSTEM_HANDLE_INFORMATION_EX*", buf)
