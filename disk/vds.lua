@@ -16,7 +16,6 @@ function VdsContext:init()
     ole32.CoInitializeEx(nil, 0)
     local ld = ffi.new("void*[1]")
     local hr = ole32.CoCreateInstance(vds_sdk.CLSID_VdsLoader, nil, 0x17, vds_sdk.IID_IVdsServiceLoader, ld)
-    
     if hr >= 0 then
         self.loader = ffi.cast("IVdsServiceLoader*", ld[0])
         local svc = ffi.new("IVdsService*[1]")
@@ -35,8 +34,17 @@ function VdsContext:close()
     ole32.CoUninitialize()
 end
 
+-- [NEW] 强制刷新 VDS 缓存
+function VdsContext:refresh()
+    if self.service then 
+        self.service.lpVtbl.Refresh(self.service) 
+        self.service.lpVtbl.WaitForServiceReady(self.service)
+    end
+end
+
 function VdsContext:get_disk(idx)
     if not self.service then return nil end
+    -- 这里不需要 Refresh，调用者负责时机
     local target = util.to_wide(string.format("\\\\?\\PhysicalDrive%d", idx))
     local enum = ffi.new("IEnumVdsObject*[1]")
     if self.service.lpVtbl.QueryProviders(self.service, 1, enum) < 0 then return nil end
@@ -45,6 +53,7 @@ function VdsContext:get_disk(idx)
     local unk = ffi.new("IUnknown*[1]")
     local n = ffi.new("ULONG[1]")
     
+    -- (Standard Traversal ...)
     while not found and enum[0].lpVtbl.Next(enum[0], 1, unk, n) == 0 and n[0] > 0 do
         local prov = ffi.new("IVdsProvider*[1]")
         if unk[0].lpVtbl.QueryInterface(unk[0], vds_sdk.IID_IVdsProvider, ffi.cast("void**", prov)) == 0 then
@@ -151,8 +160,11 @@ function M.create_partition(idx, offset, size, params)
 end
 
 function M.format(idx, offset, fs, label, quick, cluster, rev)
-    local guid = volume_lib.find_guid_by_partition(idx, offset)
-    if not guid then return false, "Volume GUID not found for partition" end
+    -- [Modified] 智能等待 Volume GUID 出现
+    -- 这解决了混合使用 Layout(IOCTL) 创建和 VDS 格式化时的竞态条件
+    local guid, err = volume_lib.wait_for_partition(idx, offset, 15000) -- 等待 15秒
+    if not guid then return false, "Volume not found (Timeout): " .. tostring(err) end
+    
     local wguid = util.to_wide(guid:sub(-1)=="\\" and guid or guid.."\\")
     
     local ctx = VdsContext()
@@ -161,6 +173,9 @@ function M.format(idx, offset, fs, label, quick, cluster, rev)
         ctx:close()
         return false, err 
     end
+    
+    -- [Modified] 主动刷新 VDS 缓存，确保它能看到新生成的 Volume
+    ctx:refresh()
     
     local disk = ctx:get_disk(idx)
     if not disk then ctx:close(); return false, "Disk object not found" end

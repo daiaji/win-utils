@@ -133,6 +133,45 @@ function TestDisk:test_04_Image_Ops()
     os.remove(dump_path)
 end
 
+function TestDisk:test_05_Volume_List()
+    local vols, err = win.disk.volume.list()
+    lu.assertNotNil(vols, "Vol list failed: " .. tostring(err))
+    lu.assertTrue(#vols > 0)
+    
+    local found_c = false
+    for _, v in ipairs(vols) do
+        lu.assertIsString(v.guid_path)
+        -- 打印信息以便调试
+        -- print("  Volume: " .. v.guid_path .. " (" .. (v.label or "") .. ")")
+        for _, mp in ipairs(v.mount_points) do
+            if mp:match("^[Cc]:") then found_c = true end
+        end
+    end
+    lu.assertTrue(found_c, "C: drive volume should be listed")
+end
+
+function TestDisk:test_06_Surface_Scan_API()
+    -- 验证 API 存在性及基本调用（不进行实际长时间扫描）
+    lu.assertNotNil(win.disk.surface)
+    lu.assertIsFunction(win.disk.surface.scan)
+    
+    -- 如果有管理员权限，对 VHD 进行一个微小的扫描测试
+    if self.is_admin then
+        local h = win.disk.vhd.create(self.temp_vhd, 4 * 1024 * 1024)
+        win.disk.vhd.attach(h)
+        self.vhd_handle = h
+        
+        local phys_path = win.disk.vhd.wait_for_physical_path(h)
+        local idx = tonumber(phys_path:match("PhysicalDrive(%d+)"))
+        local drive = win.disk.physical.open(idx, "rw", true)
+        
+        local ok, msg = win.disk.surface.scan(drive, nil, "write", {0x55})
+        lu.assertTrue(ok, "Surface scan API test failed: " .. tostring(msg))
+        
+        drive:close()
+    end
+end
+
 -- =============================================================================
 -- [Integration Test] VHD 全链路测试
 -- =============================================================================
@@ -179,8 +218,6 @@ function TestDisk:test_99_VHD_Full_Chain()
     lu.assertEquals(#sector_0, 512)
     
     -- B. 表面扫描 (Badblocks 模拟)
-    -- 对前 10MB 进行 0x55, 0xAA 图案读写测试
-    -- 这验证了底层 win.disk.surface 模块和 IOCTL 读写逻辑
     local scan_ok, scan_msg = win.disk.surface.scan(drive, function(p) return true end, "write", { 0x55, 0xAA })
     lu.assertTrue(scan_ok, "Surface scan failed: " .. tostring(scan_msg))
 
@@ -225,14 +262,11 @@ function TestDisk:test_99_VHD_Full_Chain()
     -- 关闭句柄，让系统刷新分区并创建卷设备
     drive:close()
     
-    -- 等待 PnP 识别
-    print("        Waiting for PnP volume arrival...")
-    kernel32.Sleep(2000)
-
     -- [Step 7] 格式化 (VDS Automation)
     print("  [5/9] Formatting Partitions...")
     
     -- Format NTFS (Partition 2)
+    -- 注意：这里使用内部的智能等待，不再需要外部 Sleep
     local ok_fmt1, err_fmt1 = win.disk.format.format(drive_index, 101 * ONE_MB, "NTFS", "TEST_NTFS")
     lu.assertTrue(ok_fmt1, "Format NTFS failed: " .. tostring(err_fmt1))
     
