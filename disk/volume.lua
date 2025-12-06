@@ -146,9 +146,7 @@ function M.assign(idx, offset, letter)
     local guid_path, err = M.wait_for_partition(idx, offset, 15000)
     if not guid_path then return false, "Volume not found: " .. tostring(err) end
     
-    -- [OPTIMIZATION] Check if already mounted
-    -- 如果系统已经自动分配了盘符，直接返回该盘符，避免重复操作报错
-    -- 注意：如果调用者指定了特定 letter，则跳过此检查，强制尝试挂载到指定盘符
+    -- Check if already mounted
     if not letter then
         local buf = ffi.new("wchar_t[1024]")
         local len = ffi.new("DWORD[1]")
@@ -180,12 +178,12 @@ function M.assign(idx, offset, letter)
         if mount_point:sub(-1) ~= "\\" then mount_point = mount_point .. "\\" end
         if guid_path:sub(-1) ~= "\\" then guid_path = guid_path .. "\\" end
         
-        -- [FIX] 防御性清理
+        -- [DEBUG] 打印最终参数，确认语法
+        print(string.format("    [DEBUG] Assigning: Mount='%s' Volume='%s'", mount_point, guid_path))
+        
+        -- 防御性清理
         local raw_letter = mount_point:sub(1, 2)
-        -- 清理 Legacy DOS Device
         kernel32.DefineDosDeviceW(2, util.to_wide(raw_letter), nil) 
-        -- 清理 Mount Manager (如果有残留)
-        -- 注意：DeleteVolumeMountPointW 需要带反斜杠
         kernel32.DeleteVolumeMountPointW(util.to_wide(mount_point))
         
         -- 3. 尝试挂载 (带重试)

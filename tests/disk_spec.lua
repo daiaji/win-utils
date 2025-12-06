@@ -324,10 +324,19 @@ function TestDisk:test_VHD_Integrated_Lifecycle()
     local function verify_io(path, name)
         local p = path .. "test_io.txt"
         
-        -- [CRITICAL] 这个写入操作会强制 Windows 内核挂载文件系统
-        -- 如果不先做这步，直接查卷标可能会因为卷未就绪而拿到空值
-        local f = io.open(p, "w")
-        lu.assertNotNil(f, name.." write open failed")
+        -- [FIX] Retry loop for initial IO
+        -- 刚挂载的卷可能还没被系统完全识别，尝试写入可能会报 "device not ready"
+        -- 重试 10 次，每次间隔 500ms
+        local f, err
+        for i=1, 10 do
+            f, err = io.open(p, "w")
+            if f then break end
+            kernel32.Sleep(500)
+        end
+        
+        -- [Debug] 打印具体的错误信息，方便排查
+        lu.assertNotNil(f, string.format("%s write open failed: %s", name, tostring(err)))
+        
         f:write("hello " .. name)
         f:close()
         
@@ -367,7 +376,6 @@ function TestDisk:test_VHD_Integrated_Lifecycle()
         if found_l1 and found_l2 then break end
         
         if i == 15 then
-            -- Debug print on final failure
             print(string.format("    Debug: Retry %d failed. Found NTFS=%s, FAT=%s", i, tostring(found_l1), tostring(found_l2)))
         end
         kernel32.Sleep(500)
