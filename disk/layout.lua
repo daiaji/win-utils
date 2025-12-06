@@ -19,7 +19,11 @@ end
 local function set_raw(d, l, sz)
     local ok, err = d:ioctl(defs.IOCTL.SET_LAYOUT, l, sz)
     if not ok then return false, err end
+    
+    -- [Rufus Strategy] 强制刷新
     d:ioctl(defs.IOCTL.UPDATE)
+    if d.refresh then d:refresh() end 
+    
     return true
 end
 
@@ -59,7 +63,10 @@ function M.apply(d, scheme, parts)
     
     local ok, err = d:ioctl(defs.IOCTL.CREATE, cr)
     if not ok then return false, "CreateDisk failed: " .. tostring(err) end
+    
+    -- [Rufus Strategy] 初始化后刷新
     d:ioctl(defs.IOCTL.UPDATE)
+    if d.refresh then d:refresh() end
     
     l.PartitionStyle = cr.PartitionStyle
     l.PartitionCount = #parts
@@ -80,7 +87,6 @@ function M.apply(d, scheme, parts)
         e.PartitionNumber = i
         e.RewritePartition = 1
         if scheme=="GPT" then
-            -- [FIX] Check for missing type to prevent nil dereference
             if not p.gpt_type then return false, "Partition " .. i .. " missing gpt_type" end
             e.Gpt.PartitionType = util.guid_from_str(p.gpt_type)
             ole32.CoCreateGuid(e.Gpt.PartitionId)

@@ -17,7 +17,6 @@ function PhysicalDrive:init(index, mode, exclusive)
     self.path = type(index) == "number" and ("\\\\.\\PhysicalDrive" .. index) or index
     self.index = type(index) == "number" and index or nil
     
-    -- native.open_device_robust 已返回 nil, err
     local h, err = native.open_device_robust(self.path, mode, exclusive)
     if not h then error("PhysicalDrive open failed: " .. tostring(err)) end
     
@@ -40,7 +39,6 @@ function PhysicalDrive:close()
 end
 
 function PhysicalDrive:ioctl(code, in_obj, in_size, out_type, out_size)
-    -- util.ioctl 现在返回 (result, bytes) 或 (nil, msg, code)
     return util.ioctl(self.handle, code, in_obj, in_size, out_type, out_size)
 end
 
@@ -52,62 +50,41 @@ function PhysicalDrive:update_geometry()
     end
 end
 
+function PhysicalDrive:refresh()
+    local ok, err = self:ioctl(defs.IOCTL.UPDATE)
+    return ok
+end
+
 function PhysicalDrive:lock(force)
-    -- FSCTL_ALLOW_EXTENDED_DASD_IO
-    -- [Note] 物理磁盘句柄通常不需要此操作，或者不支持 (Error 87/1)。
-    -- 只有“拒绝访问(5)”才是真正的阻断性错误。
     local ok, err, code = self:ioctl(defs.IOCTL.DASD)
-    if not ok then 
-        local c = tonumber(code)
-        if c == 5 then -- Access Denied
-            return false, "DASD IOCTL Access Denied: " .. tostring(err)
-        end
-        -- Ignore 87 (Invalid Parameter), 1 (Invalid Function), 50 (Not Supported)
+    if not ok and tonumber(code) == 5 then 
+        return false, "DASD Access Denied: " .. tostring(err)
     end
     
     local attempts = 0
-    local max_attempts = 150
-    local err_msg
+    local max_attempts = 50 
     
     ::retry::
     attempts = attempts + 1
     
-    -- FSCTL_LOCK_VOLUME
     local l_ok, l_err, l_code = self:ioctl(defs.IOCTL.LOCK)
-    if l_ok then
+    if l_ok or l_code == 87 or l_code == 1 or l_code == 50 then
         self.is_locked = true
         return true
-    else
-        -- [Note] 物理磁盘锁定失败常见原因：
-        -- 5: Access Denied (有文件打开)
-        -- 32: Sharing Violation
-        -- 如果返回 87/1/50，说明该句柄类型不支持锁定命令，但既然我们已独占打开，
-        -- 就可以认为已隐式锁定。
-        local lc = tonumber(l_code)
-        if lc == 87 or lc == 1 or lc == 50 then 
-             self.is_locked = true
-             return true
-        end
-        err_msg = l_err
     end
     
     if attempts >= max_attempts then
-        err_msg = util.last_error("Lock Volume Timeout (Last: " .. tostring(err_msg) .. ")")
-        goto fail
+        return false, "Lock Timeout: " .. tostring(l_err)
     end
     
-    if (force and (attempts % 20 == 0)) or (attempts == 50) then
+    if force and (attempts % 10 == 0) then
         local pids = proc_handles.find_lockers(self.path)
         for _, pid in ipairs(pids) do proc.terminate(pid) end
-        if #pids > 0 then kernel32.Sleep(500) end
     end
     
     self:ioctl(defs.IOCTL.DISMOUNT)
     kernel32.Sleep(100)
     goto retry
-    
-    ::fail::
-    return false, err_msg
 end
 
 function PhysicalDrive:unlock()
@@ -128,10 +105,7 @@ function PhysicalDrive:wipe_zero(progress_cb)
     local li = ffi.new("LARGE_INTEGER")
     
     li.QuadPart = 0
-    if kernel32.SetFilePointerEx(self.handle, li, nil, 0) == 0 then
-        kernel32.VirtualFree(buf, 0, 0x8000)
-        return false, util.last_error("Seek failed")
-    end
+    kernel32.SetFilePointerEx(self.handle, li, nil, 0)
     
     local ok = true
     local err = nil
@@ -153,34 +127,30 @@ function PhysicalDrive:wipe_zero(progress_cb)
     end
     
     kernel32.VirtualFree(buf, 0, 0x8000)
+    self:refresh()
     return ok, err
 end
 
 function PhysicalDrive:wipe_layout()
-    local wipe_size = 8 * 1024 * 1024
+    local wipe_size = 1024 * 1024
     local written = ffi.new("DWORD[1]")
     local buf = kernel32.VirtualAlloc(nil, wipe_size, 0x1000, 0x04)
     if not buf then return false, "Alloc failed" end
     
-    local ok = true
     local li = ffi.new("LARGE_INTEGER")
-    
     li.QuadPart = 0
-    if kernel32.SetFilePointerEx(self.handle, li, nil, 0) == 0 or 
-       kernel32.WriteFile(self.handle, buf, wipe_size, written, nil) == 0 then
-        ok = false
-    end
+    kernel32.SetFilePointerEx(self.handle, li, nil, 0)
+    kernel32.WriteFile(self.handle, buf, wipe_size, written, nil)
     
-    if ok and self.size > wipe_size then
-        local end_wipe = 1024 * 1024 
-        li.QuadPart = math.floor((self.size - end_wipe) / self.sector_size) * self.sector_size
-        if kernel32.SetFilePointerEx(self.handle, li, nil, 0) ~= 0 then
-            kernel32.WriteFile(self.handle, buf, end_wipe, written, nil)
-        end
+    if self.size > wipe_size then
+        li.QuadPart = math.floor((self.size - wipe_size) / self.sector_size) * self.sector_size
+        kernel32.SetFilePointerEx(self.handle, li, nil, 0)
+        kernel32.WriteFile(self.handle, buf, wipe_size, written, nil)
     end
     
     kernel32.VirtualFree(buf, 0, 0x8000)
-    return ok
+    self:refresh()
+    return true
 end
 
 function PhysicalDrive:get_attributes()
@@ -195,101 +165,78 @@ function PhysicalDrive:set_attributes(attrs)
     set_attr.Version = ffi.sizeof(set_attr); set_attr.Persist = 1
     local mask, val = 0, 0
     if attrs.read_only ~= nil then 
-        mask = bit.bor(mask, 2)
-        if attrs.read_only then val = bit.bor(val, 2) end 
+        mask = bit.bor(mask, 2); if attrs.read_only then val = bit.bor(val, 2) end 
     end
     if attrs.offline ~= nil then 
-        mask = bit.bor(mask, 1)
-        if attrs.offline then val = bit.bor(val, 1) end 
+        mask = bit.bor(mask, 1); if attrs.offline then val = bit.bor(val, 1) end 
     end
     set_attr.AttributesMask = mask; set_attr.Attributes = val
     
     local ok, err = self:ioctl(defs.IOCTL.SET_ATTRIBUTES, set_attr)
     if not ok then return false, err end
-    
-    self:ioctl(defs.IOCTL.UPDATE)
+    self:refresh()
     return true
 end
 
--- [Optimized] 写入数据
 function PhysicalDrive:write(offset, data, len)
     if offset % self.sector_size ~= 0 then return false, "Offset not aligned" end
-    
     local ptr, raw_size
-    if type(data) == "string" then
-        ptr = ffi.cast("const void*", data)
-        raw_size = #data
-    else
-        ptr = data
-        raw_size = len or error("Length required for cdata")
-    end
-    
+    if type(data) == "string" then ptr = ffi.cast("const void*", data); raw_size = #data
+    else ptr = data; raw_size = len end
     local padding = 0
-    if raw_size % self.sector_size ~= 0 then 
-        padding = self.sector_size - (raw_size % self.sector_size) 
-    end
-    
+    if raw_size % self.sector_size ~= 0 then padding = self.sector_size - (raw_size % self.sector_size) end
     local aligned_size = raw_size + padding
     local buf = kernel32.VirtualAlloc(nil, aligned_size, 0x1000, 0x04)
     if not buf then return false, "Alloc failed" end
-    
     ffi.copy(buf, ptr, raw_size)
     if padding > 0 then ffi.fill(ffi.cast("uint8_t*", buf) + raw_size, padding, 0) end
-    
     local li = ffi.new("LARGE_INTEGER"); li.QuadPart = offset
-    local ok = false
-    local msg
-    
+    local ok = false; local msg
     if kernel32.SetFilePointerEx(self.handle, li, nil, 0) ~= 0 then
         local w = ffi.new("DWORD[1]")
-        if kernel32.WriteFile(self.handle, buf, aligned_size, w, nil) ~= 0 then
-            ok = true
-        else
-            msg = util.last_error("WriteFile failed")
-        end
-    else
-        msg = util.last_error("Seek failed")
-    end
-    
+        if kernel32.WriteFile(self.handle, buf, aligned_size, w, nil) ~= 0 then ok = true
+        else msg = util.last_error("WriteFile failed") end
+    else msg = util.last_error("Seek failed") end
     kernel32.VirtualFree(buf, 0, 0x8000)
     return ok, msg
 end
-
 PhysicalDrive.write_sectors = PhysicalDrive.write
 
 function PhysicalDrive:read(offset, size)
     if offset % self.sector_size ~= 0 then return nil, "Offset not aligned" end
-    
     local aligned_size = size
-    if size % self.sector_size ~= 0 then 
-        aligned_size = math.ceil(size / self.sector_size) * self.sector_size 
-    end
-    
+    if size % self.sector_size ~= 0 then aligned_size = math.ceil(size / self.sector_size) * self.sector_size end
     local buf = kernel32.VirtualAlloc(nil, aligned_size, 0x1000, 0x04)
     if not buf then return nil, "Alloc failed" end
-    
     local li = ffi.new("LARGE_INTEGER"); li.QuadPart = offset
-    local res = nil
-    local err
-    
+    local res = nil; local err
     if kernel32.SetFilePointerEx(self.handle, li, nil, 0) ~= 0 then
         local r = ffi.new("DWORD[1]")
         if kernel32.ReadFile(self.handle, buf, aligned_size, r, nil) ~= 0 then
             res = ffi.string(buf, math.min(size, r[0]))
-        else
-            err = util.last_error("ReadFile failed")
-        end
-    else
-        err = util.last_error("Seek failed")
-    end
-    
+        else err = util.last_error("ReadFile failed") end
+    else err = util.last_error("Seek failed") end
     kernel32.VirtualFree(buf, 0, 0x8000)
     return res, err
 end
-
 PhysicalDrive.read_sectors = PhysicalDrive.read
 
--- [Helper] 获取设备描述信息
+-- [Rufus Port] Helper to robustly get drive index
+local function get_drive_index(h)
+    -- Strategy 1: IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS (Preferred by Rufus for external drives)
+    local ext = util.ioctl(h, defs.IOCTL.GET_VOL_EXTENTS, nil, 0, "VOLUME_DISK_EXTENTS")
+    if ext and ext.NumberOfDiskExtents > 0 then
+        if ext.NumberOfDiskExtents > 1 then return -2 end -- RAID/Spanned (Ignore)
+        return tonumber(ext.Extents[0].DiskNumber)
+    end
+    
+    -- Strategy 2: IOCTL_STORAGE_GET_DEVICE_NUMBER (Fallback)
+    local num = util.ioctl(h, defs.IOCTL.GET_NUM, nil, 0, "STORAGE_DEVICE_NUMBER")
+    if num then return tonumber(num.DeviceNumber) end
+    
+    return -1
+end
+
 local function get_desc(h)
     local q = ffi.new("STORAGE_PROPERTY_QUERY"); q.PropertyId = 0; q.QueryType = 0
     local hdr = util.ioctl(h, defs.IOCTL.QUERY_PROP, q, nil, "STORAGE_DESCRIPTOR_HEADER")
@@ -309,38 +256,29 @@ function PhysicalDrive.list()
     local drives = table_new(4, 0)
     local hInfo = setupapi.SetupDiGetClassDevsW(GUID_DISK, nil, nil, 0x12)
     if hInfo == ffi.cast("HANDLE", -1) then return drives end
-    
     local dev = ffi.new("SP_DEVINFO_DATA"); dev.cbSize = ffi.sizeof(dev)
     local iface = ffi.new("SP_DEVICE_INTERFACE_DATA"); iface.cbSize = ffi.sizeof(iface)
-    local i = 0
-    
-    local req = ffi.new("DWORD[1]")
+    local i = 0; local req = ffi.new("DWORD[1]")
     local buf, det, h, num, geo
-    
     ::next_dev::
     if setupapi.SetupDiEnumDeviceInfo(hInfo, i, dev) == 0 then goto done end
-    if setupapi.SetupDiEnumDeviceInterfaces(hInfo, dev, GUID_DISK, 0, iface) == 0 then
-        i = i + 1; goto next_dev
-    end
-    
+    if setupapi.SetupDiEnumDeviceInterfaces(hInfo, dev, GUID_DISK, 0, iface) == 0 then i=i+1; goto next_dev end
     setupapi.SetupDiGetDeviceInterfaceDetailW(hInfo, iface, nil, 0, req, nil)
-    if req[0] == 0 then i = i + 1; goto next_dev end
-    
+    if req[0] == 0 then i=i+1; goto next_dev end
     buf = ffi.new("uint8_t[?]", req[0])
-    det = ffi.cast("PSP_DEVICE_INTERFACE_DETAIL_DATA_W", buf)
-    det.cbSize = ffi.sizeof("SP_DEVICE_INTERFACE_DETAIL_DATA_W")
-    
+    det = ffi.cast("PSP_DEVICE_INTERFACE_DETAIL_DATA_W", buf); det.cbSize = ffi.sizeof("SP_DEVICE_INTERFACE_DETAIL_DATA_W")
     if setupapi.SetupDiGetDeviceInterfaceDetailW(hInfo, iface, det, req[0], nil, nil) ~= 0 then
         h = kernel32.CreateFileW(det.DevicePath, 0, 3, nil, 3, 0, nil)
         if h ~= ffi.cast("HANDLE", -1) then
-            num = util.ioctl(h, defs.IOCTL.GET_NUM, nil, 0, "STORAGE_DEVICE_NUMBER")
-            if num then
+            -- [FIX] Use robust drive index logic ported from Rufus
+            local idx = get_drive_index(h)
+            if idx >= 0 then
                 geo = util.ioctl(h, defs.IOCTL.GET_GEO, nil, 0, "DISK_GEOMETRY_EX")
                 if geo then
                     local desc = get_desc(h)
                     table.insert(drives, {
-                        index = tonumber(num.DeviceNumber),
-                        path = "\\\\.\\PhysicalDrive"..tonumber(num.DeviceNumber),
+                        index = idx,
+                        path = "\\\\.\\PhysicalDrive"..idx,
                         model = (desc and desc.product) and (desc.vendor and desc.vendor.." " or "")..desc.product or "Generic Disk",
                         size = tonumber(geo.DiskSize.QuadPart),
                         sector_size = tonumber(geo.Geometry.BytesPerSector),
@@ -351,16 +289,13 @@ function PhysicalDrive.list()
             kernel32.CloseHandle(h)
         end
     end
-    i = i + 1
-    goto next_dev
-    
+    i = i + 1; goto next_dev
     ::done::
     setupapi.SetupDiDestroyDeviceInfoList(hInfo)
     return drives
 end
 
 local M = {}
--- [API] Open Wrapper with PCall protection for constructor
 function M.open(idx, mode, excl)
     local ok, res = pcall(function() return PhysicalDrive(idx, mode, excl) end)
     if not ok then return nil, res end
