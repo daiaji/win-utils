@@ -110,7 +110,9 @@ function M.assign(idx, offset, letter)
     local mount_point = letter or M.find_free_letter()
     if not mount_point then return false, "No free letters" end
     
-    if #mount_point == 2 then mount_point = mount_point .. "\\" end
+    -- [FIX] Ensure trailing backslashes explicitly to avoid Error 87
+    if mount_point:sub(-1) ~= "\\" then mount_point = mount_point .. "\\" end
+    if guid_path:sub(-1) ~= "\\" then guid_path = guid_path .. "\\" end
     
     if kernel32.SetVolumeMountPointW(util.to_wide(mount_point), util.to_wide(guid_path)) == 0 then
         return false, util.last_error("SetVolumeMountPoint failed")
