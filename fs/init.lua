@@ -6,7 +6,6 @@ local ntdll = require 'ffi.req' 'Windows.sdk.ntdll'
 local util = require 'win-utils.core.util'
 local native = require 'win-utils.core.native'
 
--- [Lazy Load] 避免循环依赖
 local function get_ntfs() return require 'win-utils.fs.ntfs' end
 local function get_raw() return require 'win-utils.fs.raw' end
 
@@ -15,8 +14,7 @@ local M = {}
 local sub_modules = {
     native = 'win-utils.fs.raw',
     ntfs   = 'win-utils.fs.ntfs',
-    path   = 'win-utils.fs.path',
-    -- [REMOVED] acl is explicitly excluded for PE environment
+    path   = 'win-utils.fs.path'
 }
 
 setmetatable(M, {
@@ -31,13 +29,11 @@ setmetatable(M, {
     end
 })
 
--- 常量定义
 local FILE_ATTRIBUTE_DIRECTORY     = 0x10
 local FILE_ATTRIBUTE_REPARSE_POINT = 0x400
 local FILE_ATTRIBUTE_READONLY      = 0x01
 local INVALID_FILE_ATTRIBUTES      = 0xFFFFFFFF
 
--- [Internal] Native Directory Iterator
 local function scandir_native(path)
     local h, err = native.open_file(path, "r", true) 
     if not h then return function() end end
@@ -80,11 +76,7 @@ end
 local function is_link(attr) return bit.band(attr, FILE_ATTRIBUTE_REPARSE_POINT) ~= 0 end
 local function is_dir(attr) return bit.band(attr, FILE_ATTRIBUTE_DIRECTORY) ~= 0 end
 
--- ========================================================================
--- Coreutils: Operations
--- ========================================================================
-
--- [mkdir -p]
+-- [API] 创建目录 (递归)
 function M.mkdir(path, opts)
     opts = opts or {}
     local make_parents = opts.parents or opts.p
@@ -120,7 +112,7 @@ function M.mkdir(path, opts)
     return true
 end
 
--- [cp -r]
+-- [Internal] 递归拷贝
 local function cp_r(src, dst, opts)
     opts = opts or {}
     local raw = get_raw()
@@ -128,7 +120,6 @@ local function cp_r(src, dst, opts)
     if not src_info then return false, "Source inaccessible" end
     local attr = src_info.attr
     
-    -- Symlink (No Dereference)
     if is_link(attr) then
         local ntfs = get_ntfs()
         local target, type = ntfs.read_link(src)
@@ -138,9 +129,7 @@ local function cp_r(src, dst, opts)
         return false, "Read link failed"
     end
     
-    -- Directory
     if is_dir(attr) then
-        -- Loop detection
         local src_norm = util.normalize_path(src):lower()
         local dst_norm = util.normalize_path(dst):lower()
         if dst_norm:find(src_norm, 1, true) == 1 then
@@ -163,17 +152,15 @@ local function cp_r(src, dst, opts)
         return true
     end
     
-    -- File
     local r = kernel32.CopyFileW(util.to_wide(src), util.to_wide(dst), opts.no_clobber and 1 or 0)
     if r == 0 then return false, util.last_error() end
-    
-    -- Attributes are copied by CopyFileW automatically.
     return true
 end
 
+-- [API] 拷贝文件/目录
 function M.copy(src, dst, opts) return cp_r(src, dst, opts or {}) end
 
--- [rm -rf]
+-- [Internal] 递归删除
 local function rm_rf(path)
     local raw = get_raw()
     local attr = kernel32.GetFileAttributesW(util.to_wide(path))
@@ -201,10 +188,10 @@ local function rm_rf(path)
     return true
 end
 
+-- [API] 删除文件/目录
 function M.delete(path) return rm_rf(path) end
-function M.recycle(path) return rm_rf(path) end
 
--- [mv]
+-- [API] 移动文件
 function M.move(src, dst, opts)
     opts = opts or {}
     local flags = 10 -- COPY_ALLOWED | WRITE_THROUGH
@@ -221,12 +208,8 @@ function M.move(src, dst, opts)
     return false, util.last_error()
 end
 
--- ========================================================================
--- Advanced Tools
--- ========================================================================
-
--- [df] Disk Free
-function M.df(path)
+-- [API] 获取磁盘空间信息 (原 df)
+function M.get_space_info(path)
     local wpath = util.to_wide(path or ".")
     local free_user = ffi.new("ULARGE_INTEGER")
     local total = ffi.new("ULARGE_INTEGER")
@@ -247,8 +230,8 @@ function M.df(path)
     }
 end
 
--- [du] Disk Usage
-function M.du(path, opts)
+-- [API] 获取目录大小/使用量 (原 du)
+function M.get_usage_info(path, opts)
     opts = opts or {}
     local raw = get_raw()
     local stats = { size = 0, disk_usage = 0, files = 0, dirs = 0, seen = {} }
@@ -257,7 +240,6 @@ function M.du(path, opts)
         local info, err = raw.get_file_info(p)
         if not info then return end
         
-        -- Deduplication
         local id = string.format("%d:%s", info.vol_serial, tostring(info.file_index))
         if stats.seen[id] then return end
         stats.seen[id] = true
@@ -265,14 +247,11 @@ function M.du(path, opts)
         if is_dir(info.attr) then
             stats.dirs = stats.dirs + 1
             if not is_link(info.attr) then 
-                for name in scandir_native(p) do
-                    recurse(p .. "\\" .. name)
-                end
+                for name in scandir_native(p) do recurse(p .. "\\" .. name) end
             end
         else
             stats.files = stats.files + 1
             stats.size = stats.size + tonumber(info.size)
-            
             if opts.apparent_size then
                 stats.disk_usage = stats.disk_usage + tonumber(info.size)
             else
@@ -287,7 +266,7 @@ function M.du(path, opts)
     return stats
 end
 
--- [find] Iterator
+-- [API] 查找文件 (Iterator)
 function M.find(path, opts)
     opts = opts or {}
     path = util.normalize_path(path)
@@ -321,8 +300,8 @@ function M.find(path, opts)
     end
 end
 
--- [shred] Secure Delete
-function M.shred(path, opts)
+-- [API] 安全擦除文件 (原 shred)
+function M.wipe(path, opts)
     opts = opts or {}
     local passes = opts.passes or 3
     local h = native.open_file(path, "w", "exclusive")
@@ -354,7 +333,7 @@ function M.shred(path, opts)
     return M.delete(path)
 end
 
--- [ln] Unified Link
+-- [API] 创建链接
 function M.link(target, linkname, opts)
     opts = opts or {}
     local ntfs = get_ntfs()
@@ -369,18 +348,8 @@ function M.link(target, linkname, opts)
     end
 end
 
--- [stat]
-function M.stat(path)
-    local raw = get_raw()
-    local info, err = raw.get_file_info(path)
-    if not info then return nil, err end
-    info.is_dir = is_dir(info.attr)
-    info.is_link = is_link(info.attr)
-    return info
-end
-
--- [touch]
-function M.touch(path)
+-- [API] 更新时间戳 (原 touch)
+function M.update_timestamps(path)
     local h = kernel32.CreateFileW(util.to_wide(path), bit.bor(0x80000000, 0x40000000), 0, nil, 4, 0x80, nil)
     if h == ffi.cast("HANDLE", -1) then return false, util.last_error() end
     local t = ffi.new("FILETIME")
@@ -390,11 +359,18 @@ function M.touch(path)
     return true
 end
 
--- Basic Queries
+-- [API] 基础查询
 function M.exists(path) return kernel32.GetFileAttributesW(util.to_wide(path)) ~= INVALID_FILE_ATTRIBUTES end
 function M.is_dir(path) local a = kernel32.GetFileAttributesW(util.to_wide(path)); return a ~= -1 and is_dir(a) end
 function M.is_link(path) local a = kernel32.GetFileAttributesW(util.to_wide(path)); return a ~= -1 and is_link(a) end
-function M.get_version(path) return require('win-utils.fs.raw').get_version(path) end
 function M.scandir(path) return scandir_native(path) end
+function M.stat(path)
+    local raw = get_raw()
+    local info, err = raw.get_file_info(path)
+    if not info then return nil, err end
+    info.is_dir = is_dir(info.attr)
+    info.is_link = is_link(info.attr)
+    return info
+end
 
 return M

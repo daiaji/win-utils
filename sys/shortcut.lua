@@ -5,13 +5,12 @@ local util = require 'win-utils.core.util'
 
 local M = {}
 
--- opt: { target="...", args="...", dir="...", desc="..." }
-function M.create(path, opt)
-    -- 兼容旧接口：如果是字符串，则视为 target
-    local target = type(opt) == "string" and opt or opt.target
-    local args = type(opt) == "table" and opt.args or nil
-    local dir = type(opt) == "table" and opt.work_dir or nil
-    local desc = type(opt) == "table" and opt.desc or nil
+-- [API] 创建快捷方式 (.lnk)
+-- @param path: .lnk 文件路径
+-- @param opts: { target="...", args="...", work_dir="...", desc="...", icon="...", icon_idx=0, show=1 }
+function M.create(path, opts)
+    if type(opts) ~= "table" then return false, "Options table required" end
+    if not opts.target then return false, "Target required" end
 
     ole32.CoInitialize(nil)
     
@@ -22,10 +21,12 @@ function M.create(path, opt)
     local sl = ffi.cast("IShellLinkW*", ppObj[0])
     
     -- 设置属性
-    if target then sl.lpVtbl.SetPath(sl, util.to_wide(target)) end
-    if args then sl.lpVtbl.SetArguments(sl, util.to_wide(args)) end
-    if dir then sl.lpVtbl.SetWorkingDirectory(sl, util.to_wide(dir)) end
-    if desc then sl.lpVtbl.SetDescription(sl, util.to_wide(desc)) end
+    sl.lpVtbl.SetPath(sl, util.to_wide(opts.target))
+    if opts.args then sl.lpVtbl.SetArguments(sl, util.to_wide(opts.args)) end
+    if opts.work_dir then sl.lpVtbl.SetWorkingDirectory(sl, util.to_wide(opts.work_dir)) end
+    if opts.desc then sl.lpVtbl.SetDescription(sl, util.to_wide(opts.desc)) end
+    if opts.show then sl.lpVtbl.SetShowCmd(sl, opts.show) end
+    if opts.icon then sl.lpVtbl.SetIconLocation(sl, util.to_wide(opts.icon), opts.icon_idx or 0) end
     
     -- 保存
     local res = false

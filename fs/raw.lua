@@ -11,8 +11,7 @@ local C = require 'win-utils.core.ffi_defs'
 
 local M = {}
 
--- [NEW] 获取文件物理占用空间 (Allocated Size)
--- 能够正确处理 NTFS 压缩、稀疏文件
+-- 获取文件物理占用空间
 function M.get_physical_size(path)
     local high = ffi.new("DWORD[1]")
     local low = kernel32.GetCompressedFileSizeW(util.to_wide(path), high)
@@ -25,9 +24,8 @@ function M.get_physical_size(path)
     return high[0] * 4294967296 + low
 end
 
--- 获取文件底层信息 (Inode, Links, Serial)
+-- 获取文件信息
 function M.get_file_info(path)
-    -- 打开句柄，仅读取属性，允许共享读写删除
     local h, err = native.open_file(path, "r", true) 
     if not h then return nil, err end
     
@@ -41,7 +39,6 @@ function M.get_file_info(path)
         attr = info.dwFileAttributes,
         size = info.nFileSizeHigh * 4294967296 + info.nFileSizeLow,
         vol_serial = info.dwVolumeSerialNumber,
-        -- Windows "Inode" = FileIndex
         file_index = bit.bor(bit.lshift(info.nFileIndexHigh, 32), info.nFileIndexLow),
         nlink = info.nNumberOfLinks,
         ctime = info.ftCreationTime,
@@ -50,14 +47,14 @@ function M.get_file_info(path)
     }
 end
 
+-- POSIX 语义删除 (Delete-On-Close)
 function M.delete_posix(path)
-    -- Use "rd" (Read + Delete) access.
     local h, e = native.open_file(path, "rd", "exclusive")
     if not h then return false, e end
     
     local info = ffi.new("FILE_DISPOSITION_INFO_EX"); info.Flags = 0x13 -- Delete | Posix | IgnoreReadOnly
     local io = ffi.new("IO_STATUS_BLOCK")
-    local s = ntdll.NtSetInformationFile(h:get(), io, info, ffi.sizeof(info), 64) -- FileDispositionInformationEx
+    local s = ntdll.NtSetInformationFile(h:get(), io, info, ffi.sizeof(info), 64)
     h:close()
     return s >= 0
 end
@@ -71,7 +68,6 @@ function M.set_times(path, c, a, w)
     if not h then return false end
     
     local i = ffi.new("FILE_BASIC_INFORMATION")
-    -- 0 means do not change
     if c then i.CreationTime = c end
     if a then i.LastAccessTime = a end
     if w then i.LastWriteTime = w end

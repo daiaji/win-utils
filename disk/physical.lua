@@ -17,12 +17,8 @@ function PhysicalDrive:init(index, mode, exclusive)
     self.path = type(index) == "number" and ("\\\\.\\PhysicalDrive" .. index) or index
     self.index = type(index) == "number" and index or nil
     
-    -- [DECOUPLED] 调用 Core 层的健壮打开函数，包含 150 次重试
     local h, err = native.open_device_robust(self.path, mode, exclusive)
-    
-    if not h then 
-        error("PhysicalDrive open failed: " .. tostring(err)) 
-    end
+    if not h then error("PhysicalDrive open failed: " .. tostring(err)) end
     
     self.obj = h
     self.handle = h:get()
@@ -54,7 +50,6 @@ function PhysicalDrive:update_geometry()
     end
 end
 
--- [LOCKED] 锁定逻辑包含独立的重试和进程查杀策略，这是业务逻辑，保留在此
 function PhysicalDrive:lock(force)
     self:ioctl(defs.IOCTL.DASD)
     
@@ -75,18 +70,14 @@ function PhysicalDrive:lock(force)
         goto fail
     end
     
-    -- 在第 50 次尝试或每 20 次尝试（如果是强制模式）检查占用
     if (force and (attempts % 20 == 0)) or (attempts == 50) then
         local pids = proc_handles.find_lockers(self.path)
-        for _, pid in ipairs(pids) do 
-            proc.terminate(pid) 
-        end
+        for _, pid in ipairs(pids) do proc.terminate(pid) end
         if #pids > 0 then kernel32.Sleep(500) end
     end
     
     self:ioctl(defs.IOCTL.DISMOUNT)
     kernel32.Sleep(100)
-    
     goto retry
     
     ::fail::
@@ -97,8 +88,9 @@ function PhysicalDrive:unlock()
     if self.is_locked then self:ioctl(defs.IOCTL.UNLOCK); self.is_locked = false end
 end
 
-function PhysicalDrive:zero_fill(progress_cb)
-    local buf_size = 1024 * 1024 -- 1MB
+-- [API] 零填充
+function PhysicalDrive:wipe_zero(progress_cb)
+    local buf_size = 1024 * 1024
     local buf = kernel32.VirtualAlloc(nil, buf_size, 0x1000, 0x04)
     if not buf then return false, "Alloc failed" end
     
@@ -107,7 +99,6 @@ function PhysicalDrive:zero_fill(progress_cb)
     local written = ffi.new("DWORD[1]")
     local li = ffi.new("LARGE_INTEGER")
     
-    -- Seek to start
     li.QuadPart = 0
     if kernel32.SetFilePointerEx(self.handle, li, nil, 0) == 0 then
         kernel32.VirtualFree(buf, 0, 0x8000)
@@ -124,16 +115,12 @@ function PhysicalDrive:zero_fill(progress_cb)
         end
         
         if kernel32.WriteFile(self.handle, buf, chunk, written, nil) == 0 then
-            ok = false
-            err = util.last_error()
-            break
+            ok = false; err = util.last_error(); break
         end
         
         processed = processed + written[0]
         if progress_cb then
-            if not progress_cb(processed / total) then 
-                ok = false; err = "Cancelled"; break 
-            end
+            if not progress_cb(processed / total) then ok = false; err = "Cancelled"; break end
         end
     end
     
@@ -141,8 +128,9 @@ function PhysicalDrive:zero_fill(progress_cb)
     return ok, err
 end
 
+-- [API] 清除分区表 (头尾各 8MB)
 function PhysicalDrive:wipe_layout()
-    local wipe_size = 8 * 1024 * 1024 -- 8MB
+    local wipe_size = 8 * 1024 * 1024
     local written = ffi.new("DWORD[1]")
     local buf = kernel32.VirtualAlloc(nil, wipe_size, 0x1000, 0x04)
     if not buf then return false, "Alloc failed" end
@@ -150,14 +138,12 @@ function PhysicalDrive:wipe_layout()
     local ok = true
     local li = ffi.new("LARGE_INTEGER")
     
-    -- 1. Wipe Start
     li.QuadPart = 0
     if kernel32.SetFilePointerEx(self.handle, li, nil, 0) == 0 or 
        kernel32.WriteFile(self.handle, buf, wipe_size, written, nil) == 0 then
         ok = false
     end
     
-    -- 2. Wipe End
     if ok and self.size > wipe_size then
         local end_wipe = 1024 * 1024 
         li.QuadPart = math.floor((self.size - end_wipe) / self.sector_size) * self.sector_size
@@ -195,43 +181,81 @@ function PhysicalDrive:set_attributes(attrs)
     return true
 end
 
-function PhysicalDrive:write_sectors(offset, data)
-    local raw_size = #data
-    local padding = 0
+-- [Optimized] 写入数据
+-- data: string 或 cdata
+-- len: 如果 data 是 cdata，必须提供长度
+function PhysicalDrive:write(offset, data, len)
     if offset % self.sector_size ~= 0 then return false, "Offset not aligned" end
-    if raw_size % self.sector_size ~= 0 then padding = self.sector_size - (raw_size % self.sector_size) end
+    
+    local ptr, raw_size
+    if type(data) == "string" then
+        ptr = ffi.cast("const void*", data)
+        raw_size = #data
+    else
+        ptr = data
+        raw_size = len or error("Length required for cdata")
+    end
+    
+    local padding = 0
+    if raw_size % self.sector_size ~= 0 then 
+        padding = self.sector_size - (raw_size % self.sector_size) 
+    end
+    
     local aligned_size = raw_size + padding
+    
+    -- 如果需要 padding，必须分配新 buffer (不能修改传入的 const string)
+    -- 如果已对齐且是 cdata，可尝试直接写入? 不，物理驱动器写入通常要求 buffer 内存对齐 (VirtualAlloc)
+    -- 为了安全，统一分配对齐内存
     local buf = kernel32.VirtualAlloc(nil, aligned_size, 0x1000, 0x04)
-    if not buf then return false end
-    ffi.copy(buf, data, raw_size)
-    if padding > 0 then ffi.fill(ffi.cast("uint8_t*", buf) + raw_size, padding, 0) end
+    if not buf then return false, "Alloc failed" end
+    
+    ffi.copy(buf, ptr, raw_size)
+    if padding > 0 then 
+        ffi.fill(ffi.cast("uint8_t*", buf) + raw_size, padding, 0) 
+    end
+    
     local li = ffi.new("LARGE_INTEGER"); li.QuadPart = offset
     local ok = false
+    
     if kernel32.SetFilePointerEx(self.handle, li, nil, 0) ~= 0 then
         local w = ffi.new("DWORD[1]")
         ok = (kernel32.WriteFile(self.handle, buf, aligned_size, w, nil) ~= 0)
     end
+    
     kernel32.VirtualFree(buf, 0, 0x8000)
-    return ok
+    return ok, (not ok) and util.last_error() or nil
 end
 
-function PhysicalDrive:read_sectors(offset, size)
+-- [Standardized] 兼容旧名
+PhysicalDrive.write_sectors = PhysicalDrive.write
+
+function PhysicalDrive:read(offset, size)
     if offset % self.sector_size ~= 0 then return nil, "Offset not aligned" end
+    
     local aligned_size = size
-    if size % self.sector_size ~= 0 then aligned_size = math.ceil(size / self.sector_size) * self.sector_size end
+    if size % self.sector_size ~= 0 then 
+        aligned_size = math.ceil(size / self.sector_size) * self.sector_size 
+    end
+    
     local buf = kernel32.VirtualAlloc(nil, aligned_size, 0x1000, 0x04)
     if not buf then return nil end
+    
     local li = ffi.new("LARGE_INTEGER"); li.QuadPart = offset
     local res = nil
+    
     if kernel32.SetFilePointerEx(self.handle, li, nil, 0) ~= 0 then
         local r = ffi.new("DWORD[1]")
         if kernel32.ReadFile(self.handle, buf, aligned_size, r, nil) ~= 0 then
             res = ffi.string(buf, math.min(size, r[0]))
         end
     end
+    
     kernel32.VirtualFree(buf, 0, 0x8000)
     return res
 end
+
+-- [Standardized] 兼容旧名
+PhysicalDrive.read_sectors = PhysicalDrive.read
 
 local function get_desc(h)
     local q = ffi.new("STORAGE_PROPERTY_QUERY"); q.PropertyId = 0; q.QueryType = 0

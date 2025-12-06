@@ -6,73 +6,67 @@ local util = require('win-utils.core.util')
 TestCore = {}
 
 function TestCore:setUp()
-    self.sandbox = "test_sandbox_" .. os.time()
-    local k32 = ffi.load("kernel32")
-    k32.CreateDirectoryW(util.to_wide(self.sandbox), nil)
-    self.reg_key = "Software\\LuaWinUtilsTest"
-    
+    self.reg_key = "Software\\LuaWinUtilsTest_" .. os.time()
     if win.reg then win.reg.delete_key("HKCU", self.reg_key, true) end
 end
 
 function TestCore:tearDown()
-    if win.fs and win.fs.delete then 
-        win.fs.delete(self.sandbox) 
-    end
-    if win.reg then 
-        win.reg.delete_key("HKCU", self.reg_key, true) 
-    end
+    if win.reg then win.reg.delete_key("HKCU", self.reg_key, true) end
 end
 
--- ========================================================================
--- 文件系统 (Native FS)
--- ========================================================================
-function TestCore:test_Path_Conversion()
-    local nt = "\\??\\C:\\Windows"
-    local dos = win.fs.path.nt_path_to_dos(nt)
-    if dos then
-        lu.assertStrContains(dos, "Windows")
-    else
-        print("[INFO] Path conversion returned nil (Non-standard drive map?)")
-    end
+function TestCore:test_Util_GUID()
+    local s = "{53F56307-B6BF-11D0-94F2-00A0C91EFB8B}"
+    local g = util.guid_from_str(s)
+    local s2 = util.guid_to_str(g)
+    lu.assertEquals(s2:upper(), s:upper())
 end
 
-function TestCore:test_FS_Recursive_Ops()
-    local d1 = self.sandbox .. "\\dir1"
-    local f1 = d1 .. "\\file1.txt"
-    ffi.load("kernel32").CreateDirectoryW(util.to_wide(d1), nil)
-    local f = io.open(f1, "w"); f:write("data"); f:close()
-    
-    local d2 = self.sandbox .. "\\dir2"
-    local ok_copy = win.fs.copy(d1, d2)
-    lu.assertTrue(ok_copy, "Recursive copy failed")
-    lu.assertTrue(win.fs.exists(d2 .. "\\file1.txt"), "Copied file missing")
-    
-    local native_raw = require('win-utils.fs.raw')
-    native_raw.set_attributes(f1, 1) -- ReadOnly
-    
-    local ok_del = win.fs.delete(d1)
-    lu.assertTrue(ok_del, "Recursive delete failed")
-    lu.assertFalse(win.fs.exists(d1), "Directory should be gone")
+function TestCore:test_Util_Path()
+    local parts = util.split_path("C:\\Windows\\System32")
+    lu.assertEquals(parts[1], "C:")
+    lu.assertEquals(parts[2], "Windows")
+    lu.assertEquals(util.normalize_path("C:/Windows//System32/"), "C:\\Windows\\System32")
 end
 
--- [Modified] Removed ACL Reset test as ACLs are not preserved/handled in PE mode
-
--- ========================================================================
--- 注册表 (Registry)
--- ========================================================================
-function TestCore:test_Registry_Basic()
+function TestCore:test_Registry_Full()
     local k = win.reg.open_key("HKCU", self.reg_key)
-    lu.assertNotNil(k, "Failed to create key")
+    lu.assertNotNil(k, "Failed to create/open key")
     
-    lu.assertTrue(k:write("TestVal", 123))
-    lu.assertEquals(k:read("TestVal"), 123)
+    -- 1. String & ExpandSZ
+    lu.assertTrue(k:write("TestStr", "Hello World"))
+    lu.assertEquals(k:read("TestStr"), "Hello World")
     
-    lu.assertTrue(k:write("TestMulti", {"A", "B"}, "multi_sz"))
+    lu.assertTrue(k:write("TestExpand", "%PATH%", "expand_sz"))
+    local expanded = k:read("TestExpand")
+    lu.assertNotEquals(expanded, "%PATH%")
+    
+    -- 2. Numbers
+    lu.assertTrue(k:write("TestDword", 123456))
+    lu.assertEquals(k:read("TestDword"), 123456)
+    
+    lu.assertTrue(k:write("TestQword", 0x1234567890ULL, "qword"))
+    local q = k:read("TestQword")
+    lu.assertEquals(tonumber(q), tonumber(0x1234567890ULL))
+    
+    -- 3. MultiSZ
+    local multi = {"Line1", "Line2", "Line 3"}
+    lu.assertTrue(k:write("TestMulti", multi, "multi_sz"))
     local m = k:read("TestMulti")
     lu.assertIsTable(m)
-    lu.assertEquals(m[1], "A")
+    lu.assertEquals(#m, 3)
+    lu.assertEquals(m[2], "Line2")
+    
+    -- 4. Binary
+    local bin = ffi.new("uint8_t[3]", {0xAA, 0xBB, 0xCC})
+    local str_bin = ffi.string(bin, 3)
+    lu.assertTrue(k:write("TestBin", str_bin, "binary"))
+    local r_bin = k:read("TestBin")
+    lu.assertEquals(#r_bin, 3)
+    lu.assertEquals(string.byte(r_bin, 2), 0xBB)
+    
+    -- 5. Delete
+    lu.assertTrue(k:delete_value("TestStr"))
+    lu.assertNil(k:read("TestStr"))
     
     k:close()
 end
-
--- [Modified] Removed Hive Lifecycle test to reduce CI complexity

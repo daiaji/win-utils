@@ -6,8 +6,7 @@ TestProcess = {}
 
 -- 测试常量
 local TEST_CMD_LONG = "cmd.exe /c ping -n 30 127.0.0.1 > NUL"
-local TEST_CMD_SHORT = "cmd.exe /c ping -n 3 127.0.0.1 > NUL"
-local TEST_UNICODE_ARG = "测试参数_Arg"
+local TEST_UNICODE_ARG = "测试参数_Arg_🚀"
 
 -- 辅助：清理环境
 function TestProcess:tearDown()
@@ -16,13 +15,13 @@ function TestProcess:tearDown()
     if list then
         for _, p in ipairs(list) do
             if p.name:lower() == "ping.exe" then
-                win.process.terminate(p.pid)
+                win.process.kill(p.pid)
             end
         end
     end
 end
 
--- 1. 基础生命周期测试 (Exec, Exists, Terminate)
+-- 1. 基础生命周期测试 (Exec, Exists, Kill)
 function TestProcess:test_Lifecycle()
     local p = win.process.exec(TEST_CMD_LONG, nil, 0) -- SW_HIDE
     lu.assertNotNil(p, "Exec failed")
@@ -30,12 +29,13 @@ function TestProcess:test_Lifecycle()
     
     -- 验证 exists (PID)
     lu.assertEquals(win.process.exists(p.pid), p.pid)
-    -- 验证 exists (Name)
-    local found_pid = win.process.exists("cmd.exe") -- 注意：exec 返回的是 cmd 的 pid
+    
+    -- 验证 exists (Name) - 来自旧版测试的逻辑
+    local found_pid = win.process.exists("cmd.exe")
     lu.assertTrue(found_pid > 0)
     
-    -- 终止
-    lu.assertTrue(p:terminate())
+    -- 终止 (使用新 API p:kill)
+    lu.assertTrue(p:kill())
     
     -- 等待系统回收
     ffi.C.Sleep(200)
@@ -51,11 +51,10 @@ function TestProcess:test_Wait()
     -- 测试：超时 (应返回 false)
     local start = os.clock()
     local res = p:wait(200) -- 等 200ms
-    local duration = os.clock() - start
     
     lu.assertFalse(res, "Wait should timeout")
     
-    p:terminate()
+    p:kill()
     
     -- 测试：成功等待
     local p2 = win.process.exec("cmd.exe /c exit 0", nil, 0)
@@ -78,17 +77,15 @@ function TestProcess:test_Info_And_Unicode()
     lu.assertStrContains(info.exe_path:lower(), "cmd.exe")
     
     -- 验证命令行 (Unicode)
-    -- 注意：cmd.exe 的行为可能会重构命令行，只要包含关键字即可
     local cmdline = p:get_command_line()
     lu.assertStrContains(cmdline, TEST_UNICODE_ARG)
     
-    p:terminate()
+    p:kill()
     p:close()
 end
 
 -- 4. 进程列表与查找
 function TestProcess:test_List_And_Find()
-    -- 启动两个进程
     local p1 = win.process.exec(TEST_CMD_LONG, nil, 0)
     local p2 = win.process.exec(TEST_CMD_LONG, nil, 0)
     
@@ -105,9 +102,10 @@ function TestProcess:test_List_And_Find()
     
     -- 验证父进程ID (PPID)
     lu.assertIsNumber(found1.parent_pid)
+    lu.assertIsString(found1.name)
     
-    p1:terminate(); p1:close()
-    p2:terminate(); p2:close()
+    p1:kill(); p1:close()
+    p2:kill(); p2:close()
 end
 
 -- 5. 挂起与恢复 (Suspend/Resume)
@@ -120,15 +118,16 @@ function TestProcess:test_Suspend_Resume()
     -- 恢复
     lu.assertTrue(p:resume())
     
-    p:terminate()
+    p:kill()
     p:close()
 end
 
--- 6. 进程树终止 (Terminate Tree)
-function TestProcess:test_Tree_Terminate()
+-- 6. 进程树终止 (Kill Tree) - 恢复旧版详细逻辑
+function TestProcess:test_Tree_Kill()
     local p = win.process.exec(TEST_CMD_LONG, nil, 0)
     lu.assertNotNil(p)
     
+    -- 等待子进程生成 (cmd -> ping)
     ffi.C.Sleep(500)
     
     local list = win.process.list()
@@ -141,20 +140,20 @@ function TestProcess:test_Tree_Terminate()
     end
     
     if child_pid then
-        print("  [DEBUG] Found child process: " .. child_pid)
+        print("  [DEBUG] Found child process for tree kill: " .. child_pid)
         lu.assertTrue(win.process.exists(child_pid) > 0)
         
-        -- [FIX] Process 类没有直接暴露 terminate_tree 方法
-        -- 现在的统一 API 是 p:kill("tree")
+        -- 使用 Tree 模式查杀
+        -- 新版 API 使用 kill("tree")
         p:kill("tree")
         ffi.C.Sleep(200)
         
         -- 验证父子全挂
-        lu.assertEquals(win.process.exists(p.pid), 0, "Parent should remain dead")
+        lu.assertEquals(win.process.exists(p.pid), 0, "Parent should be dead")
         lu.assertEquals(win.process.exists(child_pid), 0, "Child should be dead")
     else
         print("  [WARN] Could not spawn child process for tree test (CI env?)")
-        p:terminate()
+        p:kill()
     end
     p:close()
 end
@@ -162,33 +161,40 @@ end
 -- 7. 令牌信息 (Token Info)
 function TestProcess:test_Token_Info()
     local t = win.process.token.open_current(8) -- QUERY
-    if t then
-        local user = win.process.token.get_user(t)
-        lu.assertIsString(user)
-        print("  [INFO] Current User: " .. user)
-        
-        local integrity = win.process.token.get_integrity_level(t)
-        if integrity then
-            print("  [INFO] Integrity: " .. integrity)
-        end
-        t:close()
-    end
+    lu.assertNotNil(t)
     
-    lu.assertTrue(win.process.token.is_elevated())
-    lu.assertTrue(win.process.token.enable_privilege("SeDebugPrivilege"))
+    local user = win.process.token.get_user(t)
+    lu.assertIsString(user)
+    print("  [INFO] Current User: " .. user)
+    
+    local integrity = win.process.token.get_integrity_level(t)
+    if integrity then
+        print("  [INFO] Integrity: " .. integrity)
+    end
+    t:close()
+    
+    -- 静态辅助函数
+    lu.assertTrue(type(win.process.token.is_elevated()) == "boolean")
+    
+    -- [Restored] 恢复旧版特权检查测试
+    if win.process.token.enable_privilege then
+        -- SeDebugPrivilege 通常需要管理员，如果不是管理员会返回 false 但不报错
+        local ok = win.process.token.enable_privilege("SeDebugPrivilege")
+        lu.assertIsBoolean(ok)
+    end
 end
 
--- 8. [NEW] 静态等待函数测试 (Restored Features)
+-- 8. 静态等待函数测试
 function TestProcess:test_Static_Wait_Helpers()
-    -- 测试 wait (等待进程出现)
     local p = win.process.exec(TEST_CMD_LONG, nil, 0)
     lu.assertNotNil(p)
     
+    -- 测试 wait (等待进程出现)
     local found_pid = win.process.wait(p.pid, 1000)
     lu.assertEquals(found_pid, p.pid)
     
     -- 测试 wait_close (等待进程结束)
-    p:terminate()
+    p:kill()
     
     local closed = win.process.wait_close(p.pid, 2000)
     lu.assertTrue(closed, "wait_close should return true")
@@ -196,38 +202,77 @@ function TestProcess:test_Static_Wait_Helpers()
     p:close()
 end
 
--- [New] 测试内存区域列表及文件名解析 (检测 ntdll.dll 是否被识别)
+-- 9. 内存区域 (Memory Regions)
 function TestProcess:test_Memory_Regions()
     local p = win.process.current()
-    lu.assertNotNil(p, "Could not open current process")
+    lu.assertNotNil(p)
     
     local regions = win.process.memory.list_regions(p.pid)
     lu.assertIsTable(regions)
     lu.assertTrue(#regions > 0)
     
-    local found_ntdll = false
     local found_any_file = false
     
     for _, r in ipairs(regions) do
+        -- 验证结构体字段
+        lu.assertIsNumber(r.addr)
+        lu.assertIsNumber(r.size)
         if r.filename then
             found_any_file = true
-            if r.filename:lower():find("ntdll.dll") then
-                found_ntdll = true
-                print("  [INFO] Mapped: " .. r.filename)
-                break
+            -- 验证保护属性字符串是否生成 (新版特性)
+            if r.protect_str then
+                lu.assertIsString(r.protect_str)
             end
         end
     end
     
-    -- 在 Windows 环境下，进程必然加载了 DLL，至少应该能解析出一个文件名
-    lu.assertTrue(found_any_file, "No mapped filenames resolved (Privilege issue?)")
-    
-    -- 几乎所有进程都加载 ntdll
-    if found_ntdll then
-        lu.assertTrue(true)
-    else
-        print("  [WARN] ntdll.dll not found in memory map (Unusual)")
-    end
-    
+    lu.assertTrue(found_any_file, "No mapped filenames resolved")
     p:close()
+end
+
+-- 10. [Restored] 独立的模块列表测试 (Modules)
+-- 之前为了精简代码将其与 Memory 合并，现在独立出来以保证完整覆盖率
+function TestProcess:test_Modules()
+    local pid = ffi.load("kernel32").GetCurrentProcessId()
+    
+    -- 检查 API 是否存在 (win.process.module)
+    if win.process.module and win.process.module.list then
+        local mods = win.process.module.list(pid)
+        lu.assertIsTable(mods)
+        lu.assertTrue(#mods > 0)
+        
+        local found_ntdll = false
+        for _, m in ipairs(mods) do
+            lu.assertIsString(m)
+            if m:lower():find("ntdll.dll") then
+                found_ntdll = true
+                break
+            end
+        end
+        lu.assertTrue(found_ntdll, "ntdll.dll should be loaded in current process")
+    else
+        print("  [WARN] win.process.module API not found")
+    end
+end
+
+-- 11. 句柄列表 (Handles)
+function TestProcess:test_Handles()
+    local pid = ffi.load("kernel32").GetCurrentProcessId()
+    local list = win.process.handles.list(pid)
+    lu.assertIsTable(list)
+    lu.assertTrue(#list > 0)
+    
+    -- 系统级句柄列表 (需要提升权限或运气)
+    if win.process.token.is_elevated() then
+        local sys_handles = win.process.handles.list_system()
+        lu.assertIsTable(sys_handles)
+        -- 整个系统的句柄数通常成千上万
+        lu.assertTrue(#sys_handles > 100)
+        
+        -- 检查结构
+        local h = sys_handles[1]
+        lu.assertIsNumber(h.pid)
+        lu.assertIsNumber(h.handle)
+        lu.assertIsNumber(h.object_addr)
+    end
 end

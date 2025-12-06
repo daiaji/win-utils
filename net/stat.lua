@@ -1,13 +1,13 @@
 local ffi = require 'ffi'
 local iphlp = require 'ffi.req' 'Windows.sdk.iphlpapi'
-local bit = require 'bit' -- LuaJIT BitOp
-local table_new = require 'table.new' -- LuaJIT Extension
-local table_ext = require 'ext.table' -- Lua-Ext
+local bit = require 'bit'
+local table_new = require 'table.new'
+local table_ext = require 'ext.table'
+
 local M = {}
 
 local STATES = {[1]="CLOSED",[2]="LISTEN",[3]="SYN_SENT",[4]="SYN_RCVD",[5]="ESTAB",[12]="DEL"}
 
--- [LuaJIT Optimization] 使用 bit 库手动拼接 IP，避免 string.format 的开销
 local function ip_str(v) 
     return (bit.band(v,0xFF)) .. "." ..
            (bit.band(bit.rshift(v,8),0xFF)) .. "." ..
@@ -19,10 +19,9 @@ local function port(v)
     return bit.bor(bit.rshift(v,8), bit.lshift(bit.band(v,0xFF),8)) 
 end
 
-function M.netstat()
+-- [API] 获取 TCP 连接列表 (原 netstat)
+function M.list_tcp()
     local sz = ffi.new("DWORD[1]", 0)
-    
-    -- 第一次调用获取大小
     iphlp.GetExtendedTcpTable(nil, sz, 0, 2, 5, 0)
     
     local buf = ffi.new("uint8_t[?]", sz[0])
@@ -31,10 +30,7 @@ function M.netstat()
     local t = ffi.cast("MIB_TCPTABLE_OWNER_PID*", buf)
     local num = tonumber(t.dwNumEntries)
     
-    -- [LuaJIT] 预分配 table 大小 (Array部分=num, Hash部分=0)
     local r = table_new(num, 0)
-    
-    -- [Lua-Ext] 赋予扩展能力 (允许 :find, :filter, :map, :findIf)
     setmetatable(r, { __index = table_ext })
     
     for i=0, num-1 do
@@ -51,17 +47,14 @@ function M.netstat()
     return r
 end
 
--- [Lua-Ext Feature] 使用 :filter 和 :map 的链式调用
 function M.get_tcp_listeners()
-    return M.netstat()
+    return M.list_tcp()
         :filter(function(e) return e.state == "LISTEN" end)
         :map(function(e) return { port=e.local_port, pid=e.pid } end)
 end
 
--- [Lua-Ext Feature] 使用 :findIf 查找
 function M.find_pid_by_port(p)
-    -- 注意: findIf 返回 key, value。我们只需要 value.pid
-    local _, res = M.netstat():findIf(function(e) return e.local_port == p end)
+    local _, res = M.list_tcp():findIf(function(e) return e.local_port == p end)
     return res and res.pid or nil
 end
 
