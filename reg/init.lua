@@ -184,14 +184,21 @@ function M.save_hive(key, path)
     return res >= 0
 end
 
-function M.load_hive(key_path, file_path)
+-- [FIX] Enhanced load_hive with as_volatile support
+function M.load_hive(key_path, file_path, as_volatile)
     token.enable_privilege("SeRestorePrivilege")
     
     -- [GC SAFETY] 使用 init_object_attributes 获取 anchor
     local oa_k, anchor1 = native.init_object_attributes(key_path)
     local oa_f, anchor2 = native.init_object_attributes(native.dos_path_to_nt_path(file_path))
     
-    local res = ntdll.NtLoadKey(oa_k, oa_f)
+    local res
+    if as_volatile then
+        -- REG_WHOLE_HIVE_VOLATILE = 0x00000001
+        res = ntdll.NtLoadKeyEx(oa_k, oa_f, 0x1, nil, nil, 0, nil, nil)
+    else
+        res = ntdll.NtLoadKey(oa_k, oa_f)
+    end
     
     -- 保持 anchor 存活直到调用结束
     local _ = {anchor1, anchor2}

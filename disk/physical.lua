@@ -8,8 +8,6 @@ local defs = require 'win-utils.disk.defs'
 local class = require 'win-utils.deps'.class
 local proc_handles = require 'win-utils.process.handles'
 local proc = require 'win-utils.process.init'
-
--- [LuaJIT Optimization] Pre-allocate table for list()
 local table_new = require "table.new"
 
 local PhysicalDrive = class()
@@ -19,8 +17,12 @@ function PhysicalDrive:init(index, mode, exclusive)
     self.path = type(index) == "number" and ("\\\\.\\PhysicalDrive" .. index) or index
     self.index = type(index) == "number" and index or nil
     
-    local h, err = native.open_device(self.path, mode, exclusive)
-    if not h then error("Open failed: " .. tostring(err)) end
+    -- [DECOUPLED] 调用 Core 层的健壮打开函数，包含 150 次重试
+    local h, err = native.open_device_robust(self.path, mode, exclusive)
+    
+    if not h then 
+        error("PhysicalDrive open failed: " .. tostring(err)) 
+    end
     
     self.obj = h
     self.handle = h:get()
@@ -52,6 +54,7 @@ function PhysicalDrive:update_geometry()
     end
 end
 
+-- [LOCKED] 锁定逻辑包含独立的重试和进程查杀策略，这是业务逻辑，保留在此
 function PhysicalDrive:lock(force)
     self:ioctl(defs.IOCTL.DASD)
     
@@ -72,6 +75,7 @@ function PhysicalDrive:lock(force)
         goto fail
     end
     
+    -- 在第 50 次尝试或每 20 次尝试（如果是强制模式）检查占用
     if (force and (attempts % 20 == 0)) or (attempts == 50) then
         local pids = proc_handles.find_lockers(self.path)
         for _, pid in ipairs(pids) do 
@@ -115,7 +119,6 @@ function PhysicalDrive:zero_fill(progress_cb)
     
     while processed < total do
         local chunk = math.min(buf_size, total - processed)
-        -- Sector alignment
         if chunk % self.sector_size ~= 0 then 
             chunk = math.ceil(chunk / self.sector_size) * self.sector_size 
         end
@@ -138,31 +141,26 @@ function PhysicalDrive:zero_fill(progress_cb)
     return ok, err
 end
 
--- [Restored] Wipe partition tables (MBR + GPT headers)
 function PhysicalDrive:wipe_layout()
     local wipe_size = 8 * 1024 * 1024 -- 8MB
     local written = ffi.new("DWORD[1]")
-    
-    -- Allocate zeroed memory
     local buf = kernel32.VirtualAlloc(nil, wipe_size, 0x1000, 0x04)
     if not buf then return false, "Alloc failed" end
     
     local ok = true
+    local li = ffi.new("LARGE_INTEGER")
     
     -- 1. Wipe Start
-    local li = ffi.new("LARGE_INTEGER")
     li.QuadPart = 0
     if kernel32.SetFilePointerEx(self.handle, li, nil, 0) == 0 or 
        kernel32.WriteFile(self.handle, buf, wipe_size, written, nil) == 0 then
         ok = false
     end
     
-    -- 2. Wipe End (Backup GPT)
+    -- 2. Wipe End
     if ok and self.size > wipe_size then
-        local end_wipe = 1024 * 1024 -- 1MB at end
-        -- Align offset to sector size
+        local end_wipe = 1024 * 1024 
         li.QuadPart = math.floor((self.size - end_wipe) / self.sector_size) * self.sector_size
-        
         if kernel32.SetFilePointerEx(self.handle, li, nil, 0) ~= 0 then
             kernel32.WriteFile(self.handle, buf, end_wipe, written, nil)
         end

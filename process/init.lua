@@ -8,6 +8,7 @@ local Handle = require 'win-utils.core.handle'
 local class = require 'win-utils.deps'.class
 local table_new = require 'table.new'
 local table_ext = require 'ext.table'
+local jit = require 'jit' 
 
 local M = {}
 
@@ -180,16 +181,35 @@ end
 function M.each()
     local hSnap = kernel32.CreateToolhelp32Snapshot(2, 0)
     if hSnap == INVALID_HANDLE then return function() end end
+    
+    -- [FIX] Use RAII Handle to prevent leaks when loop is broken
+    local safe_snap = Handle(hSnap)
+    
     local pe = ffi.new("PROCESSENTRY32W"); pe.dwSize = ffi.sizeof(pe)
     local first = true
-    local closed = false
+    
     return function()
-        if closed then return nil end
+        if not safe_snap:valid() then return nil end
+        
         local res
-        if first then res = kernel32.Process32FirstW(hSnap, pe); first = false
-        else res = kernel32.Process32NextW(hSnap, pe) end
-        if res == 0 then kernel32.CloseHandle(hSnap); closed = true; return nil end
-        return { pid = tonumber(pe.th32ProcessID), name = util.from_wide(pe.szExeFile), parent_pid = tonumber(pe.th32ParentProcessID), thread_count = tonumber(pe.cntThreads) }
+        if first then 
+            res = kernel32.Process32FirstW(safe_snap:get(), pe)
+            first = false
+        else 
+            res = kernel32.Process32NextW(safe_snap:get(), pe) 
+        end
+        
+        if res == 0 then 
+            safe_snap:close()
+            return nil 
+        end
+        
+        return { 
+            pid = tonumber(pe.th32ProcessID), 
+            name = util.from_wide(pe.szExeFile), 
+            parent_pid = tonumber(pe.th32ParentProcessID), 
+            thread_count = tonumber(pe.cntThreads) 
+        }
     end
 end
 
@@ -220,7 +240,6 @@ function M.exists(pid)
     return 0
 end
 
--- [RESTORED] Find all PIDs by name
 function M.find_all(name)
     local res = {}
     local target = name:lower()
@@ -236,13 +255,34 @@ function M.terminate(pid) local p = M.open(pid, 1); if p then local r = p:termin
 function M.suspend(pid) local p = M.open(pid, 0x800); if p then local r = p:suspend(); p:close(); return r end return false end
 function M.resume(pid) local p = M.open(pid, 0x800); if p then local r = p:resume(); p:close(); return r end return false end
 
+-- [FIX] JIT Safe Callback Wrapper
 function M.terminate_gracefully(pid, timeout)
     local h = kernel32.OpenProcess(0x100001, false, pid)
     if not h then return false end
+
     local ptr = ffi.new("DWORD[1]")
-    local cb = ffi.cast("WNDENUMPROC", function(w,l) user32.GetWindowThreadProcessId(w, ptr); if ptr[0]==pid then user32.PostMessageW(w, 0x10, 0, 0) end return 1 end)
-    user32.EnumWindows(cb, 0); cb:free()
-    if kernel32.WaitForSingleObject(h, timeout or 3000) == 258 then kernel32.TerminateProcess(h, 0) end
+    
+    jit.off() -- Disable JIT for callback safety
+    
+    local cb = ffi.cast("WNDENUMPROC", function(w, l)
+        local ok = pcall(function()
+            user32.GetWindowThreadProcessId(w, ptr)
+            if ptr[0] == pid then
+                user32.PostMessageW(w, 0x0010, 0, 0) -- WM_CLOSE
+            end
+        end)
+        return 1
+    end)
+
+    user32.EnumWindows(cb, 0)
+    cb:free()
+    
+    jit.on() -- Restore JIT
+
+    if kernel32.WaitForSingleObject(h, timeout or 3000) == 258 then
+        kernel32.TerminateProcess(h, 0)
+    end
+    
     kernel32.CloseHandle(h)
     return true
 end
