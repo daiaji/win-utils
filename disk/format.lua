@@ -57,8 +57,9 @@ function M.format(idx, off, fs, lab, opts)
     local result = false
     local msg = "Unknown Error"
     
-    -- [FIX] 提前声明变量，避免 goto 跳过局部变量声明导致的语法错误
+    -- [FIX] Hoist variable declarations to prevent goto scope errors
     local ok_vds, msg_vds = false, "Skipped"
+    local letter = nil
     
     -- [Rufus Strategy] 格式化前刷新
     drive:refresh()
@@ -85,7 +86,7 @@ function M.format(idx, off, fs, lab, opts)
     end
     
     -- Strategy 3: Legacy
-    local letter = mount.temp_mount(idx, off)
+    letter = mount.temp_mount(idx, off)
     if letter then
         local ok_fmifs, msg_fmifs = fmifs.format(letter, fs, lab)
         if ok_fmifs and opts.compress and fs_lower == "ntfs" then
