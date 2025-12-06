@@ -57,6 +57,9 @@ function M.format(idx, off, fs, lab, opts)
     local result = false
     local msg = "Unknown Error"
     
+    -- [FIX] 提前声明变量，避免 goto 跳过局部变量声明导致的语法错误
+    local ok_vds, msg_vds = false, "Skipped"
+    
     -- [Rufus Strategy] 格式化前刷新
     drive:refresh()
     drive:close() -- 必须关闭句柄，否则格式化可能失败
@@ -71,7 +74,7 @@ function M.format(idx, off, fs, lab, opts)
     end
     
     -- Strategy 2: VDS
-    local ok_vds, msg_vds = vds.format(idx, off, fs, lab, true, 0, 0)
+    ok_vds, msg_vds = vds.format(idx, off, fs, lab, true, 0, 0)
     if ok_vds then
         if is_filesystem_ready(idx, off, fs) then
             result = true; msg = "VDS"
