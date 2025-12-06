@@ -7,11 +7,10 @@ local Handle = require 'win-utils.core.handle'
 local C = require 'win-utils.core.ffi_defs'
 local table_new = require 'table.new'
 local table_ext = require 'ext.table'
-local pnp = require 'win-utils.sys.pnp' -- [NEW] Import PNP
+local pnp = require 'win-utils.sys.pnp'
 
 local M = {}
 
--- ... [M.list, M.open 保持不变] ...
 function M.list()
     local name = ffi.new("wchar_t[261]")
     local hFind = kernel32.FindFirstVolumeW(name, 261)
@@ -75,7 +74,6 @@ function M.open(path, write)
 end
 
 function M.find_guid_by_partition(drive_index, partition_offset)
-    -- (保持原样)
     local vols = M.list()
     if not vols then return nil end
     
@@ -96,7 +94,7 @@ function M.find_guid_by_partition(drive_index, partition_offset)
     return nil
 end
 
--- [REFACTORED] 基于事件驱动的智能等待
+-- 智能等待分区就绪
 function M.wait_for_partition(drive_index, partition_offset, timeout_ms)
     local start = kernel32.GetTickCount()
     local limit = timeout_ms or 15000
@@ -107,7 +105,6 @@ function M.wait_for_partition(drive_index, partition_offset, timeout_ms)
     
     -- 2. 进入事件循环
     local watcher = nil
-    -- 创建监听器可能失败（极其罕见），如果失败则回退到 Sleep
     pcall(function() watcher = pnp.PnpWatcher() end)
     
     while true do
@@ -117,17 +114,13 @@ function M.wait_for_partition(drive_index, partition_offset, timeout_ms)
             return nil, "Timeout waiting for volume arrival" 
         end
         
-        -- 如果监听器创建成功，使用事件等待
         if watcher then
             local remaining = limit - elapsed
-            -- 等待事件，或者剩余时间耗尽
-            watcher:wait(math.min(2000, remaining)) -- 每 2s 强制检查一次，防止信号丢失
+            watcher:wait(math.min(2000, remaining))
         else
-            -- 降级方案
             kernel32.Sleep(500)
         end
         
-        -- 3. 再次检查
         guid = M.find_guid_by_partition(drive_index, partition_offset)
         if guid then 
             if watcher then watcher:close() end
@@ -137,7 +130,6 @@ function M.wait_for_partition(drive_index, partition_offset, timeout_ms)
 end
 
 function M.find_free_letter()
-    -- (保持原样)
     local mask = kernel32.GetLogicalDrives()
     for i = 25, 2, -1 do 
         if bit.band(mask, bit.lshift(1, i)) == 0 then 
@@ -155,22 +147,37 @@ function M.assign(idx, offset, letter)
     local mount_point = letter or M.find_free_letter()
     if not mount_point then return false, "No free letters" end
     
+    -- 2. 规范化路径
     if mount_point:sub(-1) ~= "\\" then mount_point = mount_point .. "\\" end
     if guid_path:sub(-1) ~= "\\" then guid_path = guid_path .. "\\" end
     
-    -- [REMOVED] 这里不再需要死板的 Sleep(1000)，因为我们已经确认了卷的存在
-    -- 但为了给 MountManager 一点点内部锁的时间，保留 100ms 更加稳健
-    kernel32.Sleep(100)
+    local w_mount = util.to_wide(mount_point)
+    local w_guid = util.to_wide(guid_path)
     
-    if kernel32.SetVolumeMountPointW(util.to_wide(mount_point), util.to_wide(guid_path)) == 0 then
-        local msg, code = util.last_error()
-        return false, string.format("SetVolumeMountPoint failed: %s (%d)", msg, code)
+    -- 3. [FIX] 增加 API 级重试逻辑
+    -- 原因：Mount Manager 在卷刚刚格式化后可能处于繁忙状态，导致瞬时 87 错误
+    local max_retries = 10
+    local last_msg, last_code
+    
+    for i = 1, max_retries do
+        if kernel32.SetVolumeMountPointW(w_mount, w_guid) ~= 0 then
+            return true, mount_point
+        end
+        
+        last_msg, last_code = util.last_error()
+        
+        -- 如果不是 87 (参数错误) 或 142 (系统繁忙) 或 21 (设备未就绪)，则直接失败
+        -- 这里我们宽容一点，只要失败就重试
+        if i < max_retries then
+            kernel32.Sleep(500) -- 退避 0.5s
+        end
     end
-    return true, mount_point
+    
+    return false, string.format("SetVolumeMountPoint(%s -> %s) failed after %d retries: %s (%d)", 
+        mount_point, guid_path, max_retries, last_msg, last_code)
 end
 
 function M.unmount_all_on_disk(idx)
-    -- (保持原样)
     local vols = M.list()
     if not vols then return end
     
@@ -190,7 +197,6 @@ function M.unmount_all_on_disk(idx)
 end
 
 function M.set_label(path, label)
-    -- (保持原样)
     local root = path
     if #root == 2 and root:sub(2,2) == ":" then root = root .. "\\"
     elseif root:sub(-1) ~= "\\" then root = root .. "\\" end
