@@ -45,6 +45,141 @@ function TestDisk:tearDown()
 end
 
 -- =============================================================================
+-- [Unit Tests] 基础组件测试
+-- =============================================================================
+
+function TestDisk:test_01_Physical_List()
+    local drives = win.disk.physical.list()
+    lu.assertIsTable(drives)
+    -- 系统中至少应该有一个磁盘
+    lu.assertTrue(#drives > 0, "No physical drives found")
+    
+    print("\n  [INFO] System Drives:")
+    for _, d in ipairs(drives) do
+        lu.assertIsNumber(d.index)
+        lu.assertIsNumber(d.size)
+        print(string.format("    #%d: %s (%s) - %.2f GB", 
+            d.index, d.model, d.bus, d.size/(1024^3)))
+    end
+end
+
+function TestDisk:test_02_Layout_IOCTL()
+    if not self.is_admin then return end
+    
+    -- 尝试读取 0 号磁盘的布局信息（通常是系统盘）
+    local pd, err = win.disk.physical.open(0, "r")
+    if not pd then 
+        print("  [WARN] Cannot open Disk 0: " .. tostring(err))
+        return 
+    end
+    
+    if win.disk.layout and win.disk.layout.get then
+        local layout, l_err = win.disk.layout.get(pd)
+        if layout then
+            lu.assertIsTable(layout)
+            lu.assertTrue(layout.style == "MBR" or layout.style == "GPT", "Unknown Disk Style")
+            lu.assertIsTable(layout.parts)
+            print("  [INFO] Disk 0 Style: " .. layout.style)
+        else
+            print("  [WARN] GetLayout failed: " .. tostring(l_err))
+        end
+    end
+    pd:close()
+end
+
+function TestDisk:test_03_BitLocker_Status()
+    if not self.is_admin then return end
+    local status, err = win.disk.bitlocker.get_status("C:")
+    if status then
+        print("  [INFO] C: BitLocker Status: " .. status)
+        lu.assertTrue(status == "Locked" or status == "None" or status == "Off")
+    else
+        print("  [WARN] BitLocker check failed (VM/Legacy?): " .. tostring(err))
+    end
+end
+
+function TestDisk:test_04_Image_Ops()
+    if not self.is_admin then return end
+    
+    -- 创建一个小 VHD 用于镜像测试
+    local h = win.disk.vhd.create(self.temp_vhd, 4 * 1024 * 1024)
+    win.disk.vhd.attach(h)
+    self.vhd_handle = h
+    
+    local phys_path = win.disk.vhd.wait_for_physical_path(h)
+    local idx = tonumber(phys_path:match("PhysicalDrive(%d+)"))
+    local drive = win.disk.physical.open(idx, "rw", true)
+    
+    -- 生成测试源文件
+    local img_path = os.getenv("TEMP") .. "\\test_src_" .. os.time() .. ".img"
+    local f = io.open(img_path, "wb")
+    local pattern = "LUA_WIN_UTILS_TEST"
+    for i=1, 1024 do f:write(string.rep(pattern, 64)) end 
+    f:close()
+    
+    -- 写入镜像
+    local w_ok, w_err = win.disk.image.write(img_path, drive)
+    lu.assertTrue(w_ok, "Image write failed: " .. tostring(w_err))
+    
+    -- 读回镜像
+    local dump_path = os.getenv("TEMP") .. "\\test_dump_" .. os.time() .. ".img"
+    local r_ok, r_err = win.disk.image.read(drive, dump_path)
+    lu.assertTrue(r_ok, "Image read failed: " .. tostring(r_err))
+    
+    drive:close()
+    
+    -- 比对
+    local f1 = io.open(img_path, "rb")
+    local f2 = io.open(dump_path, "rb")
+    local s1 = f1:read(1024)
+    local s2 = f2:read(1024)
+    f1:close(); f2:close()
+    
+    lu.assertEquals(s1, s2)
+    os.remove(img_path)
+    os.remove(dump_path)
+end
+
+function TestDisk:test_05_Volume_List()
+    local vols, err = win.disk.volume.list()
+    lu.assertNotNil(vols, "Vol list failed: " .. tostring(err))
+    lu.assertTrue(#vols > 0)
+    
+    local found_c = false
+    for _, v in ipairs(vols) do
+        lu.assertIsString(v.guid_path)
+        -- 打印信息以便调试
+        -- print("  Volume: " .. v.guid_path .. " (" .. (v.label or "") .. ")")
+        for _, mp in ipairs(v.mount_points) do
+            if mp:match("^[Cc]:") then found_c = true end
+        end
+    end
+    lu.assertTrue(found_c, "C: drive volume should be listed")
+end
+
+function TestDisk:test_06_Surface_Scan_API()
+    -- 验证 API 存在性及基本调用（不进行实际长时间扫描）
+    lu.assertNotNil(win.disk.surface)
+    lu.assertIsFunction(win.disk.surface.scan)
+    
+    -- 如果有管理员权限，对 VHD 进行一个微小的扫描测试
+    if self.is_admin then
+        local h = win.disk.vhd.create(self.temp_vhd, 4 * 1024 * 1024)
+        win.disk.vhd.attach(h)
+        self.vhd_handle = h
+        
+        local phys_path = win.disk.vhd.wait_for_physical_path(h)
+        local idx = tonumber(phys_path:match("PhysicalDrive(%d+)"))
+        local drive = win.disk.physical.open(idx, "rw", true)
+        
+        local ok, msg = win.disk.surface.scan(drive, nil, "write", {0x55})
+        lu.assertTrue(ok, "Surface scan API test failed: " .. tostring(msg))
+        
+        drive:close()
+    end
+end
+
+-- =============================================================================
 -- [Integration Test] VHD 全生命周期与功能集成测试
 -- =============================================================================
 
@@ -185,23 +320,32 @@ function TestDisk:test_VHD_Integrated_Lifecycle()
 
     -- [Feature Test: Volume List] 验证卷列表 (覆盖 test_05)
     print("  [9/12] Verifying Volume List...")
-    local vols = win.disk.volume.list()
+    
+    -- [FIX] Retry loop for volume label recognition
+    -- 文件系统加载卷标可能需要时间，不能假设立即就绪
     local found_l1, found_l2 = false, false
-    for _, v in ipairs(vols) do
-        for _, mp in ipairs(v.mount_points) do
-            -- 注意：API 返回的路径通常带反斜杠，比较时需注意
-            if mp:lower():find(l1:lower(), 1, true) then 
-                found_l1 = true 
-                lu.assertEquals(v.label, "TEST_NTFS")
-            end
-            if mp:lower():find(l2:lower(), 1, true) then 
-                found_l2 = true 
-                lu.assertEquals(v.label, "TEST_FAT")
+    
+    for i=1, 15 do
+        local vols = win.disk.volume.list()
+        found_l1, found_l2 = false, false
+        
+        for _, v in ipairs(vols) do
+            for _, mp in ipairs(v.mount_points) do
+                if mp:lower():find(l1:lower(), 1, true) then 
+                    if v.label == "TEST_NTFS" then found_l1 = true end
+                end
+                if mp:lower():find(l2:lower(), 1, true) then 
+                    if v.label == "TEST_FAT" then found_l2 = true end
+                end
             end
         end
+        
+        if found_l1 and found_l2 then break end
+        kernel32.Sleep(500)
     end
-    lu.assertTrue(found_l1, "NTFS Volume not found in list")
-    lu.assertTrue(found_l2, "FAT32 Volume not found in list")
+    
+    lu.assertTrue(found_l1, "NTFS Volume not found or label mismatch (Timeout)")
+    lu.assertTrue(found_l2, "FAT32 Volume not found or label mismatch (Timeout)")
 
     -- [Feature Test: BitLocker] 验证加密状态 (覆盖 test_03)
     print("  [10/12] Verifying BitLocker Status...")
