@@ -11,11 +11,16 @@ end
 
 function TestDisk:tearDown()
     if self.vhd_handle then
+        -- 尝试分离
         win.disk.vhd.detach(self.vhd_handle)
         self.vhd_handle:close()
         self.vhd_handle = nil
     end
-    if win.fs and win.fs.exists(self.temp_vhd) then
+    
+    -- 给系统一点时间释放文件锁
+    ffi.C.Sleep(500)
+    
+    if win.fs.exists(self.temp_vhd) then
         os.remove(self.temp_vhd)
     end
 end
@@ -50,33 +55,95 @@ function TestDisk:test_Layout_IOCTL()
     pd:close()
 end
 
-function TestDisk:test_VHD_Workflow()
-    if not self.is_admin then print("  [SKIP] Admin required for VHD"); return end
-    
-    local h, err = win.disk.vhd.create(self.temp_vhd, 16 * 1024 * 1024)
-    lu.assertNotNil(h, "VHD Create: " .. tostring(err))
+-- 全链路 VHD 测试：创建 -> 分区 -> 格式化 -> 读写 -> 扫描 -> 清理
+function TestDisk:test_Full_VHD_Lifecycle()
+    if not self.is_admin then 
+        print("  [SKIP] Admin required for VHD Lifecycle Test")
+        return 
+    end
+
+    print("  [STEP] 1. Create VHDX (512 MB)")
+    local h, err = win.disk.vhd.create(self.temp_vhd, 512 * 1024 * 1024)
+    lu.assertNotNil(h, "VHD Create failed: " .. tostring(err))
     self.vhd_handle = h
     
-    local ok, att_err = win.disk.vhd.attach(h)
-    lu.assertTrue(ok, "Attach failed: " .. tostring(att_err))
+    print("  [STEP] 2. Attach VHD")
+    local ok_att, att_err = win.disk.vhd.attach(h)
+    lu.assertTrue(ok_att, "Attach failed: " .. tostring(att_err))
     
+    print("  [STEP] 3. Wait for Physical Drive")
     local phys_path = win.disk.vhd.wait_for_physical_path(h, 5000)
-    lu.assertNotNil(phys_path)
+    lu.assertNotNil(phys_path, "Physical path timeout")
     
     local idx = tonumber(phys_path:match("PhysicalDrive(%d+)"))
-    lu.assertNotNil(idx)
+    lu.assertNotNil(idx, "Could not parse drive index from " .. phys_path)
+    print("         -> Disk Index: " .. idx)
     
+    print("  [STEP] 4. Wipe & Initialize Layout (GPT)")
     local drive, open_err = win.disk.physical.open(idx, "rw", true)
-    lu.assertNotNil(drive, "Open VHD Physical failed: " .. tostring(open_err))
+    lu.assertNotNil(drive, "Open physical drive failed: " .. tostring(open_err))
     
-    local patterns = { 0xAA }
-    local ok_scan, scan_err = win.disk.surface.scan(drive, nil, "write", patterns)
-    lu.assertTrue(ok_scan, "Surface scan failed: " .. tostring(scan_err))
+    -- 擦除原有数据
+    drive:wipe_layout()
+    -- 通知 VDS 刷新
+    win.disk.vds.clean(idx)
     
-    local wipe_ok, wipe_err = drive:wipe_zero()
-    lu.assertTrue(wipe_ok, wipe_err)
+    -- 定义分区表: 1个数据分区，剩余空间
+    local parts = {
+        {
+            type = win.disk.types.GPT.DATA,
+            offset = 1024 * 1024, -- 1MB 对齐
+            size = drive.size - (2 * 1024 * 1024), -- 留一点尾部
+            name = "LuaWinUtils Test Partition",
+            attr = 0
+        }
+    }
     
-    drive:close()
+    local ok_layout, err_layout = win.disk.layout.apply(drive, "GPT", parts)
+    lu.assertTrue(ok_layout, "Apply Layout failed: " .. tostring(err_layout))
+    
+    drive:close() -- 关闭句柄以便后续格式化独占
+    
+    -- 等待系统识别新分区
+    ffi.C.Sleep(2000)
+    
+    print("  [STEP] 5. Format Partition (NTFS)")
+    -- format(idx, offset, fs, label, opts)
+    local ok_fmt, err_fmt = win.disk.format.format(idx, parts[1].offset, "NTFS", "LUA_TEST", { compress = true })
+    lu.assertTrue(ok_fmt, "Format failed: " .. tostring(err_fmt))
+    
+    print("  [STEP] 6. Assign Drive Letter")
+    local ok_assign, mount_point = win.disk.volume.assign(idx, parts[1].offset)
+    lu.assertTrue(ok_assign, "Assign failed: " .. tostring(mount_point))
+    print("         -> Mounted at: " .. mount_point)
+    
+    print("  [STEP] 7. File System Verification")
+    local test_file = mount_point .. "verification.txt"
+    local f = io.open(test_file, "w")
+    lu.assertNotNil(f, "Failed to create file on new drive")
+    f:write("Lua Win Utils VHD Test")
+    f:close()
+    
+    lu.assertTrue(win.fs.exists(test_file), "File created but not found?")
+    local content = io.lines(test_file)()
+    lu.assertEquals(content, "Lua Win Utils VHD Test")
+    
+    print("  [STEP] 8. Surface Scan (Read Test)")
+    -- 重新打开进行读取扫描
+    local drive_chk = win.disk.physical.open(idx, "r", true)
+    local ok_scan, msg_scan = win.disk.surface.scan(drive_chk, nil, "read")
+    lu.assertTrue(ok_scan, "Surface scan failed: " .. tostring(msg_scan))
+    drive_chk:close()
+    
+    print("  [STEP] 9. Cleanup")
+    -- 卸载盘符
+    win.disk.mount.unmount(mount_point:sub(1, 2))
+    
+    -- Detach 在 tearDown 中也会尝试，但这里显式调用以验证流程
+    local ok_det, err_det = win.disk.vhd.detach(h)
+    lu.assertTrue(ok_det, "Detach failed: " .. tostring(err_det))
+    
+    print("  [PASS] Full VHD Lifecycle Test Completed")
 end
 
 function TestDisk:test_Image_Ops()
@@ -138,9 +205,4 @@ function TestDisk:test_Volume_List()
         end
     end
     lu.assertTrue(found_c, "C: drive volume should be listed")
-end
-
-function TestDisk:test_Badblocks()
-    lu.assertNotNil(win.disk.surface)
-    lu.assertIsFunction(win.disk.surface.scan)
 end
