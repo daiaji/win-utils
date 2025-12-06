@@ -144,8 +144,9 @@ function TestProcess:test_Tree_Terminate()
         print("  [DEBUG] Found child process: " .. child_pid)
         lu.assertTrue(win.process.exists(child_pid) > 0)
         
-        -- 杀进程树
-        p:terminate_tree()
+        -- [FIX] Process 类没有直接暴露 terminate_tree 方法
+        -- 现在的统一 API 是 p:kill("tree")
+        p:kill("tree")
         ffi.C.Sleep(200)
         
         -- 验证父子全挂

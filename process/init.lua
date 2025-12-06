@@ -53,11 +53,6 @@ local PRIORITY_MAP = {
     R = 0x100   -- REALTIME
 }
 
--- [FIX] Explicit definition ensuring we don't rely on global symbols
-ffi.cdef [[
-    DWORD WaitForInputIdle(HANDLE hProcess, DWORD dwMilliseconds);
-]]
-
 --------------------------------------------------------------------------------
 -- Internal Helpers
 --------------------------------------------------------------------------------

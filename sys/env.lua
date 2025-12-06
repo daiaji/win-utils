@@ -4,21 +4,6 @@ local user32 = require 'ffi.req' 'Windows.sdk.user32'
 local util = require 'win-utils.core.util'
 local reg = require 'win-utils.reg.init'
 
--- [CDEF] user32 缺失函数补充
-if not pcall(function() return user32.SendMessageTimeoutW end) then
-    ffi.cdef[[
-        LRESULT SendMessageTimeoutW(
-            HWND hWnd, 
-            UINT Msg, 
-            WPARAM wParam, 
-            LPARAM lParam, 
-            UINT fuFlags, 
-            UINT uTimeout, 
-            PDWORD_PTR lpdwResult
-        );
-    ]]
-end
-
 local M = {}
 
 -- [get] Get Environment Variable

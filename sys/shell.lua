@@ -5,34 +5,6 @@ local kernel32 = require 'ffi.req' 'Windows.sdk.kernel32'
 local ole32 = require 'ffi.req' 'Windows.sdk.ole32'
 local util = require 'win-utils.core.util'
 
--- [CDEF] ShellExecuteEx Structs
-if not pcall(function() return ffi.sizeof("SHELLEXECUTEINFOW") end) then
-    ffi.cdef[[
-        typedef struct _SHELLEXECUTEINFOW {
-            DWORD     cbSize;
-            ULONG     fMask;
-            HWND      hwnd;
-            LPCWSTR   lpVerb;
-            LPCWSTR   lpFile;
-            LPCWSTR   lpParameters;
-            LPCWSTR   lpDirectory;
-            int       nShow;
-            HINSTANCE hInstApp;
-            void      *lpIDList;
-            LPCWSTR   lpClass;
-            HKEY      hkeyClass;
-            DWORD     dwHotKey;
-            union {
-                HANDLE hIcon;
-                HANDLE hMonitor;
-            } DUMMYUNIONNAME;
-            HANDLE    hProcess;
-        } SHELLEXECUTEINFOW;
-        
-        BOOL ShellExecuteExW(SHELLEXECUTEINFOW *pExecInfo);
-    ]]
-end
-
 local M = {}
 
 function M.parse_cmdline(cmd_line)
@@ -103,7 +75,7 @@ function M.exec(path, args, show, verb)
     -- GC Anchors
     local _ = {w_path, w_args, w_verb}
     
-    local res = ffi.C.ShellExecuteExW(info) ~= 0
+    local res = shell32.ShellExecuteExW(info) ~= 0
     
     -- If successful and we got a process handle, close it to avoid leaks
     -- (We don't return the handle as this function is fire-and-forget style like 'start')

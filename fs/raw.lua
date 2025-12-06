@@ -9,34 +9,13 @@ local token = require 'win-utils.process.token'
 local util = require 'win-utils.core.util'
 local C = require 'win-utils.core.ffi_defs'
 
--- [Def] 补充缺失的 API 定义
-if not pcall(function() return ffi.sizeof("BY_HANDLE_FILE_INFORMATION") end) then
-    ffi.cdef[[
-        typedef struct _BY_HANDLE_FILE_INFORMATION {
-            DWORD dwFileAttributes;
-            FILETIME ftCreationTime;
-            FILETIME ftLastAccessTime;
-            FILETIME ftLastWriteTime;
-            DWORD dwVolumeSerialNumber;
-            DWORD nFileSizeHigh;
-            DWORD nFileSizeLow;
-            DWORD nNumberOfLinks;
-            DWORD nFileIndexHigh;
-            DWORD nFileIndexLow;
-        } BY_HANDLE_FILE_INFORMATION;
-        
-        BOOL GetFileInformationByHandle(HANDLE hFile, BY_HANDLE_FILE_INFORMATION* lpFileInformation);
-        DWORD GetCompressedFileSizeW(LPCWSTR lpFileName, LPDWORD lpFileSizeHigh);
-    ]]
-end
-
 local M = {}
 
 -- [NEW] 获取文件物理占用空间 (Allocated Size)
 -- 能够正确处理 NTFS 压缩、稀疏文件
 function M.get_physical_size(path)
     local high = ffi.new("DWORD[1]")
-    local low = ffi.C.GetCompressedFileSizeW(util.to_wide(path), high)
+    local low = kernel32.GetCompressedFileSizeW(util.to_wide(path), high)
     
     if low == 0xFFFFFFFF then
         local err = kernel32.GetLastError()
@@ -53,7 +32,7 @@ function M.get_file_info(path)
     if not h then return nil, err end
     
     local info = ffi.new("BY_HANDLE_FILE_INFORMATION")
-    local res = ffi.C.GetFileInformationByHandle(h:get(), info)
+    local res = kernel32.GetFileInformationByHandle(h:get(), info)
     h:close()
     
     if res == 0 then return nil, util.last_error() end
