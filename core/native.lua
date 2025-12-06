@@ -113,6 +113,11 @@ function M.dos_path_to_nt_path(dos_path)
     return "\\??\\" .. dos_path
 end
 
+-- [Fix] 规范化 signed 32-bit status 为 unsigned 以进行比较
+local function norm_status(s)
+    return (s < 0) and (s + 0x100000000) or s
+end
+
 function M.query_variable_size(func, first_arg, info_class, initial_size)
     local size = initial_size or 4096
     local buf = ffi.new("uint8_t[?]", size)
@@ -126,7 +131,12 @@ function M.query_variable_size(func, first_arg, info_class, initial_size)
             status = func(first_arg, buf, size, ret_len) 
         end
         
-        if status == 0xC0000004 or status == 0x80000005 or status == 0xC0000023 then
+        local code = norm_status(status)
+        
+        -- STATUS_INFO_LENGTH_MISMATCH (0xC0000004)
+        -- STATUS_BUFFER_OVERFLOW (0x80000005)
+        -- STATUS_BUFFER_TOO_SMALL (0xC0000023)
+        if code == 0xC0000004 or code == 0x80000005 or code == 0xC0000023 then
             size = (ret_len[0] == 0) and size * 2 or ret_len[0]
             if size > 64*1024*1024 then return nil, "Buffer overflow protection" end
             buf = ffi.new("uint8_t[?]", size)
@@ -145,8 +155,9 @@ function M.query_system_info(info_class, initial_size)
     
     while true do
         local status = ntdll.NtQuerySystemInformation(info_class, buf, size, ret_len)
+        local code = norm_status(status)
         
-        if status == 0xC0000004 then 
+        if code == 0xC0000004 then 
             size = (ret_len[0] == 0) and size * 2 or ret_len[0]
             if size > 64 * 1024 * 1024 then return nil, "Buffer overflow protection" end
             buf = ffi.new("uint8_t[?]", size)

@@ -39,13 +39,20 @@ end
 function TestFS:test_Recursive_Ops_And_ReadOnly()
     local src = self.sandbox .. "\\src"
     local dst = self.sandbox .. "\\dst"
-    win.fs.mkdir(src .. "\\sub", {p=true})
+    
+    -- [Fix] Assert mkdir success to avoid nil handle crash later
+    local mk_ok, mk_err = win.fs.mkdir(src .. "\\sub", {p=true})
+    lu.assertTrue(mk_ok, "Mkdir failed: " .. tostring(mk_err))
     
     local file_path = src .. "\\sub\\file.txt"
-    local f = io.open(file_path, "w"); f:write("content"); f:close()
+    local f, err = io.open(file_path, "w")
+    lu.assertNotNil(f, "io.open failed: " .. tostring(err))
+    f:write("content")
+    f:close()
     
     -- 1. Copy
-    lu.assertTrue(win.fs.copy(src, dst))
+    local cp_ok, cp_err = win.fs.copy(src, dst)
+    lu.assertTrue(cp_ok, "Copy failed: " .. tostring(cp_err))
     lu.assertTrue(win.fs.is_dir(dst .. "\\sub"))
     lu.assertTrue(win.fs.exists(dst .. "\\sub\\file.txt"))
     
@@ -58,8 +65,8 @@ function TestFS:test_Recursive_Ops_And_ReadOnly()
     end
     
     -- 3. Delete (Should force delete readonly file)
-    local ok_del, err = win.fs.delete(src)
-    lu.assertTrue(ok_del, "Recursive delete failed on readonly file: " .. tostring(err))
+    local ok_del, err_del = win.fs.delete(src)
+    lu.assertTrue(ok_del, "Recursive delete failed on readonly file: " .. tostring(err_del))
     lu.assertFalse(win.fs.exists(src))
 end
 
