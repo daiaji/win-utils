@@ -80,6 +80,7 @@ function M.apply(d, scheme, parts)
         e.PartitionNumber = i
         e.RewritePartition = 1
         if scheme=="GPT" then
+            if not p.gpt_type then return false, "Partition " .. i .. " missing gpt_type" end -- [FIX] Explicit check
             e.Gpt.PartitionType = util.guid_from_str(p.gpt_type)
             ole32.CoCreateGuid(e.Gpt.PartitionId)
             local n = util.to_wide(p.name or ""); ffi.copy(e.Gpt.Name, n, ffi.sizeof(n))

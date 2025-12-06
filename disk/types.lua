@@ -3,6 +3,7 @@ local M = {}
 M.GPT = {
     -- Windows
     BASIC_DATA                  = "{EBD0A0A2-B9E5-4433-87C0-68B6B72699C7}",
+    DATA                        = "{EBD0A0A2-B9E5-4433-87C0-68B6B72699C7}", -- [FIX] Added Alias
     ESP                         = "{C12A7328-F81F-11D2-BA4B-00A0C93EC93B}",
     MSR                         = "{E3C9E316-0B5C-4DB8-817D-F92DF00215AE}",
     RECOVERY                    = "{DE94BBA4-06D1-4D40-A16A-BFD50179D6AC}",
