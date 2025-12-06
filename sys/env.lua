@@ -56,7 +56,10 @@ function M.set_persistent(name, value, scope)
     
     local HWND_BROADCAST = ffi.cast("HWND", 0xFFFF)
     local msg_ptr = util.to_wide("Environment")
-    local res_ptr = ffi.new("DWORD[1]")
+    
+    -- [FIX] Use correct pointer type for result (PDWORD_PTR -> DWORD_PTR*)
+    -- Using DWORD[1] on x64 would cause stack corruption as SendMessageTimeoutW writes 8 bytes.
+    local res_ptr = ffi.new("DWORD_PTR[1]")
     
     -- SendMessageTimeoutW(HWND, Msg, wParam, lParam, flags, timeout, result)
     user32.SendMessageTimeoutW(
