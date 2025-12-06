@@ -385,3 +385,17 @@ function TestDisk:test_VHD_Integrated_Lifecycle()
     print("  [12/12] Cleaning (Unmount & VDS Clean)...")
     win.disk.mount.unmount_all_on_disk(drive_index)
     self.mount_points = {} -- 已手动清理
+    
+    -- VDS Clean 测试
+    local clean_ok, clean_err = win.disk.vds.clean(drive_index)
+    lu.assertTrue(clean_ok, "VDS Clean failed: " .. tostring(clean_err))
+    
+    -- 最终验证：磁盘应该是空的
+    drive = win.disk.physical.open(drive_index, "r", true)
+    local final_layout = win.disk.layout.get(drive)
+    drive:close()
+    
+    lu.assertEquals(#final_layout.parts, 0, "Disk should be empty after clean")
+
+    print("  [SUCCESS] All Disk integration tests passed.")
+end
