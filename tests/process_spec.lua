@@ -258,9 +258,13 @@ end
 -- 11. 句柄列表 (Handles)
 function TestProcess:test_Handles()
     local pid = ffi.load("kernel32").GetCurrentProcessId()
+    print("  [DEBUG] Testing handles for PID: " .. pid)
+    
     local list = win.process.handles.list(pid)
     lu.assertIsTable(list)
-    lu.assertTrue(#list > 0)
+    print("  [DEBUG] Current process handle count: " .. #list)
+    
+    lu.assertTrue(#list > 0, "Current process should have handles")
     
     -- 系统级句柄列表 (需要提升权限或运气)
     if win.process.token.is_elevated() then

@@ -122,8 +122,10 @@ function M.query_variable_size(func, first_arg, info_class, initial_size)
     local size = initial_size or 4096
     local buf = ffi.new("uint8_t[?]", size)
     local ret_len = ffi.new("ULONG[1]")
+    local attempt = 0
     
     while true do
+        attempt = attempt + 1
         local status
         if info_class then 
             status = func(first_arg, info_class, buf, size, ret_len)
@@ -140,10 +142,16 @@ function M.query_variable_size(func, first_arg, info_class, initial_size)
             local req = ret_len[0]
             if req == 0 then req = size * 2 end
             -- [FIX] Add padding to reduce retry loop race conditions
-            size = req + 16 * 1024 
+            local new_size = req + 16 * 1024 
+            
+            print(string.format("  [DEBUG][native] QueryVarSize info=%d retry %d: Status=0x%X, Size=%d->%d", 
+                info_class or 0, attempt, code, size, new_size))
+                
+            size = new_size
             if size > 64*1024*1024 then return nil, "Buffer overflow protection" end
             buf = ffi.new("uint8_t[?]", size)
         elseif status < 0 then 
+            print(string.format("  [DEBUG][native] QueryVarSize info=%d failed: 0x%08X", info_class or 0, code))
             return nil, status 
         else 
             return buf, size, ret_len[0] 
@@ -165,11 +173,11 @@ function M.query_system_info(info_class, initial_size)
         if code == 0xC0000004 then 
             local req = ret_len[0]
             if req == 0 then req = size * 2 end
-            -- Add padding
+            -- [FIX] Add padding (64KB) to accommodate new handles created during loop
             local new_size = req + 64 * 1024 
             
-            print(string.format("  [DEBUG][native] NtQuerySystemInfo(%d) retry %d: Status=0x%X, Size=%d, Req=%d, New=%d", 
-                info_class, attempt, code, size, req, new_size))
+            print(string.format("  [DEBUG][native] NtQuerySystemInfo(%d) retry %d: Status=0x%X, Size=%d->%d", 
+                info_class, attempt, code, size, new_size))
             
             size = new_size
             if size > 64 * 1024 * 1024 then 
