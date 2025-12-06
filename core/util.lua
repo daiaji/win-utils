@@ -91,12 +91,35 @@ function M.split_path(path)
 end
 
 -- [NEW] Path Normalization
+-- Fixes issue with double backslashes which breaks some string comparisons
 function M.normalize_path(path)
     if not path then return nil end
-    -- 统一转为反斜杠，并移除尾部斜杠
-    local res = path:gsub("/", "\\"):gsub("\\+$", "")
-    -- 修正根目录情况 "C:" -> "C:\"
+    
+    -- 1. Unify separators to backslash
+    local res = path:gsub("/", "\\")
+    
+    -- 2. Detect UNC prefix (\\Server)
+    local is_unc = res:match("^\\\\")
+    
+    -- 3. Collapse multiple backslashes (\\ -> \)
+    res = res:gsub("\\+", "\\")
+    
+    -- 4. Restore UNC prefix if needed (because step 3 collapsed \\Server to \Server)
+    if is_unc then 
+        -- If it became \Server..., prepend another \
+        if res:sub(1,1) == "\\" then
+            res = "\\" .. res
+        else
+            res = "\\\\" .. res
+        end
+    end
+    
+    -- 5. Trim trailing backslash (except for root drives C:\)
+    res = res:gsub("\\+$", "")
+    
+    -- 6. Ensure drive root has backslash (C: -> C:\)
     if #res == 2 and res:sub(2,2) == ":" then res = res .. "\\" end
+    
     return res
 end
 

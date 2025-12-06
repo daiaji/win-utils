@@ -23,14 +23,14 @@ function TestNet:test_Adapter()
 end
 
 function TestNet:test_TCP_List()
-    local conns = win.net.tcp.list_tcp()
+    local conns = win.net.stat.list_tcp()
     lu.assertIsTable(conns)
     if #conns > 0 then
         lu.assertIsNumber(conns[1].pid)
         lu.assertIsString(conns[1].state)
     end
     
-    local listeners = win.net.tcp.get_tcp_listeners()
+    local listeners = win.net.stat.get_tcp_listeners()
     lu.assertIsTable(listeners)
 end
 

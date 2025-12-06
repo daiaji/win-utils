@@ -2,6 +2,8 @@ local ffi = require 'ffi'
 local kernel32 = require 'ffi.req' 'Windows.sdk.kernel32'
 local native = require 'win-utils.core.native'
 local util = require 'win-utils.core.util'
+local C = require 'win-utils.core.ffi_defs' -- Access constants
+
 local M = {}
 
 -- [API] 将镜像文件写入驱动器
@@ -55,7 +57,9 @@ end
 -- @param img_path: 目标文件路径
 -- @param cb: 进度回调
 function M.read(drive, img_path, cb)
-    local f = native.open_file(img_path, "w")
+    -- [FIX] Use open_internal with CREATE_ALWAYS (2) to create new file
+    -- native.open_file uses OPEN_EXISTING which fails for new files
+    local f = native.open_internal(img_path, 0x40000000, 0, 2, 0x80) -- GENERIC_WRITE, 0, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL
     if not f then return false, "Create image failed" end
     
     local buf_size = 1024 * 1024

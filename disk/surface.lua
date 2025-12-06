@@ -2,6 +2,11 @@ local ffi = require 'ffi'
 local kernel32 = require 'ffi.req' 'Windows.sdk.kernel32'
 local util = require 'win-utils.core.util'
 
+-- [FIX] Define memcmp as it's not in SDK bindings
+ffi.cdef [[
+    int memcmp(const void *ptr1, const void *ptr2, size_t num);
+]]
+
 local M = {}
 
 -- [API] 表面扫描 (原 badblocks)

@@ -52,7 +52,8 @@ function M.list_regions(pid)
         end
         
         local info = {
-            base = tonumber(ffi.cast("uintptr_t", mbi.BaseAddress)),
+            -- [FIX] Use 'addr' instead of 'base' to match test expectations
+            addr = tonumber(ffi.cast("uintptr_t", mbi.BaseAddress)),
             size = tonumber(mbi.RegionSize),
             state = tonumber(mbi.State),
             protect = tonumber(mbi.Protect),
