@@ -13,7 +13,8 @@ local sub_modules = {
     esp       = 'win-utils.disk.esp',
     defs      = 'win-utils.disk.defs',
     types     = 'win-utils.disk.types',
-    bitlocker = 'win-utils.disk.bitlocker'
+    bitlocker = 'win-utils.disk.bitlocker',
+    volume    = 'win-utils.disk.volume'
 }
 
 setmetatable(M, {
@@ -69,7 +70,6 @@ function M.clean_all(drive_index, cb)
     if not drive then return false end
     if not drive:lock(true) then drive:close(); return false end
     
-    -- [FIX] Correct arguments for zero_fill (just callback)
     local ok, err = drive:zero_fill(cb)
     
     drive:close()
@@ -105,6 +105,24 @@ function M.rescan()
         return true
     end
     return false
+end
+
+-- [NEW] Sync All Volumes (Flush Cache)
+function M.sync()
+    local volume = require 'win-utils.disk.volume'
+    local kernel32 = require 'ffi.req' 'Windows.sdk.kernel32'
+    
+    local list = volume.list()
+    if not list then return end
+    
+    for _, v in ipairs(list) do
+        -- Open volume for writing attributes (minimal access required for Flush)
+        local h = volume.open(v.guid_path, true) -- write access needed
+        if h then
+            kernel32.FlushFileBuffers(h:get())
+            h:close()
+        end
+    end
 end
 
 return M

@@ -9,7 +9,7 @@ local token = require 'win-utils.process.token'
 local util = require 'win-utils.core.util'
 local C = require 'win-utils.core.ffi_defs'
 
--- Define struct for file info if not available
+-- [Def] 补充缺失的 API 定义
 if not pcall(function() return ffi.sizeof("BY_HANDLE_FILE_INFORMATION") end) then
     ffi.cdef[[
         typedef struct _BY_HANDLE_FILE_INFORMATION {
@@ -26,12 +26,27 @@ if not pcall(function() return ffi.sizeof("BY_HANDLE_FILE_INFORMATION") end) the
         } BY_HANDLE_FILE_INFORMATION;
         
         BOOL GetFileInformationByHandle(HANDLE hFile, BY_HANDLE_FILE_INFORMATION* lpFileInformation);
+        DWORD GetCompressedFileSizeW(LPCWSTR lpFileName, LPDWORD lpFileSizeHigh);
     ]]
 end
 
 local M = {}
 
--- [NEW] Get Low-level File Info (Inode, Links, Serial)
+-- [NEW] 获取文件物理占用空间 (Allocated Size)
+-- 能够正确处理 NTFS 压缩、稀疏文件
+function M.get_physical_size(path)
+    local high = ffi.new("DWORD[1]")
+    local low = ffi.C.GetCompressedFileSizeW(util.to_wide(path), high)
+    
+    if low == 0xFFFFFFFF then
+        local err = kernel32.GetLastError()
+        if err ~= 0 then return nil, err end
+    end
+    
+    return high[0] * 4294967296 + low
+end
+
+-- 获取文件底层信息 (Inode, Links, Serial)
 function M.get_file_info(path)
     -- 打开句柄，仅读取属性，允许共享读写删除
     local h, err = native.open_file(path, "r", true) 
@@ -58,7 +73,6 @@ end
 
 function M.delete_posix(path)
     -- Use "rd" (Read + Delete) access.
-    -- FileDispositionInformation requires DELETE access.
     local h, e = native.open_file(path, "rd", "exclusive")
     if not h then return false, e end
     
@@ -84,7 +98,6 @@ function M.set_times(path, c, a, w)
     if w then i.LastWriteTime = w end
     
     local io = ffi.new("IO_STATUS_BLOCK")
-    -- FileBasicInformation = 4
     local s = ntdll.NtSetInformationFile(h:get(), io, i, ffi.sizeof(i), 4)
     h:close()
     return s >= 0
