@@ -114,8 +114,6 @@ function M.dos_path_to_nt_path(dos_path)
 end
 
 -- [Fix] 使用 ffi.cast 规范化 signed 32-bit status 为 unsigned
--- LuaJIT bit op 操作是有符号的，简单的数学运算在 double 上也可能出问题
--- 显式 cast 是最安全的方法
 local function norm_status(s)
     return tonumber(ffi.cast("uint32_t", s))
 end
@@ -139,7 +137,10 @@ function M.query_variable_size(func, first_arg, info_class, initial_size)
         -- STATUS_BUFFER_OVERFLOW (0x80000005)
         -- STATUS_BUFFER_TOO_SMALL (0xC0000023)
         if code == 0xC0000004 or code == 0x80000005 or code == 0xC0000023 then
-            size = (ret_len[0] == 0) and size * 2 or ret_len[0]
+            local req = ret_len[0]
+            if req == 0 then req = size * 2 end
+            -- [FIX] Add padding to reduce retry loop race conditions
+            size = req + 16 * 1024 
             if size > 64*1024*1024 then return nil, "Buffer overflow protection" end
             buf = ffi.new("uint8_t[?]", size)
         elseif status < 0 then 
@@ -160,7 +161,10 @@ function M.query_system_info(info_class, initial_size)
         local code = norm_status(status)
         
         if code == 0xC0000004 then 
-            size = (ret_len[0] == 0) and size * 2 or ret_len[0]
+            local req = ret_len[0]
+            if req == 0 then req = size * 2 end
+            -- [FIX] Add padding (64KB) to accommodate new handles created during loop
+            size = req + 64 * 1024 
             if size > 64 * 1024 * 1024 then return nil, "Buffer overflow protection" end
             buf = ffi.new("uint8_t[?]", size)
         elseif status < 0 then

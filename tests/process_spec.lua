@@ -269,6 +269,11 @@ function TestProcess:test_Handles()
         
         print("  [DEBUG] System Handle Count: " .. #sys_handles)
         
+        -- [DEBUG] 如果为空，打印一下状态以便调试
+        if #sys_handles == 0 then
+            print("  [ERROR] list_system returned empty table!")
+        end
+        
         -- 整个系统的句柄数通常成千上万
         lu.assertTrue(#sys_handles > 100)
         
