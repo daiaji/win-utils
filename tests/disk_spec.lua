@@ -324,21 +324,28 @@ function TestDisk:test_VHD_Integrated_Lifecycle()
     local function verify_io(path, name)
         local p = path .. "test_io.txt"
         
-        -- [FIX] Retry loop for initial IO
-        -- 刚挂载的卷可能还没被系统完全识别，尝试写入可能会报 "device not ready"
-        -- 重试 10 次，每次间隔 500ms
-        local f, err
-        for i=1, 10 do
-            f, err = io.open(p, "w")
-            if f then break end
+        -- [FIX] Bypass CRT `fopen` (io.open) and use native Win32 API for robust testing
+        -- This avoids EINVAL caused by CRT not seeing the drive yet
+        local native = require 'win-utils.core.native'
+        local hFile, open_err
+        
+        -- Retry loop for device readiness
+        for i=1, 20 do
+            hFile, open_err = native.open_file(p, "w")
+            if hFile then break end
             kernel32.Sleep(500)
         end
         
-        -- [Debug] 打印具体的错误信息，方便排查
-        lu.assertNotNil(f, string.format("%s write open failed: %s", name, tostring(err)))
+        lu.assertNotNil(hFile, string.format("%s write open failed: %s", name, tostring(open_err)))
         
-        f:write("hello " .. name)
-        f:close()
+        local data = "hello " .. name
+        local written = ffi.new("DWORD[1]")
+        -- 使用 FFI 直接写入，绕过 Lua 字符串转换
+        local buf = ffi.cast("const void*", data)
+        kernel32.WriteFile(hFile:get(), buf, #data, written, nil)
+        hFile:close()
+        
+        lu.assertEquals(written[0], #data, name .. " write partial")
         
         local info = win.fs.stat(p)
         lu.assertNotNil(info, name.." stat failed")
@@ -346,7 +353,7 @@ function TestDisk:test_VHD_Integrated_Lifecycle()
         local f2 = io.open(p, "r")
         local d = f2:read("*a")
         f2:close()
-        lu.assertEquals(d, "hello " .. name)
+        lu.assertEquals(d, data)
     end
     
     verify_io(l1, "NTFS")
