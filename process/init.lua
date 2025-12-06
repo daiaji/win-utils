@@ -9,6 +9,7 @@ local class = require 'win-utils.deps'.class
 local table_new = require 'table.new'
 local table_ext = require 'ext.table'
 local jit = require 'jit' 
+local token = require 'win-utils.process.token' -- [FIX] 引入 Token 模块用于自动提权
 
 local M = {}
 
@@ -146,13 +147,13 @@ function Process:get_info()
 end
 
 function Process:terminate_tree()
-    local token = require 'win-utils.process.token'
-    token.enable_privilege("SeDebugPrivilege")
     local function kill(pid)
         for p in M.each() do
             if p.parent_pid == pid and p.pid ~= pid then kill(p.pid); M.terminate(p.pid) end
         end
     end
+    -- [AUTO-ELEVATE] Ensure we can see all processes
+    token.enable_privilege("SeDebugPrivilege")
     kill(self.pid)
     return self:terminate()
 end
@@ -167,8 +168,21 @@ function M.exec(cmd, workdir, show)
     return Process(tonumber(pi.dwProcessId), pi.hProcess)
 end
 
+-- [IMPROVED] Robust Open with Auto-Elevation
 function M.open(pid, access)
-    local h = kernel32.OpenProcess(access or 0x1F0FFF, false, pid)
+    access = access or 0x1F0FFF -- PROCESS_ALL_ACCESS
+    local h = kernel32.OpenProcess(access, false, pid)
+    
+    if not h then
+        local err = kernel32.GetLastError()
+        if err == 5 then -- ACCESS_DENIED
+            -- Try to enable SeDebugPrivilege and retry
+            if token.enable_privilege("SeDebugPrivilege") then
+                h = kernel32.OpenProcess(access, false, pid)
+            end
+        end
+    end
+    
     if not h then return nil end
     return Process(pid, h)
 end
@@ -182,9 +196,7 @@ function M.each()
     local hSnap = kernel32.CreateToolhelp32Snapshot(2, 0)
     if hSnap == INVALID_HANDLE then return function() end end
     
-    -- [FIX] Use RAII Handle to prevent leaks when loop is broken
     local safe_snap = Handle(hSnap)
-    
     local pe = ffi.new("PROCESSENTRY32W"); pe.dwSize = ffi.sizeof(pe)
     local first = true
     
@@ -251,19 +263,54 @@ function M.find_all(name)
     return res
 end
 
-function M.terminate(pid) local p = M.open(pid, 1); if p then local r = p:terminate(); p:close(); return r end return false end
-function M.suspend(pid) local p = M.open(pid, 0x800); if p then local r = p:suspend(); p:close(); return r end return false end
-function M.resume(pid) local p = M.open(pid, 0x800); if p then local r = p:resume(); p:close(); return r end return false end
+-- [Legacy] Simpler wrappers
+function M.terminate(pid) 
+    -- 1 = PROCESS_TERMINATE
+    local p = M.open(pid, 1) 
+    if p then 
+        local r = p:terminate()
+        p:close()
+        return r 
+    end 
+    return false 
+end
 
--- [FIX] JIT Safe Callback Wrapper
+function M.suspend(pid) 
+    local p = M.open(pid, 0x800) -- PROCESS_SUSPEND_RESUME
+    if p then 
+        local r = p:suspend()
+        p:close()
+        return r 
+    end 
+    return false 
+end
+
+function M.resume(pid) 
+    local p = M.open(pid, 0x800)
+    if p then 
+        local r = p:resume()
+        p:close()
+        return r 
+    end 
+    return false 
+end
+
+-- [SAFETY] JIT-Safe Graceful Termination
 function M.terminate_gracefully(pid, timeout)
+    -- 0x100001 = SYNCHRONIZE | PROCESS_TERMINATE
     local h = kernel32.OpenProcess(0x100001, false, pid)
+    
+    -- Auto-Elevate check
+    if not h and kernel32.GetLastError() == 5 then
+        token.enable_privilege("SeDebugPrivilege")
+        h = kernel32.OpenProcess(0x100001, false, pid)
+    end
+    
     if not h then return false end
 
     local ptr = ffi.new("DWORD[1]")
     
-    jit.off() -- Disable JIT for callback safety
-    
+    jit.off()
     local cb = ffi.cast("WNDENUMPROC", function(w, l)
         local ok = pcall(function()
             user32.GetWindowThreadProcessId(w, ptr)
@@ -276,8 +323,7 @@ function M.terminate_gracefully(pid, timeout)
 
     user32.EnumWindows(cb, 0)
     cb:free()
-    
-    jit.on() -- Restore JIT
+    jit.on()
 
     if kernel32.WaitForSingleObject(h, timeout or 3000) == 258 then
         kernel32.TerminateProcess(h, 0)
@@ -285,6 +331,24 @@ function M.terminate_gracefully(pid, timeout)
     
     kernel32.CloseHandle(h)
     return true
+end
+
+-- [NEW] Unified Kill API
+-- @param mode: "force" (default), "soft" (graceful), "tree" (recursive)
+function M.kill(pid, mode)
+    if mode == "soft" then
+        return M.terminate_gracefully(pid)
+    elseif mode == "tree" then
+        local p = M.open(pid, 1) -- PROCESS_TERMINATE
+        if p then
+            local r = p:terminate_tree()
+            p:close()
+            return r
+        end
+        return false
+    else
+        return M.terminate(pid)
+    end
 end
 
 function M.wait(name_or_pid, timeout)
@@ -301,7 +365,7 @@ end
 function M.wait_close(name_or_pid, timeout)
     local pid = M.exists(name_or_pid)
     if pid == 0 then return true end
-    local h = kernel32.OpenProcess(0x100000, false, pid)
+    local h = kernel32.OpenProcess(0x100000, false, pid) -- SYNCHRONIZE
     if not h then return false end
     local res = kernel32.WaitForSingleObject(h, timeout or -1)
     kernel32.CloseHandle(h)
