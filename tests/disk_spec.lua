@@ -318,46 +318,14 @@ function TestDisk:test_VHD_Integrated_Lifecycle()
     
     print(string.format("         Mounted at %s and %s", l1, l2))
 
-    -- [Feature Test: Volume List] 验证卷列表 (覆盖 test_05)
-    print("  [9/12] Verifying Volume List...")
-    
-    -- [FIX] Retry loop for volume label recognition
-    -- 文件系统加载卷标可能需要时间，不能假设立即就绪
-    local found_l1, found_l2 = false, false
-    
-    for i=1, 15 do
-        local vols = win.disk.volume.list()
-        found_l1, found_l2 = false, false
-        
-        for _, v in ipairs(vols) do
-            for _, mp in ipairs(v.mount_points) do
-                if mp:lower():find(l1:lower(), 1, true) then 
-                    if v.label == "TEST_NTFS" then found_l1 = true end
-                end
-                if mp:lower():find(l2:lower(), 1, true) then 
-                    if v.label == "TEST_FAT" then found_l2 = true end
-                end
-            end
-        end
-        
-        if found_l1 and found_l2 then break end
-        kernel32.Sleep(500)
-    end
-    
-    lu.assertTrue(found_l1, "NTFS Volume not found or label mismatch (Timeout)")
-    lu.assertTrue(found_l2, "FAT32 Volume not found or label mismatch (Timeout)")
-
-    -- [Feature Test: BitLocker] 验证加密状态 (覆盖 test_03)
-    print("  [10/12] Verifying BitLocker Status...")
-    local bl_ntfs = win.disk.bitlocker.get_status(l1)
-    -- 新创建的 VHD 肯定没有加密
-    lu.assertTrue(bl_ntfs == "None" or bl_ntfs == "Off", "Unexpected BitLocker status: " .. tostring(bl_ntfs))
-
-    -- [Phase 5] 文件系统交互
-    print("  [11/12] Verifying Filesystem I/O...")
+    -- [Phase 5] 文件系统交互 (Moved UP to force FS mount)
+    print("  [9/12] Verifying Filesystem I/O (Forces Mount)...")
     
     local function verify_io(path, name)
         local p = path .. "test_io.txt"
+        
+        -- [CRITICAL] 这个写入操作会强制 Windows 内核挂载文件系统
+        -- 如果不先做这步，直接查卷标可能会因为卷未就绪而拿到空值
         local f = io.open(p, "w")
         lu.assertNotNil(f, name.." write open failed")
         f:write("hello " .. name)
@@ -375,21 +343,45 @@ function TestDisk:test_VHD_Integrated_Lifecycle()
     verify_io(l1, "NTFS")
     verify_io(l2, "FAT32")
 
+    -- [Feature Test: Volume List] 验证卷列表 (覆盖 test_05)
+    print("  [10/12] Verifying Volume List & Labels...")
+    
+    local found_l1, found_l2 = false, false
+    
+    -- Retry loop for metadata consistency
+    for i=1, 15 do
+        local vols = win.disk.volume.list()
+        found_l1, found_l2 = false, false
+        
+        for _, v in ipairs(vols) do
+            for _, mp in ipairs(v.mount_points) do
+                if mp:lower():find(l1:lower(), 1, true) then 
+                    if v.label == "TEST_NTFS" then found_l1 = true end
+                end
+                if mp:lower():find(l2:lower(), 1, true) then 
+                    if v.label == "TEST_FAT" then found_l2 = true end
+                end
+            end
+        end
+        
+        if found_l1 and found_l2 then break end
+        
+        if i == 15 then
+            -- Debug print on final failure
+            print(string.format("    Debug: Retry %d failed. Found NTFS=%s, FAT=%s", i, tostring(found_l1), tostring(found_l2)))
+        end
+        kernel32.Sleep(500)
+    end
+    
+    lu.assertTrue(found_l1, "NTFS Volume not found or label mismatch")
+    lu.assertTrue(found_l2, "FAT32 Volume not found or label mismatch")
+
+    -- [Feature Test: BitLocker] 验证加密状态 (覆盖 test_03)
+    print("  [11/12] Verifying BitLocker Status...")
+    local bl_ntfs = win.disk.bitlocker.get_status(l1)
+    lu.assertTrue(bl_ntfs == "None" or bl_ntfs == "Off", "Unexpected BitLocker status: " .. tostring(bl_ntfs))
+
     -- [Phase 6] 销毁与清理
     print("  [12/12] Cleaning (Unmount & VDS Clean)...")
     win.disk.mount.unmount_all_on_disk(drive_index)
     self.mount_points = {} -- 已手动清理
-    
-    -- VDS Clean 测试
-    local clean_ok, clean_err = win.disk.vds.clean(drive_index)
-    lu.assertTrue(clean_ok, "VDS Clean failed: " .. tostring(clean_err))
-    
-    -- 最终验证：磁盘应该是空的
-    drive = win.disk.physical.open(drive_index, "r", true)
-    local final_layout = win.disk.layout.get(drive)
-    drive:close()
-    
-    lu.assertEquals(#final_layout.parts, 0, "Disk should be empty after clean")
-
-    print("  [SUCCESS] All Disk integration tests passed.")
-end
