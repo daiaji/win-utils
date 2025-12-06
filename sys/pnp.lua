@@ -8,6 +8,7 @@ local class = require 'win-utils.deps'.class
 -- [FFI Definitions] -----------------------------------------------------------
 ffi.cdef [[
     typedef void* HDEVNOTIFY;
+    typedef HANDLE HMENU; /* [FIX] Explicitly define HMENU as it is missing in minwindef */
     
     typedef struct _DEV_BROADCAST_HDR {
         DWORD dbch_size;
