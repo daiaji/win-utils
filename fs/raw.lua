@@ -1,4 +1,5 @@
 local ffi = require 'ffi'
+local bit = require 'bit'
 local ntdll = require 'ffi.req' 'Windows.sdk.ntdll'
 local ntext = require 'ffi.req' 'Windows.sdk.ntext'
 local advapi32 = require 'ffi.req' 'Windows.sdk.advapi32'
@@ -8,18 +9,62 @@ local token = require 'win-utils.process.token'
 local util = require 'win-utils.core.util'
 local C = require 'win-utils.core.ffi_defs'
 
+-- Define struct for file info if not available
+if not pcall(function() return ffi.sizeof("BY_HANDLE_FILE_INFORMATION") end) then
+    ffi.cdef[[
+        typedef struct _BY_HANDLE_FILE_INFORMATION {
+            DWORD dwFileAttributes;
+            FILETIME ftCreationTime;
+            FILETIME ftLastAccessTime;
+            FILETIME ftLastWriteTime;
+            DWORD dwVolumeSerialNumber;
+            DWORD nFileSizeHigh;
+            DWORD nFileSizeLow;
+            DWORD nNumberOfLinks;
+            DWORD nFileIndexHigh;
+            DWORD nFileIndexLow;
+        } BY_HANDLE_FILE_INFORMATION;
+        
+        BOOL GetFileInformationByHandle(HANDLE hFile, BY_HANDLE_FILE_INFORMATION* lpFileInformation);
+    ]]
+end
+
 local M = {}
 
+-- [NEW] Get Low-level File Info (Inode, Links, Serial)
+function M.get_file_info(path)
+    -- 打开句柄，仅读取属性，允许共享读写删除
+    local h, err = native.open_file(path, "r", true) 
+    if not h then return nil, err end
+    
+    local info = ffi.new("BY_HANDLE_FILE_INFORMATION")
+    local res = ffi.C.GetFileInformationByHandle(h:get(), info)
+    h:close()
+    
+    if res == 0 then return nil, util.last_error() end
+    
+    return {
+        attr = info.dwFileAttributes,
+        size = info.nFileSizeHigh * 4294967296 + info.nFileSizeLow,
+        vol_serial = info.dwVolumeSerialNumber,
+        -- Windows "Inode" = FileIndex
+        file_index = bit.bor(bit.lshift(info.nFileIndexHigh, 32), info.nFileIndexLow),
+        nlink = info.nNumberOfLinks,
+        ctime = info.ftCreationTime,
+        atime = info.ftLastAccessTime,
+        mtime = info.ftLastWriteTime
+    }
+end
+
 function M.delete_posix(path)
-    -- [FIX] Use "rd" (Read + Delete) instead of "rwd". 
-    -- "w" adds GENERIC_WRITE which fails on ReadOnly files.
-    -- FileDispositionInformation only requires DELETE access.
+    -- Use "rd" (Read + Delete) access.
+    -- FileDispositionInformation requires DELETE access.
     local h, e = native.open_file(path, "rd", "exclusive")
     if not h then return false, e end
     
     local info = ffi.new("FILE_DISPOSITION_INFO_EX"); info.Flags = 0x13 -- Delete | Posix | IgnoreReadOnly
     local io = ffi.new("IO_STATUS_BLOCK")
-    local s = ntdll.NtSetInformationFile(h:get(), io, info, ffi.sizeof(info), 64)
+    local s = ntdll.NtSetInformationFile(h:get(), io, info, ffi.sizeof(info), 64) -- FileDispositionInformationEx
     h:close()
     return s >= 0
 end
@@ -33,8 +78,13 @@ function M.set_times(path, c, a, w)
     if not h then return false end
     
     local i = ffi.new("FILE_BASIC_INFORMATION")
-    i.CreationTime.QuadPart = c or 0; i.LastAccessTime.QuadPart = a or 0; i.LastWriteTime.QuadPart = w or 0
+    -- 0 means do not change
+    if c then i.CreationTime = c end
+    if a then i.LastAccessTime = a end
+    if w then i.LastWriteTime = w end
+    
     local io = ffi.new("IO_STATUS_BLOCK")
+    -- FileBasicInformation = 4
     local s = ntdll.NtSetInformationFile(h:get(), io, i, ffi.sizeof(i), 4)
     h:close()
     return s >= 0
@@ -63,7 +113,9 @@ function M.take_ownership(path)
     if not h then return false end
     
     local sid = ffi.new("PSID[1]")
-    if advapi32.ConvertStringSidToSidW(util.to_wide("S-1-5-32-544"), sid) == 0 then h:close(); return false end
+    if advapi32.ConvertStringSidToSidW(util.to_wide("S-1-5-32-544"), sid) == 0 then 
+        h:close(); return false 
+    end
     
     local sd_buf = ffi.new("uint8_t[256]")
     local sd = ffi.cast("PSECURITY_DESCRIPTOR", sd_buf)
