@@ -146,9 +146,29 @@ function M.assign(idx, offset, letter)
     local guid_path, err = M.wait_for_partition(idx, offset, 15000)
     if not guid_path then return false, "Volume not found: " .. tostring(err) end
     
+    -- [OPTIMIZATION] Check if already mounted
+    -- 如果系统已经自动分配了盘符，直接返回该盘符，避免重复操作报错
+    -- 注意：如果调用者指定了特定 letter，则跳过此检查，强制尝试挂载到指定盘符
+    if not letter then
+        local buf = ffi.new("wchar_t[1024]")
+        local len = ffi.new("DWORD[1]")
+        if kernel32.GetVolumePathNamesForVolumeNameW(util.to_wide(guid_path), buf, 1024, len) ~= 0 then
+            local p = buf
+            while p[0] ~= 0 do
+                local mp = util.from_wide(p)
+                if mp and mp:match("^[A-Za-z]:\\$") then
+                    return true, mp
+                end
+                while p[0] ~= 0 do p = p + 1 end
+                p = p + 1
+                if p >= buf + len[0] then break end
+            end
+        end
+    end
+    
     local exclude_map = {}
     local attempt = 0
-    local max_attempts = letter and 1 or 5 -- 如果指定了盘符，只试1次；否则试5次不同盘符
+    local max_attempts = letter and 1 or 5 
     
     while attempt < max_attempts do
         attempt = attempt + 1
@@ -160,10 +180,13 @@ function M.assign(idx, offset, letter)
         if mount_point:sub(-1) ~= "\\" then mount_point = mount_point .. "\\" end
         if guid_path:sub(-1) ~= "\\" then guid_path = guid_path .. "\\" end
         
-        -- [FIX] 防御性清理：确保没有残留的 DOS 设备映射
-        -- 如果之前 format 使用了 temp_mount(Z:) 且未干净卸载，这里会帮忙清理
+        -- [FIX] 防御性清理
         local raw_letter = mount_point:sub(1, 2)
-        kernel32.DefineDosDeviceW(2, util.to_wide(raw_letter), nil) -- DDD_REMOVE_DEFINITION
+        -- 清理 Legacy DOS Device
+        kernel32.DefineDosDeviceW(2, util.to_wide(raw_letter), nil) 
+        -- 清理 Mount Manager (如果有残留)
+        -- 注意：DeleteVolumeMountPointW 需要带反斜杠
+        kernel32.DeleteVolumeMountPointW(util.to_wide(mount_point))
         
         -- 3. 尝试挂载 (带重试)
         local w_mount = util.to_wide(mount_point)
@@ -180,11 +203,9 @@ function M.assign(idx, offset, letter)
             
             last_msg, last_code = util.last_error()
             
-            -- 如果是 87 (参数错误)，可能是盘符被占用或状态未刷新，尝试稍等
             if last_code == 87 then
                 kernel32.Sleep(200)
             else
-                -- 其他错误（如权限不足）可能无法通过重试解决
                 break
             end
         end
@@ -193,10 +214,8 @@ function M.assign(idx, offset, letter)
             return true, mount_point 
         end
         
-        -- 如果失败且是自动分配模式，记录该盘符有问题，下次循环换一个
         if not letter then
             exclude_map[mount_point:sub(1,1)] = true
-            -- 继续下一次 while 循环
         else
             return false, string.format("SetVolumeMountPoint(%s) failed: %s (%d)", mount_point, last_msg, last_code)
         end
