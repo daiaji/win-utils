@@ -55,7 +55,6 @@ end
 function PhysicalDrive:lock(force)
     -- FSCTL_ALLOW_EXTENDED_DASD_IO
     -- [Note] 物理磁盘句柄通常不需要此操作，或者不支持 (Error 87/1)。
-    -- 我们仅尝试调用，如果失败且错误码不是“参数错误(87)”或“功能无效(1)”，则记录警告但不终止。
     -- 只有“拒绝访问(5)”才是真正的阻断性错误。
     local ok, err, code = self:ioctl(defs.IOCTL.DASD)
     if not ok then 

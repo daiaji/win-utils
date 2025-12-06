@@ -24,7 +24,8 @@ end
 -- [API] 获取并格式化 GetLastError()
 -- @param prefix: 可选，错误信息前缀
 function M.last_error(prefix)
-    local code = tonumber(kernel32.GetLastError()) -- [FIX] Ensure pure Lua number
+    -- [FIX] Ensure code is a plain Lua number, not cdata
+    local code = tonumber(kernel32.GetLastError())
     local msg = M.format(code)
     
     if prefix then

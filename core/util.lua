@@ -62,7 +62,8 @@ end
 
 function M.guid_from_str(s)
     local g = ffi.new("GUID")
-    if not s then return g end -- [FIX] Return empty GUID for nil input
+    -- [Defensive] 如果传入 nil，返回全零 GUID，避免崩溃
+    if not s then return g end
     
     local d1, d2, d3, d4_1, d4_2 = s:match("{?(%x+)-(%x+)-(%x+)-(%x+)-(%x+)}?")
     if d1 then
