@@ -258,29 +258,19 @@ end
 -- 11. 句柄列表 (Handles)
 function TestProcess:test_Handles()
     local pid = ffi.load("kernel32").GetCurrentProcessId()
-    print("  [DEBUG] Testing handles for PID: " .. pid)
-    
     local list = win.process.handles.list(pid)
     lu.assertIsTable(list)
-    print("  [DEBUG] Current process handle count: " .. #list)
-    
-    lu.assertTrue(#list > 0, "Current process should have handles")
+    lu.assertTrue(#list > 0)
     
     -- 系统级句柄列表 (需要提升权限或运气)
     if win.process.token.is_elevated() then
-        print("  [DEBUG] Attempting system handle list (Elevated)...")
         local sys_handles = win.process.handles.list_system()
         lu.assertIsTable(sys_handles)
-        
-        local count = #sys_handles
-        print("  [DEBUG] System Handle Count Returned: " .. count)
-        
         -- 整个系统的句柄数通常成千上万
-        -- 如果返回 0，说明逻辑全崩了
-        lu.assertTrue(count > 100, "Expected >100 handles, got " .. count)
+        lu.assertTrue(#sys_handles > 100)
         
         -- 检查结构
-        if count > 0 then
+        if #sys_handles > 0 then
             local h = sys_handles[1]
             lu.assertIsNumber(h.pid)
             lu.assertIsNumber(h.val) -- handle value
