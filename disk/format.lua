@@ -38,7 +38,6 @@ function M.format(idx, off, fs, lab, opts)
     
     -- [Priority 2] Legacy (Mount + FMIFS)
     -- Rufus: 默认首选。虽然需要盘符，但它是同步的，且不会受 VDS 缓存延迟影响。
-    local error_fmifs = "Skipped"
     
     -- 尝试挂载临时盘符
     local letter = mount.temp_mount(idx, off)
@@ -60,19 +59,19 @@ function M.format(idx, off, fs, lab, opts)
         if ok_fmifs then 
             return true, "Legacy FMIFS" 
         else
-            error_fmifs = msg_fmifs
+            -- [STRICT] Rufus logic: Do not fallback to VDS if FMIFS failed explicitly.
+            -- This exposes the real error (e.g. Write Protected, IO Error) instead of masking it with a VDS generic error.
+            return false, "FMIFS Failed: " .. tostring(msg_fmifs)
         end
-    else
-        error_fmifs = "Could not assign temp drive letter"
     end
     
-    -- [Priority 3] VDS (Modern System API)
-    -- Rufus: 仅当 Legacy 失败或用户强制开启时使用。作为兜底方案。
-    -- VDS 不需要盘符，可以直接通过 GUID 操作，适合处理“盘符耗尽”或“权限受限”的情况。
+    -- [Priority 3] VDS (Fallback / No Mount)
+    -- Rufus: 仅当 Legacy 无法启动（如无法分配盘符）时使用。
+    -- VDS 不需要盘符，可以直接通过 GUID 操作。
     local ok_vds, msg_vds = vds.format(idx, off, fs, lab, true, 0, 0)
     if ok_vds then return true, "VDS (Fallback)" end
     
-    return false, string.format("All strategies failed. FMIFS: %s | VDS: %s", tostring(error_fmifs), tostring(msg_vds))
+    return false, string.format("All strategies failed. Mount: No letter | VDS: %s", tostring(msg_vds))
 end
 
 return M
