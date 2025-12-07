@@ -8,6 +8,15 @@ local C = require 'win-utils.core.ffi_defs'
 local table_new = require 'table.new'
 local table_ext = require 'ext.table'
 
+-- [RESTORED] Shrink IOCTL Structure
+ffi.cdef[[
+    typedef struct _SHRINK_VOLUME_INFORMATION {
+        int ShrinkRequestType; // 1=Prepare, 2=Commit, 3=Abort
+        long long Flags;
+        long long NewSize;
+    } SHRINK_VOLUME_INFORMATION;
+]]
+
 local M = {}
 
 local DRIVE_TYPES = {
@@ -20,25 +29,18 @@ local DRIVE_TYPES = {
     [6] = "RAMDisk"
 }
 
--- [RESTORED] 获取驱动器类型 (Fixed, Removable, CDROM, RAMDisk...)
--- @param root: 路径 (如 "C:", "C:\", "\\?\Volume{...}\")
 function M.get_type(root)
     local path = root
-    -- GetDriveType 需要尾部反斜杠 (例如 "C:\")
     if path and not path:match("[\\/]$") then 
         path = path .. "\\" 
     end
-    
     local t = kernel32.GetDriveTypeW(util.to_wide(path))
     return DRIVE_TYPES[t] or "Unknown"
 end
 
--- [RESTORED] 简单枚举所有逻辑盘符
--- @return: table {"C:", "D:", ...}
 function M.list_letters()
     local mask = kernel32.GetLogicalDrives()
     local list = {}
-    -- 0=A, 1=B, ... 25=Z
     for i = 0, 25 do
         if bit.band(mask, bit.lshift(1, i)) ~= 0 then
             table.insert(list, string.char(65 + i) .. ":")
@@ -84,9 +86,7 @@ function M.list()
         item.fs = util.from_wide(fs)
     end
     
-    -- 补充类型判断
     item.type = M.get_type(item.guid_path)
-    
     table.insert(res, item)
     
     if kernel32.FindNextVolumeW(hFind, name, 261) ~= 0 then
@@ -177,6 +177,17 @@ function M.unmount_all_on_disk(idx)
     end
 end
 
+-- [RESTORED] Remove a specific mount point (e.g. "X:\")
+function M.remove_mount_point(path)
+    local root = path
+    if #root == 2 and root:sub(2,2) == ":" then root = root .. "\\" end
+    
+    if kernel32.DeleteVolumeMountPointW(util.to_wide(root)) == 0 then
+        return false, util.last_error("DeleteVolumeMountPoint failed")
+    end
+    return true
+end
+
 function M.set_label(path, label)
     local root = path
     if #root == 2 and root:sub(2,2) == ":" then root = root .. "\\"
@@ -186,6 +197,46 @@ function M.set_label(path, label)
         return false, util.last_error("SetVolumeLabel failed")
     end
     return true
+end
+
+-- [RESTORED] Extend Volume to fill partition
+-- This requires the underlying partition to be larger than the volume first (resize via layout.lua)
+function M.extend(path)
+    local h = M.open(path, true) -- Need Write Access
+    if not h then return false, "Open failed" end
+    
+    local input = ffi.new("int64_t[1]", 0) -- 0 = Extend to max available
+    local ok, err = util.ioctl(h:get(), defs.IOCTL.EXTEND, input, 8)
+    
+    h:close()
+    return ok, err
+end
+
+-- [RESTORED] Shrink Volume (NTFS only)
+-- @param size_mb: Size to remove in MB
+function M.shrink(path, size_mb)
+    local h = M.open(path, true)
+    if not h then return false, "Open failed" end
+    
+    -- 1. Get Current Size
+    local geo = util.ioctl(h:get(), defs.IOCTL.GET_GEO, nil, 0, "DISK_GEOMETRY_EX")
+    if not geo then h:close(); return false, "GetGeometry failed" end
+    
+    local current_bytes = tonumber(geo.DiskSize.QuadPart)
+    local shrink_bytes = size_mb * 1024 * 1024
+    local target_bytes = current_bytes - shrink_bytes
+    
+    if target_bytes < 0 then h:close(); return false, "Target size negative" end
+    
+    -- 2. Call Shrink IOCTL
+    local info = ffi.new("SHRINK_VOLUME_INFORMATION")
+    info.ShrinkRequestType = 2 -- Commit
+    info.NewSize = target_bytes
+    
+    local ok, err = util.ioctl(h:get(), defs.IOCTL.SHRINK, info)
+    
+    h:close()
+    return ok, err
 end
 
 return M
