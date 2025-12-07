@@ -424,4 +424,23 @@ function M.update_timestamps(path)
     return true
 end
 
-function M.exists(path) return kernel32.GetFileAttributesW(util.to_wide(path)) ~= INVALID_FILE_ATTRIBUTES
+function M.exists(path) return kernel32.GetFileAttributesW(util.to_wide(path)) ~= INVALID_FILE_ATTRIBUTES end
+function M.is_dir(path) 
+    local a = kernel32.GetFileAttributesW(util.to_wide(path))
+    return a ~= INVALID_FILE_ATTRIBUTES and is_dir_attr(a) 
+end
+function M.is_link(path) 
+    local a = kernel32.GetFileAttributesW(util.to_wide(path))
+    return a ~= INVALID_FILE_ATTRIBUTES and is_link_attr(a) 
+end
+function M.scandir(path) return scandir_bulk(path) end
+function M.stat(path)
+    local raw = get_raw()
+    local info, err = raw.get_file_info(path)
+    if not info then return nil, err end
+    info.is_dir = is_dir_attr(info.attr)
+    info.is_link = is_link_attr(info.attr)
+    return info
+end
+
+return M
