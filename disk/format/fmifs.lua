@@ -5,13 +5,16 @@ local kernel32 = require 'ffi.req' 'Windows.sdk.kernel32'
 
 local M = {}
 
-function M.format(drive_letter, fs, label)
-    if not drive_letter then return false, "Drive letter required" end
+function M.format(drive_path, fs, label, media_type)
+    if not drive_path then return false, "Drive path required" end
     
-    -- Ensure no trailing backslash for FormatEx (e.g. "X:\" -> "X:")
-    -- Rufus strategy: FormatEx fails if the path has a trailing backslash.
-    local root = drive_letter
+    -- Ensure no trailing backslash for FormatEx
+    -- e.g. "X:\" -> "X:", "\\?\Volume{...}\" -> "\\?\Volume{...}"
+    local root = drive_path
     if root:sub(-1) == "\\" then root = root:sub(1, -2) end
+    
+    -- Default media type if not provided (0x0C = Fixed, 0x0B = Removable)
+    media_type = media_type or ffi.C.FMIFS_HARDDISK
     
     local success_status = false
     local error_detail = nil
@@ -33,11 +36,8 @@ function M.format(drive_letter, fs, label)
     
     -- [Rufus Strategy] Retry Loop for FormatEx
     -- Windows can take some time to release locks, sync VDS, or make the volume ready.
-    -- We retry up to 4 times with a 5 second delay, matching Rufus 'FormatNative' logic.
     local max_retries = 4
     local retry_wait = 5000 -- 5 seconds
-    
-    local final_ok, final_err
     
     for i = 1, max_retries do
         success_status = false
@@ -49,7 +49,7 @@ function M.format(drive_letter, fs, label)
         local ok, err = pcall(function()
             fmifs.FormatEx(
                 util.to_wide(root), 
-                ffi.C.FMIFS_HARDDISK, 
+                media_type, 
                 util.to_wide(fs), 
                 util.to_wide(label), 
                 1, -- Quick Format
@@ -64,12 +64,8 @@ function M.format(drive_letter, fs, label)
         end
         
         if i < max_retries then
-            -- Optional: Log retry? 
-            -- local msg = ok and (error_detail or "FCC_DONE=False") or tostring(err)
-            -- print(string.format("  [INFO] FormatEx failed (%s). Retrying...", msg))
             kernel32.Sleep(retry_wait)
         else
-            -- Final attempt failed
             cb:free()
             if not ok then return false, "FormatEx crashed: " .. tostring(err) end
             return false, "FormatEx failed: " .. (error_detail or "FCC_DONE=False")

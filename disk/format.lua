@@ -11,11 +11,13 @@ function M.format(idx, off, fs, lab, opts)
     local layout = require 'win-utils.disk.layout'
     local ntfs = require 'win-utils.fs.ntfs'
     local volume = require 'win-utils.disk.volume'
+    local kernel32 = require 'ffi.req' 'Windows.sdk.kernel32'
 
-    -- 0. 获取分区大小 (用于决策)
+    -- 0. 获取物理驱动器信息 (媒体类型)
     local drive, err = physical.open(idx, "r")
     if not drive then return false, "Open failed: " .. tostring(err) end
     
+    local media_type = drive.media_type
     local info, l_err = layout.get(drive)
     drive:close()
     
@@ -36,42 +38,56 @@ function M.format(idx, off, fs, lab, opts)
         if ok then return true, "Lua FAT32" end
     end
     
-    -- [Priority 2] Legacy (Mount + FMIFS)
-    -- Rufus: 默认首选。虽然需要盘符，但它是同步的，且不会受 VDS 缓存延迟影响。
+    -- [Priority 2] Legacy (Volume GUID Path OR Mount + FMIFS)
+    -- Rufus Strategy: 优先使用 Volume GUID Path (`\\?\Volume{...}`) 调用 FormatEx。
+    -- 如果找不到 GUID 路径，才尝试挂载临时盘符。
     
-    -- 尝试挂载临时盘符
-    local letter = mount.temp_mount(idx, off)
-    if letter then
-        local ok_fmifs, msg_fmifs = fmifs.format(letter, fs, lab)
+    local target_path = nil
+    local is_temp_mount = false
+    
+    -- 2a. 尝试通过 GUID 路径定位 (Wait up to 10s)
+    for i=1, 40 do
+        target_path = volume.find_guid_by_partition(idx, off)
+        if target_path then break end
+        kernel32.Sleep(250)
+    end
+    
+    -- 2b. 如果 GUID 路径不可用，回退到临时盘符挂载
+    if not target_path then
+        target_path = mount.temp_mount(idx, off)
+        if target_path then is_temp_mount = true end
+    end
+    
+    if target_path then
+        -- 确保传入正确 Media Type (Fixed/Removable)
+        local ok_fmifs, msg_fmifs = fmifs.format(target_path, fs, lab, media_type)
         
         -- Post-Format Surgery: 强制设置卷标
         if ok_fmifs and lab and lab ~= "" then
-            volume.set_label(letter, lab)
+            volume.set_label(target_path, lab)
         end
         
         -- NTFS 压缩支持
         if ok_fmifs and opts.compress and fs_lower == "ntfs" then
-            ntfs.set_compression(letter, true)
+            ntfs.set_compression(target_path, true)
         end
         
-        mount.unmount(letter)
+        if is_temp_mount then mount.unmount(target_path) end
         
         if ok_fmifs then 
-            return true, "Legacy FMIFS" 
+            return true, "Legacy FMIFS (" .. (is_temp_mount and "Mount" or "GUID") .. ")"
         else
             -- [STRICT] Rufus logic: Do not fallback to VDS if FMIFS failed explicitly.
-            -- This exposes the real error (e.g. Write Protected, IO Error) instead of masking it with a VDS generic error.
             return false, "FMIFS Failed: " .. tostring(msg_fmifs)
         end
     end
     
     -- [Priority 3] VDS (Fallback / No Mount)
-    -- Rufus: 仅当 Legacy 无法启动（如无法分配盘符）时使用。
-    -- VDS 不需要盘符，可以直接通过 GUID 操作。
+    -- Rufus: 仅当 Legacy 无法启动（如无法分配盘符且无 GUID）时使用。
     local ok_vds, msg_vds = vds.format(idx, off, fs, lab, true, 0, 0)
     if ok_vds then return true, "VDS (Fallback)" end
     
-    return false, string.format("All strategies failed. Mount: No letter | VDS: %s", tostring(msg_vds))
+    return false, string.format("All strategies failed. Target: None | VDS: %s", tostring(msg_vds))
 end
 
 return M

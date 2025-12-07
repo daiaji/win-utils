@@ -26,6 +26,7 @@ function PhysicalDrive:init(index, mode, exclusive)
     self.handle = h:get()
     self.sector_size = 512
     self.size = 0
+    self.media_type = 0x0C -- Default to FixedMedia (12)
     
     self:update_geometry()
 end
@@ -49,6 +50,8 @@ function PhysicalDrive:update_geometry()
     if geo then
         self.sector_size = tonumber(geo.Geometry.BytesPerSector)
         self.size = tonumber(geo.DiskSize.QuadPart)
+        -- [Rufus Strategy] Capture MediaType for FormatEx (Fixed=12, Removable=11)
+        self.media_type = tonumber(geo.Geometry.MediaType)
     end
 end
 
