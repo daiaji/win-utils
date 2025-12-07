@@ -1,10 +1,11 @@
 local ffi = require 'ffi'
 local bit = require 'bit'
 local kernel32 = require 'ffi.req' 'Windows.sdk.kernel32'
-local version = require 'ffi.req' 'Windows.sdk.version' -- Ensure this binding exists
+local version = require 'ffi.req' 'Windows.sdk.version'
 local ntdll = require 'ffi.req' 'Windows.sdk.ntdll'
 local util = require 'win-utils.core.util'
 local native = require 'win-utils.core.native'
+local raw_mod = require 'win-utils.fs.raw' -- Renamed to allow local access
 
 -- Lazy load submodules
 local sub_modules = {
@@ -39,33 +40,79 @@ local INVALID_FILE_ATTRIBUTES      = 0xFFFFFFFF
 local function is_link_attr(attr) return bit.band(attr, FILE_ATTRIBUTE_REPARSE_POINT) ~= 0 end
 local function is_dir_attr(attr) return bit.band(attr, FILE_ATTRIBUTE_DIRECTORY) ~= 0 end
 
-local function scandir_native(path)
-    local h, err = native.open_file(path, "r", true) 
-    if not h then return function() end end
+-- [OPTIMIZATION] Batch Enumeration (64KB Buffer)
+-- Returns iterator yielding (name, attributes, size_bytes)
+-- 支持传入 path 字符串 OR 已打开的 directory handle
+local function scandir_bulk(path_or_handle)
+    local h, should_close
     
-    local buf_size = 4096
+    if type(path_or_handle) == "string" then
+        local err
+        -- FILE_LIST_DIRECTORY | SYNCHRONIZE
+        h, err = native.open_internal(path_or_handle, 0x100001, 3, 3, 0x02000000) -- BackupSemantics
+        if not h then return function() end end
+        should_close = true
+    else
+        h = path_or_handle -- Expects raw handle or wrapper
+        should_close = false
+    end
+    
+    local raw_h = (type(h)=="table" and h.get) and h:get() or h
+    local buf_size = 64 * 1024 -- 64KB Buffer
     local buf = ffi.new("uint8_t[?]", buf_size)
     local io = ffi.new("IO_STATUS_BLOCK")
+    
     local first_call = true
     local current_ptr = nil
     local done = false
     
     return function()
         if done then return nil end
+        
         while true do
-            if current_ptr then
+            if current_ptr ~= nil then
                 local info = ffi.cast("FILE_DIRECTORY_INFORMATION*", current_ptr)
-                local name = util.from_wide(info.FileName, info.FileNameLength / 2)
-                local attr = info.FileAttributes
-                local size = info.EndOfFile.QuadPart
-                local next_off = info.NextEntryOffset
-                if next_off == 0 then current_ptr = nil
-                else current_ptr = current_ptr + next_off end
-                if name ~= "." and name ~= ".." then return name, attr, tonumber(size) end
+                
+                -- Manual name extraction (faster than full struct mapping)
+                local name_len = info.FileNameLength / 2
+                -- Filter . and .. efficiently
+                local skip = false
+                if name_len == 1 and info.FileName[0] == 46 then skip = true -- .
+                elseif name_len == 2 and info.FileName[0] == 46 and info.FileName[1] == 46 then skip = true -- ..
+                end
+                
+                local name, attr, size
+                if not skip then
+                    name = util.from_wide(info.FileName, name_len)
+                    attr = info.FileAttributes
+                    size = tonumber(info.EndOfFile.QuadPart)
+                end
+                
+                if info.NextEntryOffset == 0 then
+                    current_ptr = nil
+                else
+                    current_ptr = current_ptr + info.NextEntryOffset
+                end
+                
+                if not skip then return name, attr, size end
             else
-                local status = ntdll.NtQueryDirectoryFile(h:get(), nil, nil, nil, io, buf, buf_size, 1, false, nil, first_call)
+                local status = ntdll.NtQueryDirectoryFile(
+                    raw_h, nil, nil, nil, io, 
+                    buf, buf_size, 
+                    1, -- FileDirectoryInformation
+                    false, -- ReturnSingleEntry = FALSE (Bulk)
+                    nil, 
+                    first_call
+                )
+                
                 first_call = false
-                if status < 0 then h:close(); done = true; return nil end
+                
+                if status < 0 then -- STATUS_NO_MORE_FILES or error
+                    if should_close and h.close then h:close() end
+                    done = true
+                    return nil
+                end
+                
                 current_ptr = buf
             end
         end
@@ -152,7 +199,7 @@ local function cp_r(src, dst, opts)
             return false, util.last_error()
         end
         
-        for name in scandir_native(src) do
+        for name in scandir_bulk(src) do
             local ok, err = cp_r(src .. "\\" .. name, dst .. "\\" .. name, opts)
             if not ok then return false, err end
         end
@@ -171,34 +218,61 @@ end
 
 function M.copy(src, dst, opts) return cp_r(src, dst, opts or {}) end
 
-local function rm_rf(path)
-    local raw = get_raw()
-    local attr = kernel32.GetFileAttributesW(util.to_wide(path))
-    if attr == INVALID_FILE_ATTRIBUTES then return true end
+-- [OPTIMIZATION] Recursive Delete using Relative Handles where possible
+local function rm_rf_optimized(path)
+    -- 1. 打开目录句柄 (LIST_DIRECTORY | DELETE | SYNCHRONIZE)
+    --    BackupSemantics (0x02000000) for Directory ops
+    --    OpenReparsePoint (0x00200000) to delete link itself not target
+    local flags = 0x02200000 
+    local access = 0x010001 -- DELETE | LIST_DIRECTORY (0x1) | SYNCHRONIZE (0x100000 implied?)
+    -- Actually DELETE=0x10000, LIST=0x1. 
+    access = bit.bor(0x10000, 0x1, 0x100000)
     
-    if is_dir_attr(attr) and not is_link_attr(attr) then
-        local ok = true
-        for name in scandir_native(path) do
-            if not rm_rf(path .. "\\" .. name) then ok = false end
+    local hDir, err = native.open_internal(path, access, 7, 3, flags)
+    
+    if not hDir then
+        -- 可能是文件或不存在，尝试作为文件删除
+        local attr = kernel32.GetFileAttributesW(util.to_wide(path))
+        if attr == INVALID_FILE_ATTRIBUTES then return true end -- Already gone
+        
+        -- Reset ReadOnly if needed
+        if bit.band(attr, FILE_ATTRIBUTE_READONLY) ~= 0 then
+            kernel32.SetFileAttributesW(util.to_wide(path), 0x80)
         end
-        if not ok then return false, "Clean dir failed" end
+        return raw_mod.delete_posix(path)
     end
     
-    if bit.band(attr, FILE_ATTRIBUTE_READONLY) ~= 0 then
-        kernel32.SetFileAttributesW(util.to_wide(path), 0x80)
-    end
-    
-    if is_dir_attr(attr) and not is_link_attr(attr) then
-        if kernel32.RemoveDirectoryW(util.to_wide(path)) == 0 then return false, util.last_error() end
-    else
-        if not raw.delete_posix(path) then
-            if kernel32.DeleteFileW(util.to_wide(path)) == 0 then return false, util.last_error() end
+    -- 2. 批量扫描并删除内容
+    local ok = true
+    for name, attr in scandir_bulk(hDir) do -- Pass handle to optimized scanner
+        if is_dir_attr(attr) and not is_link_attr(attr) then
+            -- 目录：必须递归 (Relative open logic complexity skipped, use absolute path recursion)
+            if not rm_rf_optimized(path .. "\\" .. name) then ok = false end
+        else
+            -- 文件或链接：使用相对句柄删除 (Fast!)
+            -- 如果有只读属性，先尝试删除，如果失败则需要修改属性 (NtSetInfo IgnoreReadOnly helps usually)
+            -- raw.delete_child uses POSIX semantics + IgnoreReadOnly flag
+            if not raw_mod.delete_child(hDir:get(), name) then
+                -- Fallback: Full path logic (maybe attribute issue)
+                local full_p = path .. "\\" .. name
+                kernel32.SetFileAttributesW(util.to_wide(full_p), 0x80)
+                if not raw_mod.delete_child(hDir:get(), name) then ok = false end
+            end
         end
     end
-    return true
+    
+    -- 3. 删除自身 (利用已打开的句柄)
+    if ok then
+        if not raw_mod.delete_by_handle(hDir:get()) then
+            ok = false
+        end
+    end
+    
+    hDir:close()
+    return ok
 end
 
-function M.delete(path) return rm_rf(path) end
+function M.delete(path) return rm_rf_optimized(path) end
 
 function M.move(src, dst, opts)
     opts = opts or {}
@@ -251,7 +325,7 @@ function M.get_usage_info(path, opts)
         if is_dir_attr(info.attr) then
             stats.dirs = stats.dirs + 1
             if not is_link_attr(info.attr) then 
-                for name in scandir_native(p) do recurse(p .. "\\" .. name) end
+                for name in scandir_bulk(p) do recurse(p .. "\\" .. name) end
             end
         else
             stats.files = stats.files + 1
@@ -284,7 +358,7 @@ function M.find(path, opts)
             if attr ~= INVALID_FILE_ATTRIBUTES then
                 local is_d = is_dir_attr(attr)
                 if is_d and opts.recursive ~= false and not is_link_attr(attr) then
-                    for name in scandir_native(curr) do
+                    for name in scandir_bulk(curr) do
                         tail = tail + 1
                         q[tail] = curr .. "\\" .. name
                     end
@@ -350,23 +424,4 @@ function M.update_timestamps(path)
     return true
 end
 
-function M.exists(path) return kernel32.GetFileAttributesW(util.to_wide(path)) ~= INVALID_FILE_ATTRIBUTES end
-function M.is_dir(path) 
-    local a = kernel32.GetFileAttributesW(util.to_wide(path))
-    return a ~= INVALID_FILE_ATTRIBUTES and is_dir_attr(a) 
-end
-function M.is_link(path) 
-    local a = kernel32.GetFileAttributesW(util.to_wide(path))
-    return a ~= INVALID_FILE_ATTRIBUTES and is_link_attr(a) 
-end
-function M.scandir(path) return scandir_native(path) end
-function M.stat(path)
-    local raw = get_raw()
-    local info, err = raw.get_file_info(path)
-    if not info then return nil, err end
-    info.is_dir = is_dir_attr(info.attr)
-    info.is_link = is_link_attr(info.attr)
-    return info
-end
-
-return M
+function M.exists(path) return kernel32.GetFileAttributesW(util.to_wide(path)) ~= INVALID_FILE_ATTRIBUTES

@@ -11,7 +11,7 @@ local C = require 'win-utils.core.ffi_defs'
 
 local M = {}
 
--- 获取文件物理占用空间
+-- [API] 获取文件物理占用空间
 function M.get_physical_size(path)
     local high = ffi.new("DWORD[1]")
     local low = kernel32.GetCompressedFileSizeW(util.to_wide(path), high)
@@ -24,7 +24,7 @@ function M.get_physical_size(path)
     return high[0] * 4294967296 + low
 end
 
--- 获取文件信息
+-- [API] 获取文件信息 (ByHandle)
 function M.get_file_info(path)
     local h, err = native.open_file(path, "r", true) 
     if not h then return nil, err end
@@ -47,17 +47,64 @@ function M.get_file_info(path)
     }
 end
 
--- POSIX 语义删除 (Delete-On-Close)
+-- [Internal] 通过句柄设置删除标记 (POSIX Semantics)
+function M.delete_by_handle(handle_val)
+    local info = ffi.new("FILE_DISPOSITION_INFO_EX")
+    -- FILE_DISPOSITION_DELETE (1) | FILE_DISPOSITION_POSIX_SEMANTICS (2) | FILE_DISPOSITION_IGNORE_READONLY_ATTRIBUTE (10)
+    info.Flags = 0x13 
+    local io = ffi.new("IO_STATUS_BLOCK")
+    
+    -- FileDispositionInformationEx = 64
+    local s = ntdll.NtSetInformationFile(handle_val, io, info, ffi.sizeof(info), 64)
+    
+    if s < 0 then 
+        -- Fallback: Standard Delete (FileDispositionInformation = 13)
+        local info_std = ffi.new("FILE_DISPOSITION_INFORMATION")
+        info_std.DeleteFile = 1
+        s = ntdll.NtSetInformationFile(handle_val, io, info_std, ffi.sizeof(info_std), 13)
+    end
+    
+    return s >= 0
+end
+
+-- [API] POSIX 语义删除 (Delete-On-Close)
 function M.delete_posix(path)
+    -- Need DELETE access
     local h, e = native.open_file(path, "rd", "exclusive")
     if not h then return false, e end
     
-    local info = ffi.new("FILE_DISPOSITION_INFO_EX"); info.Flags = 0x13
-    local io = ffi.new("IO_STATUS_BLOCK")
-    local s = ntdll.NtSetInformationFile(h:get(), io, info, ffi.sizeof(info), 64)
+    local ok = M.delete_by_handle(h:get())
     h:close()
-    if s < 0 then return false, string.format("NTSTATUS: 0x%X", s) end
+    
+    if not ok then return false, "NtSetInformationFile failed" end
     return true
+end
+
+-- [API] 相对路径删除 (Optimization: Avoids parsing full path)
+-- @param hParent: 父目录句柄 (需有 LIST_DIRECTORY 权限?)
+-- @param name: 子文件名
+function M.delete_child(hParent, name)
+    local us, anchor = native.to_unicode_string(name)
+    local oa = ffi.new("OBJECT_ATTRIBUTES")
+    oa.Length = ffi.sizeof(oa)
+    oa.RootDirectory = hParent -- Base handle
+    oa.ObjectName = us
+    oa.Attributes = 0 -- Case Sensitive? (0x40 = Case Insensitive)
+    
+    local hChild = ffi.new("HANDLE[1]")
+    local io = ffi.new("IO_STATUS_BLOCK")
+    
+    -- DELETE (0x10000) | SYNCHRONIZE (0x100000)
+    -- FILE_OPEN_REPARSE_POINT (0x200000) | FILE_OPEN_FOR_BACKUP_INTENT (0x4000)
+    local status = ntdll.NtOpenFile(hChild, 0x10000, oa, io, 3, 0x204000)
+    local _ = anchor
+    
+    if status >= 0 then
+        local ok = M.delete_by_handle(hChild[0])
+        kernel32.CloseHandle(hChild[0])
+        return ok
+    end
+    return false
 end
 
 function M.set_times(path, c, a, w)
