@@ -1,7 +1,7 @@
 local lu = require('luaunit')
 local win = require('win-utils')
 local ffi = require('ffi')
-local bit = require('bit') -- Added explicit require for bit ops
+local bit = require('bit')
 local kernel32 = require('ffi.req') 'Windows.sdk.kernel32'
 
 TestDisk = {}
@@ -33,7 +33,7 @@ function TestDisk:tearDown()
         self.vhd_handle = nil
     end
 
-    -- 3. 清理文件
+    -- 3. 清理文件 (带重试)
     local files_to_clean = { self.temp_vhd, self.img_src, self.img_dst }
     for _, f in ipairs(files_to_clean) do
         for i=1, 5 do
@@ -45,7 +45,7 @@ function TestDisk:tearDown()
     end
 end
 
--- [Rufus Strategy] 辅助：带重试的卷标验证
+-- 辅助：带重试的卷标验证
 local function verify_volume_label(target_mount, expected_label, timeout_ms)
     local start = kernel32.GetTickCount()
     local limit = timeout_ms or 5000
@@ -55,18 +55,17 @@ local function verify_volume_label(target_mount, expected_label, timeout_ms)
         if vols then
             for _, v in ipairs(vols) do
                 for _, mp in ipairs(v.mount_points) do
+                    -- 匹配挂载点 (忽略大小写)
                     if mp:lower():find(target_mount:lower(), 1, true) then
                         if v.label == expected_label then
                             return true, v.label 
                         end
-                        if (kernel32.GetTickCount() - start) > limit then
-                            return false, v.label 
-                        end
+                        -- 如果找到了卷但 Label 不对，可能还在刷新，继续等待
                     end
                 end
             end
         end
-        if (kernel32.GetTickCount() - start) > limit then return false, "Mount point not found" end
+        if (kernel32.GetTickCount() - start) > limit then return false, "Timeout verifying label" end
         kernel32.Sleep(500)
     end
 end
@@ -105,6 +104,7 @@ function TestDisk:test_VHD_Integrated_Lifecycle()
     for _, d in ipairs(drives) do
         if d.index == drive_index then
             found_in_list = true
+            -- 允许少量误差
             lu.assertTrue(d.size >= 510 * 1024 * 1024) 
         end
     end
@@ -164,8 +164,10 @@ function TestDisk:test_VHD_Integrated_Lifecycle()
     lu.assertEquals(layout.parts[3].len, 100 * ONE_MB)
 
     drive:close() 
-    win.disk.vds.refresh_layout()
-    kernel32.Sleep(1000)
+    
+    -- [CRITICAL] VDS Removed -> Manual Wait for PnP
+    print("         Waiting for PnP volume arrival...")
+    kernel32.Sleep(2000)
 
     -- [Phase 4] 卷管理与格式化
     print("  [7/12] Formatting Partitions (NTFS & FAT32)...")
@@ -217,7 +219,7 @@ function TestDisk:test_VHD_Integrated_Lifecycle()
         lu.assertNotNil(info, fs_name.." stat failed")
         lu.assertTrue(info.size > 0, "File size 0")
         
-        -- 2. Attributes (Set ReadOnly) - [Added from fs_spec]
+        -- 2. Attributes (Set ReadOnly)
         local raw = require('win-utils.fs.raw')
         if raw.set_attributes then
             lu.assertTrue(raw.set_attributes(p, 1), "Set ReadOnly failed")
@@ -250,7 +252,7 @@ function TestDisk:test_VHD_Integrated_Lifecycle()
         -- 5. Timestamps
         lu.assertTrue(win.fs.update_timestamps(cp_dst), "Touch failed")
         
-        -- 6. Stats & Usage (Added for coverage completion)
+        -- 6. Stats & Usage
         local usage = win.fs.get_usage_info(path)
         lu.assertIsTable(usage, "GetUsageInfo failed")
         lu.assertTrue(usage.files > 0, "Usage files count 0")
@@ -283,7 +285,7 @@ function TestDisk:test_VHD_Integrated_Lifecycle()
             lu.assertTrue(ok_j, "Junction failed: " .. tostring(err_j))
             lu.assertTrue(win.fs.is_dir(junc))
             
-            -- Verify Junction Target [Added from fs_spec]
+            -- Verify Junction Target
             local j_target, j_type = ntfs_mod.read_link(junc)
             lu.assertEquals(j_type, "Junction")
             lu.assertStrContains(j_target, "sub_b")
@@ -294,14 +296,13 @@ function TestDisk:test_VHD_Integrated_Lifecycle()
             lu.assertTrue(ok_s, "Symlink failed: " .. tostring(err_s))
             lu.assertTrue(win.fs.is_link(sym))
             
-            -- Verify Symlink Target [Added from fs_spec]
+            -- Verify Symlink Target
             local s_target, s_type = ntfs_mod.read_link(sym)
             lu.assertEquals(s_type, "Symlink")
             lu.assertStrContains(s_target, "copied.txt")
         end
         
-        -- 8. Recursive Delete [Added from fs_spec]
-        -- Explicitly verify that win.fs.delete works on non-empty dirs
+        -- 8. Recursive Delete
         local del_target = path .. "sub_a"
         lu.assertTrue(win.fs.delete(del_target), "Recursive delete failed")
         lu.assertFalse(win.fs.exists(del_target), "Directory still exists after delete")
@@ -316,7 +317,7 @@ function TestDisk:test_VHD_Integrated_Lifecycle()
 
     -- [Phase 6] 销毁与清理
     print("  [12/12] Cleaning (Unmount & IOCTL Clean)...")
-    win.disk.mount.unmount_all(drive_index)
+    win.disk.mount.unmount_all_on_disk(drive_index)
     self.mount_points = {} 
     
     drive = win.disk.physical.open(drive_index, "rw", true)
@@ -335,5 +336,5 @@ function TestDisk:test_VHD_Integrated_Lifecycle()
     
     lu.assertEquals(#final_layout.parts, 0, "Disk should be empty after clean")
 
-    print("  [SUCCESS] All Disk integration tests passed.")
+    print("  [SUCCESS] Integrated VHD Lifecycle Test Passed.")
 end

@@ -1,10 +1,8 @@
 local M = {}
 
--- [RESTORED] opts.cluster_size support
 function M.format(idx, off, fs, lab, opts)
     opts = opts or {}
     local mount = require 'win-utils.disk.mount'
-    local vds = require 'win-utils.disk.vds'
     local fat32 = require 'win-utils.disk.format.fat32'
     local fmifs = require 'win-utils.disk.format.fmifs'
     local physical = require 'win-utils.disk.physical'
@@ -13,6 +11,7 @@ function M.format(idx, off, fs, lab, opts)
     local volume = require 'win-utils.disk.volume'
     local kernel32 = require 'ffi.req' 'Windows.sdk.kernel32'
 
+    -- 1. Identify partition size
     local drive, err = physical.open(idx, "r")
     if not drive then return false, "Open failed: " .. tostring(err) end
     
@@ -29,24 +28,26 @@ function M.format(idx, off, fs, lab, opts)
     if p_size == 0 then return false, "Partition not found at offset " .. off end
 
     local fs_lower = fs:lower()
-    local cluster = opts.cluster_size -- Can be nil, which means default
+    local cluster = opts.cluster_size
 
-    -- [Priority 1] Enhanced Lua FAT32
+    -- [Strategy 1] Enhanced Lua FAT32 (For >32GB partitions where Windows limits FAT32)
     if fs_lower == "fat32" and p_size > 32*1024*1024*1024 then
         local ok, f_err = fat32.format_raw(idx, off, lab, cluster)
         if ok then return true, "Lua FAT32" end
     end
     
-    -- [Priority 2] Legacy FMIFS
+    -- [Strategy 2] Legacy FMIFS (Standard Windows Format)
     local target_path = nil
     local is_temp_mount = false
     
+    -- Polling for volume arrival (needed after partitioning)
     for i=1, 40 do
         target_path = volume.find_guid_by_partition(idx, off)
         if target_path then break end
         kernel32.Sleep(250)
     end
     
+    -- If not mounted automatically, try temporary mount
     if not target_path then
         target_path = mount.temp_mount(idx, off)
         if target_path then is_temp_mount = true end
@@ -72,11 +73,7 @@ function M.format(idx, off, fs, lab, opts)
         end
     end
     
-    -- [Priority 3] VDS
-    local ok_vds, msg_vds = vds.format(idx, off, fs, lab, true, cluster or 0, 0)
-    if ok_vds then return true, "VDS" end
-    
-    return false, string.format("All strategies failed. VDS: %s", tostring(msg_vds))
+    return false, "Volume not mounted or accessible"
 end
 
 return M

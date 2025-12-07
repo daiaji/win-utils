@@ -6,7 +6,7 @@ local sub_modules = {
     geometry  = 'win-utils.disk.geometry',
     mount     = 'win-utils.disk.mount',
     format    = 'win-utils.disk.format',
-    vds       = 'win-utils.disk.vds',
+    -- [REMOVED] vds
     vhd       = 'win-utils.disk.vhd',
     surface   = 'win-utils.disk.surface', 
     image     = 'win-utils.disk.image',
@@ -28,7 +28,7 @@ setmetatable(M, {
             return mod
         end
         
-        -- [RESTORED] Compatibility Aliases
+        -- [Compat] Compatibility Aliases
         if key == "list" then
             local vol = require('win-utils.disk.volume')
             rawset(t, "list", vol.list_letters)
@@ -39,11 +39,11 @@ setmetatable(M, {
             rawset(t, "info", info_mod.get)
             return info_mod.get
         end
-        
         return nil
     end
 })
 
+-- [Helper] Wait for kernel PnP to recognize volumes on a disk
 local function wait_for_partitions(drive_index, timeout)
     local kernel32 = require 'ffi.req' 'Windows.sdk.kernel32'
     local volume = require 'win-utils.disk.volume'
@@ -63,12 +63,11 @@ local function wait_for_partitions(drive_index, timeout)
                     hVol:close()
                     
                     if ext and ext.NumberOfDiskExtents > 0 and ext.Extents[0].DiskNumber == drive_index then
-                        return true 
+                        return true -- Volumes appeared!
                     end
                 end
             end
         end
-        
         if (kernel32.GetTickCount() - start) > limit then return false end
         kernel32.Sleep(250)
     end
@@ -78,17 +77,20 @@ function M.prepare_drive(drive_index, scheme, opts)
     local kernel32 = require 'ffi.req' 'Windows.sdk.kernel32'
     local mount = require 'win-utils.disk.mount'
     local physical = require 'win-utils.disk.physical'
-    local vds = require 'win-utils.disk.vds'
     local layout = require 'win-utils.disk.layout'
     local device = require 'win-utils.device'
+    local defs = require 'win-utils.disk.defs'
 
+    -- 1. Unmount everything to release handles
     mount.unmount_all_on_disk(drive_index)
     
     local drive, err = physical.open(drive_index, "rw", true)
     if not drive then return false, "Open failed: " .. tostring(err) end
     
+    -- 2. Aggressive Lock
     if not drive:lock(true) then 
         drive:close()
+        -- Try Hardware/Software Reset if software lock fails
         device.reset(drive_index, 2000)
         drive, err = physical.open(drive_index, "rw", true)
         if not drive then return false, "Re-open after reset failed" end
@@ -97,32 +99,30 @@ function M.prepare_drive(drive_index, scheme, opts)
         end
     end
     
-    drive:wipe_layout()
-    drive:close()
+    -- 3. Clean (Replacing VDS Clean with IOCTL RAW)
+    drive:wipe_layout() -- Wipe sectors 0 and end
+    local clean_ok, clean_err = layout.clean(drive) -- Set partition style to RAW
+    if not clean_ok then
+        drive:close()
+        return false, "Layout Clean failed: " .. tostring(clean_err)
+    end
     
-    local v_ok, v_err = vds.clean(drive_index)
-    kernel32.Sleep(500)
-    
-    drive, err = physical.open(drive_index, "rw", true)
-    if not drive then return false, "Re-open failed: " .. tostring(err) end
-    if not drive:lock(true) then drive:close(); return false, "Re-lock failed" end
-    
+    -- 4. Apply New Layout
     local plan = layout.calculate_partition_plan(drive, scheme, opts)
     local ok, apply_err = layout.apply(drive, scheme, plan)
     
+    -- 5. Commit & Refresh
     drive:flush()
+    drive:ioctl(defs.IOCTL.UPDATE) -- Force kernel update
     drive:close()
     
-    vds.refresh_layout()
-    
+    if not ok then return false, "Layout apply failed: " .. tostring(apply_err) end
+
+    -- 6. Wait for PnP (Replacing VDS Refresh)
     if not wait_for_partitions(drive_index, 10000) then
-        vds.refresh_layout()
-        if not wait_for_partitions(drive_index, 5000) then
-            return false, "Partition polling timed out"
-        end
+        return false, "Partition polling timed out (Volumes did not arrive)"
     end
     
-    if not ok then return false, "Layout apply failed: " .. tostring(apply_err) end
     return true, plan
 end
 
@@ -166,10 +166,6 @@ function M.check_health(drive_index, cb, write_test)
     local ok, msg, stats = surface.scan(drive, cb, write_test and "write" or "read", patterns)
     drive:close()
     return ok, msg, stats
-end
-
-function M.rescan()
-    return require('win-utils.disk.vds').refresh_layout()
 end
 
 function M.sync()
