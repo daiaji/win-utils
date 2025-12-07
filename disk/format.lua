@@ -29,22 +29,23 @@ function M.format(idx, off, fs, lab, opts)
 
     local fs_lower = fs:lower()
 
-    -- Strategy 1: Enhanced FAT32 (Lua implementation)
+    -- [Priority 1] Enhanced FAT32 (Lua implementation)
+    -- Rufus: 只有当 FAT32 > 32GB 时才强制使用，因为 Windows FormatEx 此时会人为限制。
     if fs_lower == "fat32" and p_size > 32*1024*1024*1024 then
         local ok, f_err = fat32.format_raw(idx, off, lab)
         if ok then return true, "Lua FAT32" end
     end
     
-    -- Strategy 2: VDS (Modern System API)
-    local ok_vds, msg_vds = vds.format(idx, off, fs, lab, true, 0, 0)
-    if ok_vds then return true, "VDS" end
+    -- [Priority 2] Legacy (Mount + FMIFS)
+    -- Rufus: 默认首选。虽然需要盘符，但它是同步的，且不会受 VDS 缓存延迟影响。
+    local error_fmifs = "Skipped"
     
-    -- Strategy 3: Legacy (Mount + FMIFS)
+    -- 尝试挂载临时盘符
     local letter = mount.temp_mount(idx, off)
     if letter then
         local ok_fmifs, msg_fmifs = fmifs.format(letter, fs, lab)
         
-        -- [Rufus Strategy] Post-Format Surgery: 强制设置卷标 (以防 FormatEx 漏掉)
+        -- Post-Format Surgery: 强制设置卷标
         if ok_fmifs and lab and lab ~= "" then
             volume.set_label(letter, lab)
         end
@@ -55,12 +56,23 @@ function M.format(idx, off, fs, lab, opts)
         end
         
         mount.unmount(letter)
-        if ok_fmifs then return true, "Legacy FMIFS" end
         
-        return false, "Legacy FMIFS failed: " .. tostring(msg_fmifs) .. " (VDS was: " .. tostring(msg_vds) .. ")"
+        if ok_fmifs then 
+            return true, "Legacy FMIFS" 
+        else
+            error_fmifs = msg_fmifs
+        end
+    else
+        error_fmifs = "Could not assign temp drive letter"
     end
     
-    return false, "All strategies failed. VDS Error: " .. tostring(msg_vds)
+    -- [Priority 3] VDS (Modern System API)
+    -- Rufus: 仅当 Legacy 失败或用户强制开启时使用。作为兜底方案。
+    -- VDS 不需要盘符，可以直接通过 GUID 操作，适合处理“盘符耗尽”或“权限受限”的情况。
+    local ok_vds, msg_vds = vds.format(idx, off, fs, lab, true, 0, 0)
+    if ok_vds then return true, "VDS (Fallback)" end
+    
+    return false, string.format("All strategies failed. FMIFS: %s | VDS: %s", tostring(error_fmifs), tostring(msg_vds))
 end
 
 return M

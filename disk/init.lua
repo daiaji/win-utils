@@ -92,7 +92,12 @@ function M.prepare_drive(drive_index, scheme, opts)
     drive:close()
     
     -- 4. VDS Clean (Force kernel/VDS sync)
-    vds.clean(drive_index)
+    -- Rufus 使用 VDS Clean 作为重置状态的最强手段
+    local v_ok, v_err = vds.clean(drive_index)
+    if not v_ok then
+        -- 如果 VDS Clean 失败 (例如服务不可用)，我们依赖上面的手动 Wipe
+        -- print("VDS Clean warning: " .. tostring(v_err))
+    end
     kernel32.Sleep(500)
     
     -- 5. Re-open for layout application

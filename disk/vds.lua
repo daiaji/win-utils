@@ -25,7 +25,7 @@ function VdsContext:init()
             self.service.lpVtbl.WaitForServiceReady(self.service)
         end
     else
-        self.err = string.format("CoCreateInstance failed: " .. string.format("0x%X", hr))
+        self.err = string.format("CoCreateInstance failed: 0x%X", hr)
     end
 end
 
@@ -171,62 +171,94 @@ end
 
 function M.format(idx, offset, fs, label, quick, cluster, rev)
     local guid = volume_lib.find_guid_by_partition(idx, offset)
-    if not guid then return false, "Volume GUID not found for partition" end
+    
+    -- [Rufus Strategy] Kernel Sync Wait
+    if not guid then 
+        M.refresh_layout()
+        kernel32.Sleep(1000)
+        guid = volume_lib.find_guid_by_partition(idx, offset)
+        if not guid then return false, "Volume GUID not found (Kernel sync timeout)" end
+    end
+    
     local wguid = util.to_wide(guid:sub(-1)=="\\" and guid or guid.."\\")
+    local ret_ok = false
+    local ret_msg = "Init"
     
-    local ctx = VdsContext()
-    if not ctx.service then 
-        local err = ctx.err or "Init failed"
-        ctx:close()
-        return false, err 
-    end
-    
-    local disk = ctx:get_disk(idx)
-    if not disk then ctx:close(); return false, "Disk object not found" end
-    
-    local pack = ffi.new("IVdsPack*[1]")
-    local ok, msg = false, "Volume not found in VDS"
-    
-    if disk.lpVtbl.GetPack(disk, pack) == 0 then
-        local enum = ffi.new("IEnumVdsObject*[1]")
-        if pack[0].lpVtbl.QueryVolumes(pack[0], enum) == 0 then
-            local unk = ffi.new("IUnknown*[1]"); local n = ffi.new("ULONG[1]")
-            while not ok and enum[0].lpVtbl.Next(enum[0], 1, unk, n) == 0 and n[0] > 0 do
-                local vol = ffi.new("IVdsVolume*[1]")
-                if unk[0].lpVtbl.QueryInterface(unk[0], vds_sdk.IID_IVdsVolume, ffi.cast("void**", vol)) == 0 then
-                    local mf3 = ffi.new("IVdsVolumeMF3*[1]")
-                    if vol[0].lpVtbl.QueryInterface(vol[0], vds_sdk.IID_IVdsVolumeMF3, ffi.cast("void**", mf3)) == 0 then
-                        local paths = ffi.new("LPWSTR*[1]"); local np = ffi.new("ULONG[1]")
-                        if mf3[0].lpVtbl.QueryVolumeGuidPathnames(mf3[0], paths, np) == 0 then
-                            for i=0, np[0]-1 do
-                                if kernel32.lstrcmpiW(paths[0][i], wguid) == 0 then
-                                    local async = ffi.new("IVdsAsync*[1]")
-                                    if mf3[0].lpVtbl.FormatEx2(mf3[0], util.to_wide(fs), rev or 0, cluster or 0, util.to_wide(label), quick and 1 or 0, async) == 0 then
-                                        local hr = ffi.new("HRESULT[1]"); local out = ffi.new("VDS_ASYNC_OUTPUT")
-                                        async[0].lpVtbl.Wait(async[0], hr, out)
-                                        release(async[0])
-                                        ok = (hr[0] >= 0); msg = ok and "Success" or string.format("0x%X", hr[0])
-                                    else
-                                        msg = "FormatEx2 call failed"
-                                    end
-                                end
-                                ole32.CoTaskMemFree(paths[0][i])
-                            end
-                            ole32.CoTaskMemFree(paths[0])
-                        end
-                        release(mf3[0])
-                    end
-                    release(vol[0])
-                end
-                release(unk[0])
-            end
-            release(enum[0])
+    -- [Rufus Strategy] VDS Sync Retry Loop
+    for attempt = 1, 5 do
+        local ctx = VdsContext()
+        if not ctx.service then 
+            return false, ctx.err or "VDS Service Init Failed"
         end
-        release(pack[0])
+        
+        local disk = ctx:get_disk(idx)
+        if not disk then
+            ctx:close()
+            -- Force Refresh and Retry
+            M.refresh_layout()
+            kernel32.Sleep(500 * attempt)
+            ret_msg = "Disk object not found in VDS"
+            goto continue_retry
+        end
+        
+        local pack = ffi.new("IVdsPack*[1]")
+        local found_vol = false
+        
+        -- Navigate VDS Hierarchy: Disk -> Pack -> Volumes
+        if disk.lpVtbl.GetPack(disk, pack) == 0 then
+            local enum = ffi.new("IEnumVdsObject*[1]")
+            if pack[0].lpVtbl.QueryVolumes(pack[0], enum) == 0 then
+                local unk = ffi.new("IUnknown*[1]"); local n = ffi.new("ULONG[1]")
+                while not found_vol and enum[0].lpVtbl.Next(enum[0], 1, unk, n) == 0 and n[0] > 0 do
+                    local vol = ffi.new("IVdsVolume*[1]")
+                    if unk[0].lpVtbl.QueryInterface(unk[0], vds_sdk.IID_IVdsVolume, ffi.cast("void**", vol)) == 0 then
+                        local mf3 = ffi.new("IVdsVolumeMF3*[1]")
+                        if vol[0].lpVtbl.QueryInterface(vol[0], vds_sdk.IID_IVdsVolumeMF3, ffi.cast("void**", mf3)) == 0 then
+                            local paths = ffi.new("LPWSTR*[1]"); local np = ffi.new("ULONG[1]")
+                            if mf3[0].lpVtbl.QueryVolumeGuidPathnames(mf3[0], paths, np) == 0 then
+                                for i=0, np[0]-1 do
+                                    if kernel32.lstrcmpiW(paths[0][i], wguid) == 0 then
+                                        found_vol = true
+                                        local async = ffi.new("IVdsAsync*[1]")
+                                        if mf3[0].lpVtbl.FormatEx2(mf3[0], util.to_wide(fs), rev or 0, cluster or 0, util.to_wide(label), quick and 1 or 0, async) == 0 then
+                                            local hr = ffi.new("HRESULT[1]"); local out = ffi.new("VDS_ASYNC_OUTPUT")
+                                            async[0].lpVtbl.Wait(async[0], hr, out)
+                                            release(async[0])
+                                            ret_ok = (hr[0] >= 0)
+                                            ret_msg = ret_ok and "Success" or string.format("0x%X", hr[0])
+                                        else
+                                            ret_msg = "FormatEx2 call failed"
+                                        end
+                                    end
+                                    ole32.CoTaskMemFree(paths[0][i])
+                                end
+                                ole32.CoTaskMemFree(paths[0])
+                            end
+                            release(mf3[0])
+                        end
+                        release(vol[0])
+                    end
+                    release(unk[0])
+                end
+                release(enum[0])
+            end
+            release(pack[0])
+        end
+        
+        release(disk); ctx:close()
+        
+        if found_vol then return ret_ok, ret_msg end
+        ret_msg = "Volume not found in VDS cache"
+        
+        ::continue_retry::
+        if attempt < 5 then
+             -- VDS is lagging, give it a kick
+            M.refresh_layout()
+            kernel32.Sleep(500 * attempt)
+        end
     end
     
-    release(disk); ctx:close()
-    return ok, msg
+    return false, ret_msg
 end
 
 return M

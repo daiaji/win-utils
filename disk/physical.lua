@@ -17,6 +17,8 @@ function PhysicalDrive:init(index, mode, exclusive)
     self.path = type(index) == "number" and ("\\\\.\\PhysicalDrive" .. index) or index
     self.index = type(index) == "number" and index or nil
     
+    -- [Rufus Strategy] Robust Open
+    -- 使用 "exclusive" 模式迫使驱动在 CreateFile 阶段就处理共享冲突
     local h, err = native.open_device_robust(self.path, mode, exclusive)
     if not h then error("PhysicalDrive open failed: " .. tostring(err)) end
     
@@ -50,10 +52,12 @@ function PhysicalDrive:update_geometry()
     end
 end
 
--- [Rufus Strategy] 强力锁定：150次重试，配合 Dismount
+-- [Rufus Strategy] Aggressive Lock
+-- 1. 尝试 DASD (忽略错误)
+-- 2. 循环重试 Lock
+-- 3. 失败时调用 Dismount 和 杀进程
 function PhysicalDrive:lock(force)
-    -- FSCTL_ALLOW_EXTENDED_DASD_IO
-    -- 忽略错误 (如 87)，因为某些驱动可能不支持，但不影响锁定
+    -- 很多 USB/VHD 驱动对 DASD 返回错误，但这不影响后续操作，Rufus 选择忽略
     self:ioctl(defs.IOCTL.DASD)
     
     local attempts = 0
@@ -100,6 +104,7 @@ function PhysicalDrive:flush()
     end
 end
 
+-- [Rufus Strategy] Pre-Wipe / Ghost Data Cleaning
 function PhysicalDrive:wipe_region(offset, size)
     local buf_size = 1024 * 1024
     local buf = kernel32.VirtualAlloc(nil, buf_size, 0x1000, 0x04)
@@ -111,10 +116,12 @@ function PhysicalDrive:wipe_region(offset, size)
     
     while processed < size do
         local chunk = math.min(buf_size, size - processed)
+        -- 对齐到扇区
         if chunk % self.sector_size ~= 0 then 
             chunk = math.ceil(chunk / self.sector_size) * self.sector_size 
         end
         
+        -- 使用带重试的写入
         local w_ok, w_err = self:write(offset + processed, buf, chunk)
         if not w_ok then
             ok = false; err = w_err; break
@@ -133,7 +140,9 @@ end
 
 function PhysicalDrive:wipe_layout()
     local wipe_size = 8 * 1024 * 1024
+    -- Wipe Start (MBR/GPT)
     local ok1 = self:wipe_region(0, wipe_size)
+    -- Wipe End (Backup GPT)
     local ok2 = self:wipe_region(math.floor((self.size - 1024*1024) / self.sector_size) * self.sector_size, 1024*1024)
     return ok1 and ok2
 end
@@ -166,6 +175,10 @@ function PhysicalDrive:set_attributes(attrs)
     return true
 end
 
+-- [Rufus Strategy] Stateful Write Retry
+-- 1. 指针回滚 (Pointer Rollback): 写入失败后恢复文件指针
+-- 2. 扇区对齐 (Alignment): 强制 Buffer 和长度对齐
+-- 3. 退避重试 (Backoff): 短暂睡眠后重试
 function PhysicalDrive:write(offset, data, len)
     if offset % self.sector_size ~= 0 then return false, "Offset not aligned" end
     
@@ -197,11 +210,13 @@ function PhysicalDrive:write(offset, data, len)
     
     local retries = 4
     for i=1, retries do
+        -- 1. Set Pointer (每次重试都重置指针)
         if kernel32.SetFilePointerEx(self.handle, li, nil, 0) == 0 then
             msg = util.last_error("Seek failed")
             break
         end
         
+        -- 2. Write
         if kernel32.WriteFile(self.handle, buf, aligned_size, w_bytes, nil) ~= 0 then
             if w_bytes[0] == aligned_size then
                 ok = true
@@ -213,6 +228,7 @@ function PhysicalDrive:write(offset, data, len)
             msg = util.last_error("WriteFile failed")
         end
         
+        -- 3. Recover
         if i < retries then kernel32.Sleep(100) end
     end
     

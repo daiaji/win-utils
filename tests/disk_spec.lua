@@ -44,7 +44,8 @@ function TestDisk:tearDown()
     end
 end
 
--- 辅助：带重试的卷标验证
+-- [Rufus Strategy] 辅助：带重试的卷标验证
+-- Windows 卷挂载和元数据刷新是异步的，必须轮询等待
 local function verify_volume_label(target_mount, expected_label, timeout_ms)
     local start = kernel32.GetTickCount()
     local limit = timeout_ms or 5000
@@ -87,6 +88,7 @@ function TestDisk:test_VHD_Integrated_Lifecycle()
 
     -- [Phase 1] 虚拟磁盘创建与识别
     print("  [1/12] Creating & Attaching VHDX (512MB)...")
+    -- [Rufus Strategy] Fixed size VHD to avoid dynamic expansion I/O freeze
     local h, err = win.disk.vhd.create(self.temp_vhd, 512 * 1024 * 1024, { dynamic = false })
     lu.assertNotNil(h, "VHD Create failed: " .. tostring(err))
     self.vhd_handle = h
@@ -113,6 +115,7 @@ function TestDisk:test_VHD_Integrated_Lifecycle()
     lu.assertTrue(found_in_list, "Created VHD not found in win.disk.physical.list()")
 
     -- [Phase 2] 裸机操作 (Raw I/O)
+    -- [Rufus Strategy] Use "exclusive" mode for robust opening
     local drive = win.disk.physical.open(drive_index, "rw", "exclusive")
     lu.assertNotNil(drive, "Open drive failed")
     
@@ -144,6 +147,7 @@ function TestDisk:test_VHD_Integrated_Lifecycle()
 
     -- [Phase 3] 分区管理
     print("  [5/12] Applying GPT Partition Layout...")
+    -- [Rufus Strategy] Pre-Wipe manually (though apply() does it too)
     drive:wipe_layout() 
     
     local ONE_MB = 1024 * 1024
@@ -166,12 +170,14 @@ function TestDisk:test_VHD_Integrated_Lifecycle()
     lu.assertEquals(layout.parts[3].len, 100 * ONE_MB)
 
     drive:close() 
+    -- [Rufus Strategy] Force VDS Sync
     win.disk.vds.refresh_layout()
     kernel32.Sleep(1000)
 
     -- [Phase 4] 卷管理与格式化
     print("  [7/12] Formatting Partitions (NTFS & FAT32)...")
     
+    -- 这里会优先使用 Legacy FMIFS，失败则回退到 VDS (如果代码已更新)
     local ok_fmt1, err_fmt1 = win.disk.format.format(drive_index, 101 * ONE_MB, "NTFS", "TEST_NTFS")
     lu.assertTrue(ok_fmt1, "Format NTFS failed: " .. tostring(err_fmt1))
     
@@ -192,10 +198,11 @@ function TestDisk:test_VHD_Integrated_Lifecycle()
     -- [Feature Test: Volume List] 验证卷列表
     print("  [9/12] Verifying Volume List...")
     
-    local found_ntfs, label_ntfs = verify_volume_label(l1, "TEST_NTFS")
+    -- [FIX] Use polling logic
+    local found_ntfs, label_ntfs = verify_volume_label(l1, "TEST_NTFS", 8000)
     lu.assertTrue(found_ntfs, "NTFS Volume verify failed. Got label: " .. tostring(label_ntfs))
     
-    local found_fat, label_fat = verify_volume_label(l2, "TEST_FAT")
+    local found_fat, label_fat = verify_volume_label(l2, "TEST_FAT", 8000)
     lu.assertTrue(found_fat, "FAT32 Volume verify failed. Got label: " .. tostring(label_fat))
 
     -- [Feature Test: BitLocker] 验证加密状态

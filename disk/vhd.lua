@@ -19,14 +19,13 @@ function M.create(path, size_bytes, opts)
     params.Version = 2
     params.Version2.MaximumSize = size_bytes
     
-    -- [Rufus Strategy] 使用 Full Physical Allocation 避免动态扩容导致的 I/O 挂起
-    -- 0x08 = CREATE_VIRTUAL_DISK_FLAG_FULL_PHYSICAL_ALLOCATION
-    -- 默认为 Full Physical (0x08)，除非显式请求 dynamic
+    -- [Rufus Strategy] 默认使用 Full Physical Allocation (0x08)
+    -- 这会预先分配文件空间，防止在大负载写入（如格式化）时因文件系统扩展导致的 I/O 挂起。
     local flags = 0
-    if opts.dynamic then
+    if opts.dynamic == true then
         flags = 0
     else
-        flags = 0x08 
+        flags = 0x08 -- CREATE_VIRTUAL_DISK_FLAG_FULL_PHYSICAL_ALLOCATION
     end
     
     local h = ffi.new("HANDLE[1]")
@@ -49,7 +48,8 @@ function M.open(path)
 end
 
 function M.attach(h) 
-    -- ATTACH_VIRTUAL_DISK_FLAG_NO_DRIVE_LETTER = 0x00000002 (防止自动分配盘符干扰)
+    -- [Rufus Strategy] NO_DRIVE_LETTER (0x02)
+    -- 我们希望手动控制挂载点，防止 Windows 自动分配干扰
     local flags = 0x00000002 
     local res = C.AttachVirtualDisk(h:get(), nil, flags, 0, nil, nil)
     if res ~= 0 then return false, "Attach failed: " .. res end

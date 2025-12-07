@@ -7,27 +7,27 @@ local M = {}
 function M.format(drive_letter, fs, label)
     if not drive_letter then return false, "Drive letter required" end
     
-    -- [Rufus Strategy] Capture status from callback
-    -- Default to false in case FCC_DONE is never received
     local success_status = false
+    local error_detail = nil
     
-    -- Callback must ensure data validity
     local cb = ffi.cast("PFILE_SYSTEM_CALLBACK", function(cmd, action, data)
-        -- FCC_DONE = 11
-        if cmd == 11 then 
+        if cmd == 11 then -- FCC_DONE
             if data ~= nil then
-                -- data points to a BOOLEAN (byte)
                 local res = ffi.cast("BOOLEAN*", data)[0]
                 success_status = (res ~= 0)
             end
+        -- Capture common failures
+        elseif cmd == 6 then error_detail = "Access Denied (FCC_INSUFFICIENT_RIGHTS)"
+        elseif cmd == 7 then error_detail = "Write Protected (FCC_WRITE_PROTECTED)"
+        elseif cmd == 16 then error_detail = "Volume In Use (FCC_VOLUME_IN_USE)"
         end
-        return 1 -- TRUE to continue
+        return 1
     end)
     
     local ok, err = pcall(function()
         fmifs.FormatEx(
             util.to_wide(drive_letter), 
-            ffi.C.FMIFS_HARDDISK, 
+            ffi.C.FMIFS_HARDDISK, -- Corrected constant
             util.to_wide(fs), 
             util.to_wide(label), 
             1, -- Quick Format
@@ -39,7 +39,9 @@ function M.format(drive_letter, fs, label)
     cb:free()
     
     if not ok then return false, "FormatEx crashed: " .. tostring(err) end
-    if not success_status then return false, "FormatEx reported failure (FCC_DONE=False)" end
+    if not success_status then 
+        return false, "FormatEx failed: " .. (error_detail or "FCC_DONE=False") 
+    end
     return true
 end
 
@@ -49,7 +51,7 @@ function M.check_disk(drive_letter, fs, fix)
     local success_status = false
     
     local cb = ffi.cast("PFILE_SYSTEM_CALLBACK", function(cmd, action, data)
-        if cmd == 11 then -- FCC_DONE
+        if cmd == 11 then 
              if data ~= nil then
                 local res = ffi.cast("BOOLEAN*", data)[0]
                 success_status = (res ~= 0)
