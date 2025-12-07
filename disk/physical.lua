@@ -17,8 +17,6 @@ function PhysicalDrive:init(index, mode, exclusive)
     self.path = type(index) == "number" and ("\\\\.\\PhysicalDrive" .. index) or index
     self.index = type(index) == "number" and index or nil
     
-    -- native.open_device_robust 已返回 nil, err
-    -- 注意：如果是 "exclusive"，robust open 会在内部重试直到没有其他句柄占用
     local h, err = native.open_device_robust(self.path, mode, exclusive)
     if not h then error("PhysicalDrive open failed: " .. tostring(err)) end
     
@@ -41,7 +39,6 @@ function PhysicalDrive:close()
 end
 
 function PhysicalDrive:ioctl(code, in_obj, in_size, out_type, out_size)
-    -- util.ioctl 现在返回 (result, bytes) 或 (nil, msg, code)
     return util.ioctl(self.handle, code, in_obj, in_size, out_type, out_size)
 end
 
@@ -56,8 +53,7 @@ end
 -- [Rufus Strategy] 强力锁定：150次重试，配合 Dismount
 function PhysicalDrive:lock(force)
     -- FSCTL_ALLOW_EXTENDED_DASD_IO
-    -- [FIX] Rufus 源码逻辑：尝试开启 DASD，如果失败（如返回 87 参数错误），仅记录日志但不中止流程。
-    -- 物理驱动器句柄可能不支持此 IOCTL，但这不影响后续的 LOCK 操作。
+    -- 忽略错误 (如 87)，因为某些驱动可能不支持，但不影响锁定
     self:ioctl(defs.IOCTL.DASD)
     
     local attempts = 0
@@ -104,36 +100,27 @@ function PhysicalDrive:flush()
     end
 end
 
--- [Rufus Strategy] Pre-Wipe: 抹除指定区域防止 Ghost Volume
 function PhysicalDrive:wipe_region(offset, size)
     local buf_size = 1024 * 1024
     local buf = kernel32.VirtualAlloc(nil, buf_size, 0x1000, 0x04)
     if not buf then return false, "VirtualAlloc failed" end
     
     local processed = 0
-    local written = ffi.new("DWORD[1]")
-    local li = ffi.new("LARGE_INTEGER")
-    
     local ok = true
     local err = nil
     
     while processed < size do
         local chunk = math.min(buf_size, size - processed)
-        -- Align chunk to sector
         if chunk % self.sector_size ~= 0 then 
             chunk = math.ceil(chunk / self.sector_size) * self.sector_size 
         end
         
-        li.QuadPart = offset + processed
-        if kernel32.SetFilePointerEx(self.handle, li, nil, 0) == 0 then
-            ok = false; err = util.last_error("Seek failed at " .. li.QuadPart); break
+        local w_ok, w_err = self:write(offset + processed, buf, chunk)
+        if not w_ok then
+            ok = false; err = w_err; break
         end
         
-        if kernel32.WriteFile(self.handle, buf, chunk, written, nil) == 0 then
-            ok = false; err = util.last_error("Write failed"); break
-        end
-        
-        processed = processed + written[0]
+        processed = processed + chunk
     end
     
     kernel32.VirtualFree(buf, 0, 0x8000)
@@ -146,9 +133,7 @@ end
 
 function PhysicalDrive:wipe_layout()
     local wipe_size = 8 * 1024 * 1024
-    -- Wipe Start
     local ok1 = self:wipe_region(0, wipe_size)
-    -- Wipe End (Backup GPT)
     local ok2 = self:wipe_region(math.floor((self.size - 1024*1024) / self.sector_size) * self.sector_size, 1024*1024)
     return ok1 and ok2
 end
@@ -181,10 +166,6 @@ function PhysicalDrive:set_attributes(attrs)
     return true
 end
 
--- [Rufus Strategy] Stateful Retry Write
--- 1. Aligned Buffer
--- 2. Sector Aligned Length
--- 3. Pointer Rollback on Failure
 function PhysicalDrive:write(offset, data, len)
     if offset % self.sector_size ~= 0 then return false, "Offset not aligned" end
     
@@ -214,18 +195,14 @@ function PhysicalDrive:write(offset, data, len)
     local ok = false
     local msg = nil
     
-    -- Retry Logic
     local retries = 4
     for i=1, retries do
-        -- 1. Set Pointer
         if kernel32.SetFilePointerEx(self.handle, li, nil, 0) == 0 then
             msg = util.last_error("Seek failed")
-            break -- Seek fail is usually fatal or handle invalid
+            break
         end
         
-        -- 2. Write
         if kernel32.WriteFile(self.handle, buf, aligned_size, w_bytes, nil) ~= 0 then
-            -- Check for short write (rare on disk but possible)
             if w_bytes[0] == aligned_size then
                 ok = true
                 break
@@ -236,11 +213,7 @@ function PhysicalDrive:write(offset, data, len)
             msg = util.last_error("WriteFile failed")
         end
         
-        -- 3. Recover
-        if i < retries then
-            kernel32.Sleep(100) -- Simple backoff
-            -- Pointer will be reset at start of loop
-        end
+        if i < retries then kernel32.Sleep(100) end
     end
     
     kernel32.VirtualFree(buf, 0, 0x8000)
@@ -281,7 +254,6 @@ end
 
 PhysicalDrive.read_sectors = PhysicalDrive.read
 
--- [Helper] 获取设备描述信息
 local function get_desc(h)
     local q = ffi.new("STORAGE_PROPERTY_QUERY"); q.PropertyId = 0; q.QueryType = 0
     local hdr = util.ioctl(h, defs.IOCTL.QUERY_PROP, q, nil, "STORAGE_DESCRIPTOR_HEADER")

@@ -21,7 +21,7 @@ function M.format(drive_letter, fs, label)
     local ok, err = pcall(function()
         fmifs.FormatEx(
             util.to_wide(drive_letter), 
-            fmifs.C.FMIFS_HARDDISK, 
+            ffi.C.FMIFS_HARDDISK, -- [FIX] Constants are in ffi.C, not library instance
             util.to_wide(fs), 
             util.to_wide(label), 
             1, -- Quick Format
