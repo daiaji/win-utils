@@ -108,7 +108,8 @@ function PhysicalDrive:flush()
 end
 
 -- [Rufus Strategy] Pre-Wipe / Ghost Data Cleaning
-function PhysicalDrive:wipe_region(offset, size)
+-- [FIX] Added progress callback support
+function PhysicalDrive:wipe_region(offset, size, cb)
     local buf_size = 1024 * 1024
     local buf = kernel32.VirtualAlloc(nil, buf_size, 0x1000, 0x04)
     if not buf then return false, "VirtualAlloc failed" end
@@ -131,6 +132,9 @@ function PhysicalDrive:wipe_region(offset, size)
         end
         
         processed = processed + chunk
+        if cb then
+            if not cb(processed / size) then ok = false; err = "Cancelled"; break end
+        end
     end
     
     kernel32.VirtualFree(buf, 0, 0x8000)
@@ -138,7 +142,7 @@ function PhysicalDrive:wipe_region(offset, size)
 end
 
 function PhysicalDrive:wipe_zero(progress_cb)
-    return self:wipe_region(0, self.size)
+    return self:wipe_region(0, self.size, progress_cb)
 end
 
 function PhysicalDrive:wipe_layout()
