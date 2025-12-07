@@ -4,24 +4,30 @@ local util = require 'win-utils.core.util'
 
 local M = {}
 
--- 防止 JIT 在回调中崩溃的安全包装
-local function wrap_cb()
-    return ffi.cast("PFILE_SYSTEM_CALLBACK", function(cmd, action, data)
-        return 1 -- TRUE to continue
-    end)
-end
-
 function M.format(drive_letter, fs, label)
     if not drive_letter then return false, "Drive letter required" end
     
-    local cb = wrap_cb()
-    -- FormatEx 返回 void，无法通过返回值判断成败。
-    -- 但如果参数错误（如盘符不存在），可能会导致异常。
-    -- 使用 pcall 保护调用防止崩坏。
+    -- [Rufus Strategy] Capture status from callback
+    -- Default to false in case FCC_DONE is never received
+    local success_status = false
+    
+    -- Callback must ensure data validity
+    local cb = ffi.cast("PFILE_SYSTEM_CALLBACK", function(cmd, action, data)
+        -- FCC_DONE = 11
+        if cmd == 11 then 
+            if data ~= nil then
+                -- data points to a BOOLEAN (byte)
+                local res = ffi.cast("BOOLEAN*", data)[0]
+                success_status = (res ~= 0)
+            end
+        end
+        return 1 -- TRUE to continue
+    end)
+    
     local ok, err = pcall(function()
         fmifs.FormatEx(
             util.to_wide(drive_letter), 
-            ffi.C.FMIFS_HARDDISK, -- [FIX] Constants are in ffi.C, not library instance
+            ffi.C.FMIFS_HARDDISK, 
             util.to_wide(fs), 
             util.to_wide(label), 
             1, -- Quick Format
@@ -33,13 +39,25 @@ function M.format(drive_letter, fs, label)
     cb:free()
     
     if not ok then return false, "FormatEx crashed: " .. tostring(err) end
+    if not success_status then return false, "FormatEx reported failure (FCC_DONE=False)" end
     return true
 end
 
 function M.check_disk(drive_letter, fs, fix)
     if not drive_letter then return false, "Drive letter required" end
     
-    local cb = wrap_cb()
+    local success_status = false
+    
+    local cb = ffi.cast("PFILE_SYSTEM_CALLBACK", function(cmd, action, data)
+        if cmd == 11 then -- FCC_DONE
+             if data ~= nil then
+                local res = ffi.cast("BOOLEAN*", data)[0]
+                success_status = (res ~= 0)
+            end
+        end
+        return 1
+    end)
+    
     local ok, err = pcall(function()
         fmifs.Chkdsk(
             util.to_wide(drive_letter), 
@@ -57,6 +75,7 @@ function M.check_disk(drive_letter, fs, fix)
     cb:free()
     
     if not ok then return false, "Chkdsk crashed: " .. tostring(err) end
+    if not success_status then return false, "Chkdsk reported failure" end
     return true
 end
 

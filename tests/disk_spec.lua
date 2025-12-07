@@ -45,7 +45,6 @@ function TestDisk:tearDown()
 end
 
 -- 辅助：带重试的卷标验证
--- Rufus 策略：Windows 卷挂载和元数据刷新是异步的，必须轮询等待
 local function verify_volume_label(target_mount, expected_label, timeout_ms)
     local start = kernel32.GetTickCount()
     local limit = timeout_ms or 5000
@@ -88,7 +87,6 @@ function TestDisk:test_VHD_Integrated_Lifecycle()
 
     -- [Phase 1] 虚拟磁盘创建与识别
     print("  [1/12] Creating & Attaching VHDX (512MB)...")
-    -- [FIX] Use Fixed size VHD to match Rufus strategy for stability
     local h, err = win.disk.vhd.create(self.temp_vhd, 512 * 1024 * 1024, { dynamic = false })
     lu.assertNotNil(h, "VHD Create failed: " .. tostring(err))
     self.vhd_handle = h
@@ -115,7 +113,6 @@ function TestDisk:test_VHD_Integrated_Lifecycle()
     lu.assertTrue(found_in_list, "Created VHD not found in win.disk.physical.list()")
 
     -- [Phase 2] 裸机操作 (Raw I/O)
-    -- [FIX] Use "exclusive" mode
     local drive = win.disk.physical.open(drive_index, "rw", "exclusive")
     lu.assertNotNil(drive, "Open drive failed")
     
@@ -193,7 +190,6 @@ function TestDisk:test_VHD_Integrated_Lifecycle()
     print(string.format("         Mounted at %s and %s", l1, l2))
 
     -- [Feature Test: Volume List] 验证卷列表
-    -- [FIX] Use polling for volume label check
     print("  [9/12] Verifying Volume List...")
     
     local found_ntfs, label_ntfs = verify_volume_label(l1, "TEST_NTFS")
