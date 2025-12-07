@@ -131,7 +131,4 @@ function M.unmount_all(idx)
     if changed then notify() end
 end
 
--- [FIX] Added alias to support 'unmount_all_on_disk' as called by tests and init.lua
-M.unmount_all_on_disk = M.unmount_all
-
 return M
