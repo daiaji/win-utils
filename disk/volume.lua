@@ -10,6 +10,43 @@ local table_ext = require 'ext.table'
 
 local M = {}
 
+local DRIVE_TYPES = {
+    [0] = "Unknown",
+    [1] = "No Root",
+    [2] = "Removable",
+    [3] = "Fixed",
+    [4] = "Remote",
+    [5] = "CDROM",
+    [6] = "RAMDisk"
+}
+
+-- [RESTORED] 获取驱动器类型 (Fixed, Removable, CDROM, RAMDisk...)
+-- @param root: 路径 (如 "C:", "C:\", "\\?\Volume{...}\")
+function M.get_type(root)
+    local path = root
+    -- GetDriveType 需要尾部反斜杠 (例如 "C:\")
+    if path and not path:match("[\\/]$") then 
+        path = path .. "\\" 
+    end
+    
+    local t = kernel32.GetDriveTypeW(util.to_wide(path))
+    return DRIVE_TYPES[t] or "Unknown"
+end
+
+-- [RESTORED] 简单枚举所有逻辑盘符
+-- @return: table {"C:", "D:", ...}
+function M.list_letters()
+    local mask = kernel32.GetLogicalDrives()
+    local list = {}
+    -- 0=A, 1=B, ... 25=Z
+    for i = 0, 25 do
+        if bit.band(mask, bit.lshift(1, i)) ~= 0 then
+            table.insert(list, string.char(65 + i) .. ":")
+        end
+    end
+    return list
+end
+
 function M.list()
     local name = ffi.new("wchar_t[261]")
     local hFind = kernel32.FindFirstVolumeW(name, 261)
@@ -46,6 +83,9 @@ function M.list()
         item.label = util.from_wide(lab)
         item.fs = util.from_wide(fs)
     end
+    
+    -- 补充类型判断
+    item.type = M.get_type(item.guid_path)
     
     table.insert(res, item)
     

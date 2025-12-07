@@ -5,22 +5,44 @@ local bit = require 'bit'
 local util = require 'win-utils.core.util'
 local M = {}
 
-function M.set_res(w,h,hz)
-    local dm = ffi.new("DEVMODEW"); dm.dmSize = ffi.sizeof(dm)
-    dm.dmPelsWidth = w; dm.dmPelsHeight = h; dm.dmFields = 0x180000
-    if hz then dm.dmDisplayFrequency = hz; dm.dmFields = bit.bor(dm.dmFields, 0x400000) end
+-- [RESTORED] 设置分辨率
+-- @param w: 宽度
+-- @param h: 高度
+-- @param hz: 刷新率 (可选)
+-- @param depth: 颜色位深 (可选, e.g. 16, 32)
+function M.set_res(w, h, hz, depth)
+    local dm = ffi.new("DEVMODEW")
+    dm.dmSize = ffi.sizeof(dm)
     
-    local res = user32.ChangeDisplaySettingsExW(nil, dm, nil, 0, nil)
+    -- DM_PELSWIDTH (0x00080000) | DM_PELSHEIGHT (0x00100000)
+    dm.dmPelsWidth = w
+    dm.dmPelsHeight = h
+    dm.dmFields = 0x180000 
+    
+    if hz then 
+        dm.dmDisplayFrequency = hz
+        -- DM_DISPLAYFREQUENCY (0x00400000)
+        dm.dmFields = bit.bor(dm.dmFields, 0x400000) 
+    end
+    
+    if depth then
+        dm.dmBitsPerPel = depth
+        -- DM_BITSPERPEL (0x00040000)
+        dm.dmFields = bit.bor(dm.dmFields, 0x040000)
+    end
+    
+    -- CDS_UPDATEREGISTRY (0x01)
+    local res = user32.ChangeDisplaySettingsExW(nil, dm, nil, 0x01, nil)
     if res ~= 0 then return false, "ChangeDisplaySettings failed code: " .. res end
     return true
 end
 
 function M.set_topology(mode)
-    local f = 0x80 -- APPLY
-    if mode=="clone" then f=bit.bor(f,2)
-    elseif mode=="extend" then f=bit.bor(f,4)
-    elseif mode=="external" then f=bit.bor(f,8)
-    else f=bit.bor(f,1) end -- internal
+    local f = 0x80 -- SDC_APPLY
+    if mode=="clone" then f=bit.bor(f,2) -- SDC_TOPOLOGY_CLONE
+    elseif mode=="extend" then f=bit.bor(f,4) -- SDC_TOPOLOGY_EXTEND
+    elseif mode=="external" then f=bit.bor(f,8) -- SDC_TOPOLOGY_EXTERNAL
+    else f=bit.bor(f,1) end -- SDC_TOPOLOGY_INTERNAL
     
     local res = ccd.SetDisplayConfig(0, nil, 0, nil, f)
     if res ~= 0 then return false, "SetDisplayConfig failed code: " .. res end

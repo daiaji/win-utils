@@ -137,7 +137,7 @@ function M.get_dependents(n)
     
     local buf = ffi.new("uint8_t[?]", bytes[0])
     if advapi32.EnumDependentServicesW(svc:get(), 3, ffi.cast("ENUM_SERVICE_STATUSW*", buf), bytes[0], bytes, count) == 0 then
-        return {} -- Should we return error? Empty deps is common, let's keep simple.
+        return {} 
     end
     
     local deps = table_new(tonumber(count[0]), 0)
@@ -147,6 +147,19 @@ function M.get_dependents(n)
         table.insert(deps, util.from_wide(ptr[i].lpServiceName)) 
     end
     return deps
+end
+
+-- [RESTORED] 递归停止服务及其依赖
+function M.stop_recursive(n)
+    local deps = M.get_dependents(n)
+    if deps then
+        for _, dep_name in ipairs(deps) do
+            -- 递归尝试停止依赖服务
+            M.stop_recursive(dep_name)
+        end
+    end
+    -- 停止自身
+    return M.stop(n)
 end
 
 return M

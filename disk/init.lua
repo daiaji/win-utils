@@ -15,7 +15,8 @@ local sub_modules = {
     types     = 'win-utils.disk.types',
     bitlocker = 'win-utils.disk.bitlocker',
     volume    = 'win-utils.disk.volume',
-    safety    = 'win-utils.disk.safety'
+    safety    = 'win-utils.disk.safety',
+    info      = 'win-utils.disk.info'
 }
 
 setmetatable(M, {
@@ -26,17 +27,29 @@ setmetatable(M, {
             rawset(t, key, mod)
             return mod
         end
+        
+        -- [RESTORED] Compatibility Aliases
+        if key == "list" then
+            local vol = require('win-utils.disk.volume')
+            rawset(t, "list", vol.list_letters)
+            return vol.list_letters
+        end
+        if key == "info" then
+            local info_mod = require('win-utils.disk.info')
+            rawset(t, "info", info_mod.get)
+            return info_mod.get
+        end
+        
         return nil
     end
 })
 
--- [Rufus Strategy] Logical Polling: 等待逻辑卷在 Windows 内核中注册
 local function wait_for_partitions(drive_index, timeout)
     local kernel32 = require 'ffi.req' 'Windows.sdk.kernel32'
     local volume = require 'win-utils.disk.volume'
     
     local start = kernel32.GetTickCount()
-    local limit = timeout or 15000 -- 15s default
+    local limit = timeout or 15000 
     
     while true do
         local vols = volume.list()
@@ -50,7 +63,7 @@ local function wait_for_partitions(drive_index, timeout)
                     hVol:close()
                     
                     if ext and ext.NumberOfDiskExtents > 0 and ext.Extents[0].DiskNumber == drive_index then
-                        return true -- Found at least one volume on this disk
+                        return true 
                     end
                 end
             end
@@ -69,16 +82,13 @@ function M.prepare_drive(drive_index, scheme, opts)
     local layout = require 'win-utils.disk.layout'
     local device = require 'win-utils.device'
 
-    -- 1. Aggressive Unmount
     mount.unmount_all_on_disk(drive_index)
     
-    -- 2. Open & Lock (Phase 1)
     local drive, err = physical.open(drive_index, "rw", true)
     if not drive then return false, "Open failed: " .. tostring(err) end
     
     if not drive:lock(true) then 
         drive:close()
-        -- 2.1 Cycle Device if lock fails (Zombie check)
         device.reset(drive_index, 2000)
         drive, err = physical.open(drive_index, "rw", true)
         if not drive then return false, "Re-open after reset failed" end
@@ -87,39 +97,28 @@ function M.prepare_drive(drive_index, scheme, opts)
         end
     end
     
-    -- 3. Wipe Layout (MBR/GPT)
     drive:wipe_layout()
     drive:close()
     
-    -- 4. VDS Clean (Force kernel/VDS sync)
-    -- Rufus 使用 VDS Clean 作为重置状态的最强手段
     local v_ok, v_err = vds.clean(drive_index)
-    if not v_ok then
-        -- 如果 VDS Clean 失败 (例如服务不可用)，我们依赖上面的手动 Wipe
-        -- print("VDS Clean warning: " .. tostring(v_err))
-    end
     kernel32.Sleep(500)
     
-    -- 5. Re-open for layout application
     drive, err = physical.open(drive_index, "rw", true)
     if not drive then return false, "Re-open failed: " .. tostring(err) end
     if not drive:lock(true) then drive:close(); return false, "Re-lock failed" end
     
-    -- 6. Apply Layout (With automatic pre-wipe of partition offsets inside apply)
     local plan = layout.calculate_partition_plan(drive, scheme, opts)
     local ok, apply_err = layout.apply(drive, scheme, plan)
     
     drive:flush()
     drive:close()
     
-    -- 7. Force VDS Refresh & Poll
     vds.refresh_layout()
     
     if not wait_for_partitions(drive_index, 10000) then
-        -- Last ditch VDS reenumerate if polling times out
         vds.refresh_layout()
         if not wait_for_partitions(drive_index, 5000) then
-            return false, "Partition polling timed out (Ghost volume?)"
+            return false, "Partition polling timed out"
         end
     end
     
@@ -164,9 +163,9 @@ function M.check_health(drive_index, cb, write_test)
     end
     
     local patterns = write_test and {0x55, 0xAA, 0x00, 0xFF} or nil
-    local ok, msg = surface.scan(drive, cb, write_test and "write" or "read", patterns)
+    local ok, msg, stats = surface.scan(drive, cb, write_test and "write" or "read", patterns)
     drive:close()
-    return ok, msg
+    return ok, msg, stats
 end
 
 function M.rescan()

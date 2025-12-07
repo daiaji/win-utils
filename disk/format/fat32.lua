@@ -8,7 +8,8 @@ local M = {}
 
 local function pad(s, l) return s..string.rep(" ", l-#s) end
 
-function M.format_raw(drive_idx, offset, label)
+-- [RESTORED] Added cluster_size parameter
+function M.format_raw(drive_idx, offset, label, cluster_size)
     local phys, err = physical.open(drive_idx, "rw", true)
     if not phys then return false, "Open failed: " .. tostring(err) end
     
@@ -30,12 +31,31 @@ function M.format_raw(drive_idx, offset, label)
     
     local bps = phys.sector_size
     local total_sec = math.floor(size / bps)
-    local spc = (total_sec > 66600) and 8 or 8
     
+    -- [RESTORED] Cluster Size Logic
+    local spc = 0
+    if cluster_size and cluster_size > 0 then
+        spc = math.floor(cluster_size / bps)
+    else
+        -- Auto calculation (Standard Windows/Rufus logic)
+        if total_sec < 66600 then spc = 1       -- < 32MB
+        elseif total_sec < 133200 then spc = 2  -- < 64MB
+        elseif total_sec < 266400 then spc = 4  -- < 128MB
+        elseif total_sec < 532800 then spc = 8  -- < 256MB
+        elseif total_sec < 16711680 then spc = 16 -- < 8GB
+        elseif total_sec < 33423360 then spc = 32 -- < 16GB
+        else spc = 64 -- >= 16GB
+        end
+    end
+    
+    -- Safety check: FAT32 max clusters ~268 million. 
+    -- Ensure count fits in 28 bits
     local res_sec = 32
     local fats = 2
     local fat_ent = math.floor((total_sec - res_sec)/spc)
     local fat_sz = math.ceil((fat_ent * 4) / bps)
+    -- Align FAT size to 8 sectors for performance
+    fat_sz = math.ceil(fat_sz / 8) * 8
     
     local bs = ffi.new("FAT32_BOOT_SECTOR")
     bs.JumpBoot[0]=0xEB; bs.JumpBoot[1]=0x58; bs.JumpBoot[2]=0x90

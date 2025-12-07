@@ -6,7 +6,24 @@ local util = require 'win-utils.core.util'
 local M = {}
 local anchors = {} 
 
-function M.reg(id, modifiers, key, cb)
+-- [RESTORED] Auto ID generation support
+-- reg(modifiers, key, cb) OR reg(id, modifiers, key, cb)
+function M.reg(id_or_mod, mod_or_key, key_or_cb, cb_or_nil)
+    local id, modifiers, key, cb
+    
+    -- Overload resolution
+    if type(id_or_mod) == "number" then
+        id, modifiers, key, cb = id_or_mod, mod_or_key, key_or_cb, cb_or_nil
+    else
+        -- Auto-allocate ID (Range 1 to 0xBFFF)
+        local free_id = 1
+        while anchors[free_id] do free_id = free_id + 1 end
+        if free_id > 0xBFFF then return false, "No free hotkey IDs" end
+        id = free_id
+        
+        modifiers, key, cb = id_or_mod, mod_or_key, key_or_cb
+    end
+
     if not cb or type(cb) ~= "function" then return false, "Callback required" end
     
     local mod_flag = 0
@@ -29,7 +46,7 @@ function M.reg(id, modifiers, key, cb)
         return false, util.last_error("RegisterHotKey failed")
     end
     anchors[id] = cb
-    return true
+    return id -- Return the allocated ID
 end
 
 function M.unreg(id)
@@ -37,6 +54,14 @@ function M.unreg(id)
     if user32.UnregisterHotKey(nil, id) == 0 then
         return false, util.last_error("UnregisterHotKey failed")
     end
+    return true
+end
+
+function M.clear()
+    for id, _ in pairs(anchors) do
+        user32.UnregisterHotKey(nil, id)
+    end
+    anchors = {}
     return true
 end
 

@@ -1,23 +1,21 @@
 local ffi = require 'ffi'
 local bit = require 'bit'
 local kernel32 = require 'ffi.req' 'Windows.sdk.kernel32'
-local version = require 'ffi.req' 'Windows.sdk.version'
+local version = require 'ffi.req' 'Windows.sdk.version' -- Ensure this binding exists
 local ntdll = require 'ffi.req' 'Windows.sdk.ntdll'
 local util = require 'win-utils.core.util'
 local native = require 'win-utils.core.native'
 
-local function get_ntfs() return require 'win-utils.fs.ntfs' end
-local function get_raw() return require 'win-utils.fs.raw' end
-
-local M = {}
-
+-- Lazy load submodules
 local sub_modules = {
     native = 'win-utils.fs.raw',
     ntfs   = 'win-utils.fs.ntfs',
-    path   = 'win-utils.fs.path'
+    path   = 'win-utils.fs.path',
+    acl    = 'win-utils.fs.acl'
 }
 
-setmetatable(M, {
+local M = {}
+local mt = {
     __index = function(t, key)
         local path = sub_modules[key]
         if path then
@@ -27,12 +25,19 @@ setmetatable(M, {
         end
         return nil
     end
-})
+}
+setmetatable(M, mt)
+
+local function get_ntfs() return M.ntfs end
+local function get_raw() return M.native end
 
 local FILE_ATTRIBUTE_DIRECTORY     = 0x10
 local FILE_ATTRIBUTE_REPARSE_POINT = 0x400
 local FILE_ATTRIBUTE_READONLY      = 0x01
 local INVALID_FILE_ATTRIBUTES      = 0xFFFFFFFF
+
+local function is_link_attr(attr) return bit.band(attr, FILE_ATTRIBUTE_REPARSE_POINT) ~= 0 end
+local function is_dir_attr(attr) return bit.band(attr, FILE_ATTRIBUTE_DIRECTORY) ~= 0 end
 
 local function scandir_native(path)
     local h, err = native.open_file(path, "r", true) 
@@ -67,8 +72,26 @@ local function scandir_native(path)
     end
 end
 
-local function is_link_attr(attr) return bit.band(attr, FILE_ATTRIBUTE_REPARSE_POINT) ~= 0 end
-local function is_dir_attr(attr) return bit.band(attr, FILE_ATTRIBUTE_DIRECTORY) ~= 0 end
+-- [RESTORED] Get File Version String (e.g., "1.0.0.0")
+function M.get_version(path)
+    local wpath = util.to_wide(path)
+    local dummy = ffi.new("DWORD[1]")
+    local size = version.GetFileVersionInfoSizeW(wpath, dummy)
+    if size == 0 then return nil end
+
+    local buf = ffi.new("uint8_t[?]", size)
+    if version.GetFileVersionInfoW(wpath, 0, size, buf) == 0 then return nil end
+
+    local verInfo = ffi.new("VS_FIXEDFILEINFO*[1]")
+    local verLen = ffi.new("UINT[1]")
+    
+    if version.VerQueryValueW(buf, util.to_wide("\\"), ffi.cast("void**", verInfo), verLen) == 0 then return nil end
+
+    local vi = verInfo[0]
+    return string.format("%d.%d.%d.%d",
+        bit.rshift(vi.dwFileVersionMS, 16), bit.band(vi.dwFileVersionMS, 0xFFFF),
+        bit.rshift(vi.dwFileVersionLS, 16), bit.band(vi.dwFileVersionLS, 0xFFFF))
+end
 
 function M.mkdir(path, opts)
     opts = opts or {}
