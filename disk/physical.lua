@@ -56,8 +56,9 @@ end
 -- [Rufus Strategy] 强力锁定：150次重试，配合 Dismount
 function PhysicalDrive:lock(force)
     -- FSCTL_ALLOW_EXTENDED_DASD_IO
-    local ok, err = self:ioctl(defs.IOCTL.DASD)
-    if not ok then return false, "DASD IOCTL failed: " .. tostring(err) end
+    -- [FIX] Rufus 源码逻辑：尝试开启 DASD，如果失败（如返回 87 参数错误），仅记录日志但不中止流程。
+    -- 物理驱动器句柄可能不支持此 IOCTL，但这不影响后续的 LOCK 操作。
+    self:ioctl(defs.IOCTL.DASD)
     
     local attempts = 0
     local max_attempts = 150
