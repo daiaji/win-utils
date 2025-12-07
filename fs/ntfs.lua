@@ -5,6 +5,37 @@ local util = require 'win-utils.core.util'
 local native = require 'win-utils.core.native'
 local Handle = require 'win-utils.core.handle'
 
+ffi.cdef[[
+    typedef struct _REPARSE_DATA_BUFFER_HEADER {
+        ULONG  ReparseTag;
+        USHORT ReparseDataLength;
+        USHORT Reserved;
+    } REPARSE_DATA_BUFFER_HEADER;
+
+    typedef struct _SYMBOLIC_LINK_REPARSE_BUFFER {
+        ULONG  ReparseTag;
+        USHORT ReparseDataLength;
+        USHORT Reserved;
+        USHORT SubstituteNameOffset;
+        USHORT SubstituteNameLength;
+        USHORT PrintNameOffset;
+        USHORT PrintNameLength;
+        ULONG  Flags;
+        WCHAR  PathBuffer[1];
+    } SYMBOLIC_LINK_REPARSE_BUFFER;
+
+    typedef struct _MOUNT_POINT_REPARSE_BUFFER {
+        ULONG  ReparseTag;
+        USHORT ReparseDataLength;
+        USHORT Reserved;
+        USHORT SubstituteNameOffset;
+        USHORT SubstituteNameLength;
+        USHORT PrintNameOffset;
+        USHORT PrintNameLength;
+        WCHAR  PathBuffer[1];
+    } MOUNT_POINT_REPARSE_BUFFER;
+]]
+
 local M = {}
 
 -- Helper to create Reparse Buffer for Junctions
@@ -79,12 +110,21 @@ function M.mklink(link, target, type)
 end
 
 function M.read_link(path)
-    local h = native.open_file(path, "r")
-    if not h then return nil end
+    -- [FIX] Must use OPEN_REPARSE_POINT (0x00200000) to read the link itself, not target
+    -- FILE_FLAG_BACKUP_SEMANTICS (0x02000000) is also needed for directories
+    local flags = 0x02200000 
+    local access = 0x80000000 -- GENERIC_READ
+    
+    local h = native.open_internal(path, access, 1, 3, flags) -- ShareRead, OpenExisting
+    if not h then return nil, "Open failed" end
+    
     local buf = util.ioctl(h:get(), 0x900A8, nil, 0, nil, 16384) -- FSCTL_GET_REPARSE_POINT
     h:close()
-    if not buf then return nil end
-    local hdr = ffi.cast("REPARSE_DATA_BUFFER*", buf)
+    
+    if not buf then return nil, util.last_error() end
+    
+    local hdr = ffi.cast("REPARSE_DATA_BUFFER_HEADER*", buf)
+    
     if hdr.ReparseTag == 0xA000000C then -- SYMLINK
         local sl = ffi.cast("SYMBOLIC_LINK_REPARSE_BUFFER*", buf)
         return util.from_wide(sl.PathBuffer + sl.SubstituteNameOffset/2, sl.SubstituteNameLength/2), "Symlink"
@@ -92,7 +132,7 @@ function M.read_link(path)
         local mp = ffi.cast("MOUNT_POINT_REPARSE_BUFFER*", buf)
         return util.from_wide(mp.PathBuffer + mp.SubstituteNameOffset/2, mp.SubstituteNameLength/2), "Junction"
     end
-    return nil, "Unknown Tag"
+    return nil, string.format("Unknown Tag: 0x%X", hdr.ReparseTag)
 end
 
 function M.unlink(path)
