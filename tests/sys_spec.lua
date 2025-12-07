@@ -64,6 +64,36 @@ function TestSys:test_Shortcut_Full()
     end
 end
 
+-- [RESTORED] 系统热键测试 (Hotkeys)
+function TestSys:test_Hotkey()
+    -- 使用一个独特的 ID 避免冲突 (0xBFFF range)
+    local id = 0xBFFF 
+    local hit_count = 0
+    local cb = function() hit_count = hit_count + 1 end
+    
+    -- 尝试注册热键: Alt+0 (无需真实按键，通过 dispatch 模拟触发)
+    -- 注意：在无 GUI 的 CI 环境中，RegisterHotKey 可能会失败，我们做容错处理
+    local ok, err = win.sys.hotkey.reg(id, "alt", "0", cb)
+    
+    if not ok then
+        print("  [SKIP] Hotkey reg failed (Headless/CI?): " .. tostring(err))
+        return
+    end
+    
+    -- 模拟分发消息
+    win.sys.hotkey.dispatch(id)
+    lu.assertEquals(hit_count, 1, "Callback not triggered via dispatch")
+    
+    -- 注销
+    local unreg_ok = win.sys.hotkey.unreg(id)
+    lu.assertTrue(unreg_ok, "Unregister failed")
+    
+    -- 确保注销后回调不再触发 (或者引用已移除)
+    -- dispatch 本身只查找 anchors 表，注销后 anchors 应为空
+    win.sys.hotkey.dispatch(id)
+    lu.assertEquals(hit_count, 1, "Callback triggered after unregister")
+end
+
 function TestSys:test_Shell_CmdParse()
     lu.assertNotNil(win.sys.shell, "Shell module not exported")
     local cmd = '"C:\\Program Files\\App.exe" /s "argument with spaces"'

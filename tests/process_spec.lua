@@ -141,7 +141,28 @@ function TestProcess:test_Tree_Kill()
     p:close()
 end
 
--- 7. 令牌信息 (Token Info)
+-- 7. [RESTORED] 优先级设置 (Priority)
+function TestProcess:test_Priority()
+    local p = win.process.exec(TEST_CMD_LONG, nil, 0)
+    lu.assertNotNil(p)
+    
+    -- 7.1 Set to IDLE (L)
+    local ok_l, err_l = p:set_priority("L")
+    lu.assertTrue(ok_l, "Set priority 'L' failed: " .. tostring(err_l))
+    
+    -- 7.2 Set to NORMAL (N)
+    local ok_n, err_n = p:set_priority("N")
+    lu.assertTrue(ok_n, "Set priority 'N' failed: " .. tostring(err_n))
+    
+    -- 7.3 Invalid Priority
+    local ok_bad, _ = p:set_priority("INVALID_MODE")
+    lu.assertFalse(ok_bad, "Set invalid priority should fail")
+    
+    p:kill()
+    p:close()
+end
+
+-- 8. 令牌信息 (Token Info)
 function TestProcess:test_Token_Info()
     local t, err = win.process.token.open_current(8) -- QUERY
     lu.assertNotNil(t, "open_current failed: " .. tostring(err))
@@ -165,7 +186,7 @@ function TestProcess:test_Token_Info()
     end
 end
 
--- 8. 静态等待函数测试
+-- 9. 静态等待函数测试
 function TestProcess:test_Static_Wait_Helpers()
     local p = win.process.exec(TEST_CMD_LONG, nil, 0)
     lu.assertNotNil(p)
@@ -181,7 +202,7 @@ function TestProcess:test_Static_Wait_Helpers()
     p:close()
 end
 
--- 9. 内存区域 (Memory Regions)
+-- 10. 内存区域 (Memory Regions)
 function TestProcess:test_Memory_Regions()
     local p = win.process.current()
     lu.assertNotNil(p)
@@ -206,7 +227,7 @@ function TestProcess:test_Memory_Regions()
     p:close()
 end
 
--- 10. 独立的模块列表测试 (Modules)
+-- 11. 独立的模块列表测试 (Modules)
 function TestProcess:test_Modules()
     local pid = ffi.load("kernel32").GetCurrentProcessId()
     
@@ -230,7 +251,7 @@ function TestProcess:test_Modules()
     end
 end
 
--- 11. 句柄列表 (Handles)
+-- 12. 句柄列表 (Handles)
 function TestProcess:test_Handles()
     local pid = ffi.load("kernel32").GetCurrentProcessId()
     local list, err = win.process.handles.list(pid)
