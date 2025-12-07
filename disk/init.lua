@@ -82,7 +82,7 @@ function M.prepare_drive(drive_index, scheme, opts)
     local defs = require 'win-utils.disk.defs'
 
     -- 1. Unmount everything to release handles
-    mount.unmount_all_on_disk(drive_index)
+    mount.unmount_all(drive_index)
     
     local drive, err = physical.open(drive_index, "rw", true)
     if not drive then return false, "Open failed: " .. tostring(err) end
@@ -130,7 +130,7 @@ function M.clean_all(drive_index, cb)
     local mount = require 'win-utils.disk.mount'
     local physical = require 'win-utils.disk.physical'
     
-    mount.unmount_all_on_disk(drive_index)
+    mount.unmount_all(drive_index)
     local drive, err = physical.open(drive_index, "rw", true)
     if not drive then return false, "Open failed: " .. tostring(err) end
     
@@ -151,7 +151,7 @@ function M.check_health(drive_index, cb, write_test)
     local physical = require 'win-utils.disk.physical'
     local surface = require 'win-utils.disk.surface'
     
-    if write_test then mount.unmount_all_on_disk(drive_index) end
+    if write_test then mount.unmount_all(drive_index) end
     local mode = write_test and "rw" or "r"
     
     local drive, err = physical.open(drive_index, mode, true)
