@@ -1,13 +1,13 @@
 local ffi = require 'ffi'
 local bit = require 'bit'
 local kernel32 = require 'ffi.req' 'Windows.sdk.kernel32'
-local setupapi = require 'ffi.req' 'Windows.sdk.setupapi'
 local native = require 'win-utils.core.native'
 local util = require 'win-utils.core.util'
 local defs = require 'win-utils.disk.defs'
 local class = require 'win-utils.deps'.class
 local proc_handles = require 'win-utils.process.handles'
 local proc = require 'win-utils.process.init'
+local setupapi = require 'ffi.req' 'Windows.sdk.setupapi'
 local table_new = require "table.new"
 
 local PhysicalDrive = class()
@@ -17,7 +17,6 @@ function PhysicalDrive:init(index, mode, exclusive)
     self.path = type(index) == "number" and ("\\\\.\\PhysicalDrive" .. index) or index
     self.index = type(index) == "number" and index or nil
     
-    -- native.open_device_robust 已返回 nil, err
     local h, err = native.open_device_robust(self.path, mode, exclusive)
     if not h then error("PhysicalDrive open failed: " .. tostring(err)) end
     
@@ -40,7 +39,6 @@ function PhysicalDrive:close()
 end
 
 function PhysicalDrive:ioctl(code, in_obj, in_size, out_type, out_size)
-    -- util.ioctl 现在返回 (result, bytes) 或 (nil, msg, code)
     return util.ioctl(self.handle, code, in_obj, in_size, out_type, out_size)
 end
 
@@ -52,8 +50,8 @@ function PhysicalDrive:update_geometry()
     end
 end
 
+-- [Rufus Strategy] 强力锁定：150次重试，配合 Dismount
 function PhysicalDrive:lock(force)
-    -- FSCTL_ALLOW_EXTENDED_DASD_IO
     local ok, err = self:ioctl(defs.IOCTL.DASD)
     if not ok then return false, "DASD IOCTL failed: " .. tostring(err) end
     
@@ -95,70 +93,53 @@ function PhysicalDrive:unlock()
     end
 end
 
-function PhysicalDrive:wipe_zero(progress_cb)
+function PhysicalDrive:flush()
+    if self.handle then
+        kernel32.FlushFileBuffers(self.handle)
+    end
+end
+
+-- [Rufus Strategy] Pre-Wipe: 抹除指定区域防止 Ghost Volume
+function PhysicalDrive:wipe_region(offset, size)
     local buf_size = 1024 * 1024
     local buf = kernel32.VirtualAlloc(nil, buf_size, 0x1000, 0x04)
     if not buf then return false, "VirtualAlloc failed" end
     
-    local total = self.size
     local processed = 0
-    local written = ffi.new("DWORD[1]")
-    local li = ffi.new("LARGE_INTEGER")
-    
-    li.QuadPart = 0
-    if kernel32.SetFilePointerEx(self.handle, li, nil, 0) == 0 then
-        kernel32.VirtualFree(buf, 0, 0x8000)
-        return false, util.last_error("Seek failed")
-    end
-    
     local ok = true
     local err = nil
     
-    while processed < total do
-        local chunk = math.min(buf_size, total - processed)
+    while processed < size do
+        local chunk = math.min(buf_size, size - processed)
+        -- Align chunk to sector
         if chunk % self.sector_size ~= 0 then 
             chunk = math.ceil(chunk / self.sector_size) * self.sector_size 
         end
         
-        if kernel32.WriteFile(self.handle, buf, chunk, written, nil) == 0 then
-            ok = false; err = util.last_error("Write failed"); break
+        -- Reuse the robust write logic
+        local w_ok, w_err = self:write(offset + processed, buf, chunk)
+        if not w_ok then
+            ok = false; err = w_err; break
         end
         
-        processed = processed + written[0]
-        if progress_cb then
-            if not progress_cb(processed / total) then ok = false; err = "Cancelled"; break end
-        end
+        processed = processed + chunk
     end
     
     kernel32.VirtualFree(buf, 0, 0x8000)
     return ok, err
 end
 
+function PhysicalDrive:wipe_zero(progress_cb)
+    return self:wipe_region(0, self.size) 
+end
+
 function PhysicalDrive:wipe_layout()
     local wipe_size = 8 * 1024 * 1024
-    local written = ffi.new("DWORD[1]")
-    local buf = kernel32.VirtualAlloc(nil, wipe_size, 0x1000, 0x04)
-    if not buf then return false, "Alloc failed" end
-    
-    local ok = true
-    local li = ffi.new("LARGE_INTEGER")
-    
-    li.QuadPart = 0
-    if kernel32.SetFilePointerEx(self.handle, li, nil, 0) == 0 or 
-       kernel32.WriteFile(self.handle, buf, wipe_size, written, nil) == 0 then
-        ok = false
-    end
-    
-    if ok and self.size > wipe_size then
-        local end_wipe = 1024 * 1024 
-        li.QuadPart = math.floor((self.size - end_wipe) / self.sector_size) * self.sector_size
-        if kernel32.SetFilePointerEx(self.handle, li, nil, 0) ~= 0 then
-            kernel32.WriteFile(self.handle, buf, end_wipe, written, nil)
-        end
-    end
-    
-    kernel32.VirtualFree(buf, 0, 0x8000)
-    return ok
+    -- Wipe Start
+    local ok1 = self:wipe_region(0, wipe_size)
+    -- Wipe End (Backup GPT)
+    local ok2 = self:wipe_region(math.floor((self.size - 1024*1024) / self.sector_size) * self.sector_size, 1024*1024)
+    return ok1 and ok2
 end
 
 function PhysicalDrive:get_attributes()
@@ -189,7 +170,10 @@ function PhysicalDrive:set_attributes(attrs)
     return true
 end
 
--- [Optimized] 写入数据
+-- [Rufus Strategy] Stateful Retry Write
+-- 1. Aligned Buffer
+-- 2. Sector Aligned Length
+-- 3. Pointer Rollback on Failure
 function PhysicalDrive:write(offset, data, len)
     if offset % self.sector_size ~= 0 then return false, "Offset not aligned" end
     
@@ -215,18 +199,37 @@ function PhysicalDrive:write(offset, data, len)
     if padding > 0 then ffi.fill(ffi.cast("uint8_t*", buf) + raw_size, padding, 0) end
     
     local li = ffi.new("LARGE_INTEGER"); li.QuadPart = offset
+    local w_bytes = ffi.new("DWORD[1]")
     local ok = false
-    local msg
+    local msg = nil
     
-    if kernel32.SetFilePointerEx(self.handle, li, nil, 0) ~= 0 then
-        local w = ffi.new("DWORD[1]")
-        if kernel32.WriteFile(self.handle, buf, aligned_size, w, nil) ~= 0 then
-            ok = true
+    -- Retry Logic
+    local retries = 4
+    for i=1, retries do
+        -- 1. Set Pointer
+        if kernel32.SetFilePointerEx(self.handle, li, nil, 0) == 0 then
+            msg = util.last_error("Seek failed")
+            break -- Seek fail is usually fatal or handle invalid
+        end
+        
+        -- 2. Write
+        if kernel32.WriteFile(self.handle, buf, aligned_size, w_bytes, nil) ~= 0 then
+            -- Check for short write (rare on disk but possible)
+            if w_bytes[0] == aligned_size then
+                ok = true
+                break
+            else
+                msg = string.format("Short write: %d/%d", w_bytes[0], aligned_size)
+            end
         else
             msg = util.last_error("WriteFile failed")
         end
-    else
-        msg = util.last_error("Seek failed")
+        
+        -- 3. Recover
+        if i < retries then
+            kernel32.Sleep(100) -- Simple backoff
+            -- Pointer will be reset at start of loop
+        end
     end
     
     kernel32.VirtualFree(buf, 0, 0x8000)
@@ -338,7 +341,6 @@ function PhysicalDrive.list()
 end
 
 local M = {}
--- [API] Open Wrapper with PCall protection for constructor
 function M.open(idx, mode, excl)
     local ok, res = pcall(function() return PhysicalDrive(idx, mode, excl) end)
     if not ok then return nil, res end

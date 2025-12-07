@@ -30,51 +30,95 @@ setmetatable(M, {
     end
 })
 
+-- [Rufus Strategy] Logical Polling: 等待逻辑卷在 Windows 内核中注册
+local function wait_for_partitions(drive_index, timeout)
+    local kernel32 = require 'ffi.req' 'Windows.sdk.kernel32'
+    local volume = require 'win-utils.disk.volume'
+    
+    local start = kernel32.GetTickCount()
+    local limit = timeout or 15000 -- 15s default
+    
+    while true do
+        local vols = volume.list()
+        if vols then
+            for _, v in ipairs(vols) do
+                local hVol = volume.open(v.guid_path)
+                if hVol then
+                    local defs = require 'win-utils.disk.defs'
+                    local util = require 'win-utils.core.util'
+                    local ext = util.ioctl(hVol:get(), defs.IOCTL.GET_VOL_EXTENTS, nil, 0, "VOLUME_DISK_EXTENTS")
+                    hVol:close()
+                    
+                    if ext and ext.NumberOfDiskExtents > 0 and ext.Extents[0].DiskNumber == drive_index then
+                        return true -- Found at least one volume on this disk
+                    end
+                end
+            end
+        end
+        
+        if (kernel32.GetTickCount() - start) > limit then return false end
+        kernel32.Sleep(250)
+    end
+end
+
 function M.prepare_drive(drive_index, scheme, opts)
     local kernel32 = require 'ffi.req' 'Windows.sdk.kernel32'
     local mount = require 'win-utils.disk.mount'
     local physical = require 'win-utils.disk.physical'
     local vds = require 'win-utils.disk.vds'
     local layout = require 'win-utils.disk.layout'
+    local device = require 'win-utils.device'
 
+    -- 1. Aggressive Unmount
     mount.unmount_all_on_disk(drive_index)
     
+    -- 2. Open & Lock (Phase 1)
     local drive, err = physical.open(drive_index, "rw", true)
     if not drive then return false, "Open failed: " .. tostring(err) end
     
-    local locked, lock_err = drive:lock(true)
-    if not locked then 
+    if not drive:lock(true) then 
         drive:close()
-        return false, "Lock failed: " .. tostring(lock_err) 
+        -- 2.1 Cycle Device if lock fails (Zombie check)
+        device.reset(drive_index, 2000)
+        drive, err = physical.open(drive_index, "rw", true)
+        if not drive then return false, "Re-open after reset failed" end
+        if not drive:lock(true) then
+            drive:close(); return false, "Lock failed after reset"
+        end
     end
     
-    local wiped = drive:wipe_layout()
+    -- 3. Wipe Layout (MBR/GPT)
+    drive:wipe_layout()
     drive:close()
-    if not wiped then return false, "Wipe layout failed" end
     
-    -- VDS Clean is robust for refreshing system view
-    local v_ok, v_err = vds.clean(drive_index)
-    if not v_ok then return false, "VDS Clean failed: " .. tostring(v_err) end
-    
+    -- 4. VDS Clean (Force kernel/VDS sync)
+    vds.clean(drive_index)
     kernel32.Sleep(500)
     
-    -- Re-open for layout application
+    -- 5. Re-open for layout application
     drive, err = physical.open(drive_index, "rw", true)
     if not drive then return false, "Re-open failed: " .. tostring(err) end
+    if not drive:lock(true) then drive:close(); return false, "Re-lock failed" end
     
-    locked, lock_err = drive:lock(true)
-    if not locked then 
-        drive:close()
-        return false, "Re-lock failed: " .. tostring(lock_err) 
-    end
-    
+    -- 6. Apply Layout (With automatic pre-wipe of partition offsets inside apply)
     local plan = layout.calculate_partition_plan(drive, scheme, opts)
     local ok, apply_err = layout.apply(drive, scheme, plan)
+    
+    drive:flush()
     drive:close()
     
-    if not ok then return false, "Layout apply failed: " .. tostring(apply_err) end
+    -- 7. Force VDS Refresh & Poll
+    vds.refresh_layout()
     
-    kernel32.Sleep(1000)
+    if not wait_for_partitions(drive_index, 10000) then
+        -- Last ditch VDS reenumerate if polling times out
+        vds.refresh_layout()
+        if not wait_for_partitions(drive_index, 5000) then
+            return false, "Partition polling timed out (Ghost volume?)"
+        end
+    end
+    
+    if not ok then return false, "Layout apply failed: " .. tostring(apply_err) end
     return true, plan
 end
 
@@ -121,9 +165,7 @@ function M.check_health(drive_index, cb, write_test)
 end
 
 function M.rescan()
-    -- VDS Refresh logic is internal or not fully exposed via helpers yet.
-    -- Returning specific error instead of generic false.
-    return false, "Not implemented via VDS helpers"
+    return require('win-utils.disk.vds').refresh_layout()
 end
 
 function M.sync()

@@ -3,12 +3,14 @@ local virtdisk = require 'ffi.req' 'Windows.sdk.virtdisk'
 local kernel32 = require 'ffi.req' 'Windows.sdk.kernel32'
 local util = require 'win-utils.core.util'
 local Handle = require 'win-utils.core.handle'
+local bit = require 'bit'
 
 local M = {}
 local C = virtdisk
 local VENDOR_MS = ffi.new("GUID", {0xEC984AEC, 0xA0F9, 0x47e9, {0x90, 0x1F, 0x71, 0x41, 0x5A, 0x66, 0x34, 0x5B}})
 
-function M.create(path, size_bytes)
+function M.create(path, size_bytes, opts)
+    opts = opts or {}
     local vst = ffi.new("VIRTUAL_STORAGE_TYPE")
     vst.VendorId = VENDOR_MS
     vst.DeviceId = path:lower():match("%.vhdx$") and 3 or 2
@@ -17,8 +19,17 @@ function M.create(path, size_bytes)
     params.Version = 2
     params.Version2.MaximumSize = size_bytes
     
+    -- [Rufus Strategy] 使用 Full Physical Allocation 避免动态扩容导致的 I/O 挂起
+    -- 0x08 = CREATE_VIRTUAL_DISK_FLAG_FULL_PHYSICAL_ALLOCATION
+    local flags = 0
+    if opts.dynamic then
+        flags = 0
+    else
+        flags = 0x08 
+    end
+    
     local h = ffi.new("HANDLE[1]")
-    local res = C.CreateVirtualDisk(vst, util.to_wide(path), 0, nil, 8, 0, params, nil, h)
+    local res = C.CreateVirtualDisk(vst, util.to_wide(path), 0, nil, flags, 0, params, nil, h)
     
     if res ~= 0 then return nil, "CreateVirtualDisk failed: " .. res end
     return Handle(h[0])
@@ -37,7 +48,9 @@ function M.open(path)
 end
 
 function M.attach(h) 
-    local res = C.AttachVirtualDisk(h:get(), nil, 0, 0, nil, nil)
+    -- ATTACH_VIRTUAL_DISK_FLAG_NO_DRIVE_LETTER = 0x00000002 (防止自动分配盘符干扰)
+    local flags = 0x00000002 
+    local res = C.AttachVirtualDisk(h:get(), nil, flags, 0, nil, nil)
     if res ~= 0 then return false, "Attach failed: " .. res end
     return true
 end

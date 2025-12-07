@@ -25,7 +25,7 @@ function VdsContext:init()
             self.service.lpVtbl.WaitForServiceReady(self.service)
         end
     else
-        self.err = string.format("CoCreateInstance failed: 0x%X", hr)
+        self.err = string.format("CoCreateInstance failed: " .. string.format("0x%X", hr))
     end
 end
 
@@ -88,6 +88,25 @@ function VdsContext:get_disk(idx)
     end
     release(enum[0])
     return found
+end
+
+-- [Rufus Strategy] 强制刷新 VDS 缓存和总线枚举
+function M.refresh_layout()
+    local ctx = VdsContext()
+    if not ctx.service then 
+        ctx:close()
+        return false, "Init VDS failed" 
+    end
+    
+    -- CleanupObsoleteMountPoints
+    ctx.service.lpVtbl.CleanupObsoleteMountPoints(ctx.service)
+    -- Refresh (Sync layout)
+    ctx.service.lpVtbl.Refresh(ctx.service)
+    -- Reenumerate (Bus rescan)
+    ctx.service.lpVtbl.Reenumerate(ctx.service)
+    
+    ctx:close()
+    return true
 end
 
 local function vds_op(idx, cb)

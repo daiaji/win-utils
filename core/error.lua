@@ -7,6 +7,7 @@ local err_buf = ffi.new("wchar_t[4096]")
 
 -- [API] 格式化指定的 Win32 错误码
 function M.format(code)
+    code = tonumber(code) or 0
     if code == 0 then return "Success" end
     -- FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS
     local len = kernel32.FormatMessageW(0x1200, nil, code, 0, err_buf, 4096, nil)
@@ -23,7 +24,8 @@ end
 -- [API] 获取并格式化 GetLastError()
 -- @param prefix: 可选，错误信息前缀
 function M.last_error(prefix)
-    local code = kernel32.GetLastError()
+    -- [FIX] Ensure code is a plain Lua number, not cdata
+    local code = tonumber(kernel32.GetLastError())
     local msg = M.format(code)
     
     if prefix then

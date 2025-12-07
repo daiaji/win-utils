@@ -44,7 +44,18 @@ function M.get(d)
     return res
 end
 
+-- [Rufus Strategy] Pre-Wipe: 抹除每个分区的起始位置
+local function clean_ghost_regions(d, parts)
+    local wipe_len = 1024 * 1024 -- 1MB
+    for _, p in ipairs(parts) do
+        d:wipe_region(p.offset, wipe_len)
+    end
+end
+
 function M.apply(d, scheme, parts)
+    -- 1. Pre-Wipe 防止 Ghost Volume
+    clean_ghost_regions(d, parts)
+
     local sz = ffi.sizeof("DRIVE_LAYOUT_INFORMATION_EX_FULL")
     local l = ffi.new("DRIVE_LAYOUT_INFORMATION_EX_FULL")
     local cr = ffi.new("CREATE_DISK")
@@ -91,14 +102,6 @@ function M.apply(d, scheme, parts)
     end
     
     if not set_raw(d, l, sz) then return false, util.last_error("SetLayout failed") end
-    
-    local wipe_buf = kernel32.VirtualAlloc(nil, d.sector_size, 0x1000, 0x04)
-    if wipe_buf then
-        for _, p in ipairs(parts) do
-            d:write_sectors(p.offset, ffi.string(wipe_buf, d.sector_size))
-        end
-        kernel32.VirtualFree(wipe_buf, 0, 0x8000)
-    end
     
     return true
 end
