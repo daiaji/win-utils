@@ -1,7 +1,7 @@
 local lu = require('luaunit')
 local win = require('win-utils')
 local ffi = require('ffi')
-local kernel32 = require('ffi.req' 'Windows.sdk.kernel32'
+local kernel32 = require('ffi.req') 'Windows.sdk.kernel32'
 
 TestDisk = {}
 
