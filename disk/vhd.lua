@@ -21,6 +21,7 @@ function M.create(path, size_bytes, opts)
     
     -- [Rufus Strategy] 使用 Full Physical Allocation 避免动态扩容导致的 I/O 挂起
     -- 0x08 = CREATE_VIRTUAL_DISK_FLAG_FULL_PHYSICAL_ALLOCATION
+    -- 默认为 Full Physical (0x08)，除非显式请求 dynamic
     local flags = 0
     if opts.dynamic then
         flags = 0

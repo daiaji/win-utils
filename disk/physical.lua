@@ -1,13 +1,13 @@
 local ffi = require 'ffi'
 local bit = require 'bit'
 local kernel32 = require 'ffi.req' 'Windows.sdk.kernel32'
+local setupapi = require 'ffi.req' 'Windows.sdk.setupapi'
 local native = require 'win-utils.core.native'
 local util = require 'win-utils.core.util'
 local defs = require 'win-utils.disk.defs'
 local class = require 'win-utils.deps'.class
 local proc_handles = require 'win-utils.process.handles'
 local proc = require 'win-utils.process.init'
-local setupapi = require 'ffi.req' 'Windows.sdk.setupapi'
 local table_new = require "table.new"
 
 local PhysicalDrive = class()
@@ -17,6 +17,8 @@ function PhysicalDrive:init(index, mode, exclusive)
     self.path = type(index) == "number" and ("\\\\.\\PhysicalDrive" .. index) or index
     self.index = type(index) == "number" and index or nil
     
+    -- native.open_device_robust 已返回 nil, err
+    -- 注意：如果是 "exclusive"，robust open 会在内部重试直到没有其他句柄占用
     local h, err = native.open_device_robust(self.path, mode, exclusive)
     if not h then error("PhysicalDrive open failed: " .. tostring(err)) end
     
@@ -39,6 +41,7 @@ function PhysicalDrive:close()
 end
 
 function PhysicalDrive:ioctl(code, in_obj, in_size, out_type, out_size)
+    -- util.ioctl 现在返回 (result, bytes) 或 (nil, msg, code)
     return util.ioctl(self.handle, code, in_obj, in_size, out_type, out_size)
 end
 
@@ -52,6 +55,7 @@ end
 
 -- [Rufus Strategy] 强力锁定：150次重试，配合 Dismount
 function PhysicalDrive:lock(force)
+    -- FSCTL_ALLOW_EXTENDED_DASD_IO
     local ok, err = self:ioctl(defs.IOCTL.DASD)
     if not ok then return false, "DASD IOCTL failed: " .. tostring(err) end
     
@@ -106,6 +110,9 @@ function PhysicalDrive:wipe_region(offset, size)
     if not buf then return false, "VirtualAlloc failed" end
     
     local processed = 0
+    local written = ffi.new("DWORD[1]")
+    local li = ffi.new("LARGE_INTEGER")
+    
     local ok = true
     local err = nil
     
@@ -116,13 +123,16 @@ function PhysicalDrive:wipe_region(offset, size)
             chunk = math.ceil(chunk / self.sector_size) * self.sector_size 
         end
         
-        -- Reuse the robust write logic
-        local w_ok, w_err = self:write(offset + processed, buf, chunk)
-        if not w_ok then
-            ok = false; err = w_err; break
+        li.QuadPart = offset + processed
+        if kernel32.SetFilePointerEx(self.handle, li, nil, 0) == 0 then
+            ok = false; err = util.last_error("Seek failed at " .. li.QuadPart); break
         end
         
-        processed = processed + chunk
+        if kernel32.WriteFile(self.handle, buf, chunk, written, nil) == 0 then
+            ok = false; err = util.last_error("Write failed"); break
+        end
+        
+        processed = processed + written[0]
     end
     
     kernel32.VirtualFree(buf, 0, 0x8000)
@@ -130,7 +140,7 @@ function PhysicalDrive:wipe_region(offset, size)
 end
 
 function PhysicalDrive:wipe_zero(progress_cb)
-    return self:wipe_region(0, self.size) 
+    return self:wipe_region(0, self.size)
 end
 
 function PhysicalDrive:wipe_layout()

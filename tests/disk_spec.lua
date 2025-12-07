@@ -58,8 +58,8 @@ function TestDisk:test_VHD_Integrated_Lifecycle()
 
     -- [Phase 1] 虚拟磁盘创建与识别
     print("  [1/12] Creating & Attaching VHDX (512MB)...")
-    -- 使用新增加的 opts 参数，虽然默认为 dynamic，但显式指定更清晰
-    local h, err = win.disk.vhd.create(self.temp_vhd, 512 * 1024 * 1024, { dynamic = true })
+    -- [FIX] Use Fixed size VHD to match Rufus strategy for stability
+    local h, err = win.disk.vhd.create(self.temp_vhd, 512 * 1024 * 1024, { dynamic = false })
     lu.assertNotNil(h, "VHD Create failed: " .. tostring(err))
     self.vhd_handle = h
 
@@ -87,9 +87,13 @@ function TestDisk:test_VHD_Integrated_Lifecycle()
     lu.assertTrue(found_in_list, "Created VHD not found in win.disk.physical.list()")
 
     -- [Phase 2] 裸机操作 (Raw I/O)
-    local drive = win.disk.physical.open(drive_index, "rw", true)
+    -- [FIX] Use "exclusive" mode to ensure no other handles interfere with locking
+    -- This moves the wait logic to the open phase
+    local drive = win.disk.physical.open(drive_index, "rw", "exclusive")
     lu.assertNotNil(drive, "Open drive failed")
-    lu.assertTrue(drive:lock(true), "Lock failed")
+    
+    local locked, lock_msg = drive:lock(true)
+    lu.assertTrue(locked, "Lock failed: " .. tostring(lock_msg))
 
     -- [Feature Test: Image Ops] 镜像读写测试
     print("  [3/12] Testing Image Write/Read...")
