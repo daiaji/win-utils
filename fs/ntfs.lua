@@ -110,18 +110,20 @@ function M.mklink(link, target, type)
 end
 
 function M.read_link(path)
-    -- [FIX] Must use OPEN_REPARSE_POINT (0x00200000) to read the link itself, not target
-    -- FILE_FLAG_BACKUP_SEMANTICS (0x02000000) is also needed for directories
+    -- OPEN_REPARSE_POINT (0x00200000) | FILE_FLAG_BACKUP_SEMANTICS (0x02000000)
     local flags = 0x02200000 
     local access = 0x80000000 -- GENERIC_READ
     
     local h = native.open_internal(path, access, 1, 3, flags) -- ShareRead, OpenExisting
     if not h then return nil, "Open failed" end
     
-    local buf = util.ioctl(h:get(), 0x900A8, nil, 0, nil, 16384) -- FSCTL_GET_REPARSE_POINT
+    -- [FIX] Allocate explicit buffer for IOCTL output
+    local out_size = 16384
+    local out_buf = ffi.new("uint8_t[?]", out_size)
+    local buf, err = util.ioctl(h:get(), 0x900A8, nil, 0, out_buf, out_size) -- FSCTL_GET_REPARSE_POINT
     h:close()
     
-    if not buf then return nil, util.last_error() end
+    if not buf then return nil, err end
     
     local hdr = ffi.cast("REPARSE_DATA_BUFFER_HEADER*", buf)
     
