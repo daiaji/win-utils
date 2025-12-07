@@ -201,49 +201,53 @@ function M.format(idx, offset, fs, label, quick, cluster, rev)
             goto continue_retry
         end
         
-        local pack = ffi.new("IVdsPack*[1]")
         local found_vol = false
         
-        -- Navigate VDS Hierarchy: Disk -> Pack -> Volumes
-        if disk.lpVtbl.GetPack(disk, pack) == 0 then
-            local enum = ffi.new("IEnumVdsObject*[1]")
-            if pack[0].lpVtbl.QueryVolumes(pack[0], enum) == 0 then
-                local unk = ffi.new("IUnknown*[1]"); local n = ffi.new("ULONG[1]")
-                while not found_vol and enum[0].lpVtbl.Next(enum[0], 1, unk, n) == 0 and n[0] > 0 do
-                    local vol = ffi.new("IVdsVolume*[1]")
-                    if unk[0].lpVtbl.QueryInterface(unk[0], vds_sdk.IID_IVdsVolume, ffi.cast("void**", vol)) == 0 then
-                        local mf3 = ffi.new("IVdsVolumeMF3*[1]")
-                        if vol[0].lpVtbl.QueryInterface(vol[0], vds_sdk.IID_IVdsVolumeMF3, ffi.cast("void**", mf3)) == 0 then
-                            local paths = ffi.new("LPWSTR*[1]"); local np = ffi.new("ULONG[1]")
-                            if mf3[0].lpVtbl.QueryVolumeGuidPathnames(mf3[0], paths, np) == 0 then
-                                for i=0, np[0]-1 do
-                                    if kernel32.lstrcmpiW(paths[0][i], wguid) == 0 then
-                                        found_vol = true
-                                        local async = ffi.new("IVdsAsync*[1]")
-                                        if mf3[0].lpVtbl.FormatEx2(mf3[0], util.to_wide(fs), rev or 0, cluster or 0, util.to_wide(label), quick and 1 or 0, async) == 0 then
-                                            local hr = ffi.new("HRESULT[1]"); local out = ffi.new("VDS_ASYNC_OUTPUT")
-                                            async[0].lpVtbl.Wait(async[0], hr, out)
-                                            release(async[0])
-                                            ret_ok = (hr[0] >= 0)
-                                            ret_msg = ret_ok and "Success" or string.format("0x%X", hr[0])
-                                        else
-                                            ret_msg = "FormatEx2 call failed"
+        -- [FIX] Use do-end block to scope 'pack' local variable to allow goto jumping over it
+        do
+            local pack = ffi.new("IVdsPack*[1]")
+            
+            -- Navigate VDS Hierarchy: Disk -> Pack -> Volumes
+            if disk.lpVtbl.GetPack(disk, pack) == 0 then
+                local enum = ffi.new("IEnumVdsObject*[1]")
+                if pack[0].lpVtbl.QueryVolumes(pack[0], enum) == 0 then
+                    local unk = ffi.new("IUnknown*[1]"); local n = ffi.new("ULONG[1]")
+                    while not found_vol and enum[0].lpVtbl.Next(enum[0], 1, unk, n) == 0 and n[0] > 0 do
+                        local vol = ffi.new("IVdsVolume*[1]")
+                        if unk[0].lpVtbl.QueryInterface(unk[0], vds_sdk.IID_IVdsVolume, ffi.cast("void**", vol)) == 0 then
+                            local mf3 = ffi.new("IVdsVolumeMF3*[1]")
+                            if vol[0].lpVtbl.QueryInterface(vol[0], vds_sdk.IID_IVdsVolumeMF3, ffi.cast("void**", mf3)) == 0 then
+                                local paths = ffi.new("LPWSTR*[1]"); local np = ffi.new("ULONG[1]")
+                                if mf3[0].lpVtbl.QueryVolumeGuidPathnames(mf3[0], paths, np) == 0 then
+                                    for i=0, np[0]-1 do
+                                        if kernel32.lstrcmpiW(paths[0][i], wguid) == 0 then
+                                            found_vol = true
+                                            local async = ffi.new("IVdsAsync*[1]")
+                                            if mf3[0].lpVtbl.FormatEx2(mf3[0], util.to_wide(fs), rev or 0, cluster or 0, util.to_wide(label), quick and 1 or 0, async) == 0 then
+                                                local hr = ffi.new("HRESULT[1]"); local out = ffi.new("VDS_ASYNC_OUTPUT")
+                                                async[0].lpVtbl.Wait(async[0], hr, out)
+                                                release(async[0])
+                                                ret_ok = (hr[0] >= 0)
+                                                ret_msg = ret_ok and "Success" or string.format("0x%X", hr[0])
+                                            else
+                                                ret_msg = "FormatEx2 call failed"
+                                            end
                                         end
+                                        ole32.CoTaskMemFree(paths[0][i])
                                     end
-                                    ole32.CoTaskMemFree(paths[0][i])
+                                    ole32.CoTaskMemFree(paths[0])
                                 end
-                                ole32.CoTaskMemFree(paths[0])
+                                release(mf3[0])
                             end
-                            release(mf3[0])
+                            release(vol[0])
                         end
-                        release(vol[0])
+                        release(unk[0])
                     end
-                    release(unk[0])
+                    release(enum[0])
                 end
-                release(enum[0])
+                release(pack[0])
             end
-            release(pack[0])
-        end
+        end -- End scope of 'pack'
         
         release(disk); ctx:close()
         
