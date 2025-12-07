@@ -108,7 +108,7 @@ function M.temp_mount(idx, off)
     return nil
 end
 
-function M.unmount_all(idx)
+function M.unmount_all_on_disk(idx)
     local vol = require('win-utils.disk.volume')
     local list = vol.list()
     if not list then return end

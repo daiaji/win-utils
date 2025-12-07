@@ -317,7 +317,7 @@ function TestDisk:test_VHD_Integrated_Lifecycle()
 
     -- [Phase 6] 销毁与清理
     print("  [12/12] Cleaning (Unmount & IOCTL Clean)...")
-    win.disk.mount.unmount_all(drive_index)
+    win.disk.mount.unmount_all_on_disk(drive_index)
     self.mount_points = {} 
     
     drive = win.disk.physical.open(drive_index, "rw", true)
