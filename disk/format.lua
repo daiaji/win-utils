@@ -10,6 +10,7 @@ function M.format(idx, off, fs, lab, opts)
     local physical = require 'win-utils.disk.physical'
     local layout = require 'win-utils.disk.layout'
     local ntfs = require 'win-utils.fs.ntfs'
+    local volume = require 'win-utils.disk.volume'
 
     -- 0. 获取分区大小 (用于决策)
     local drive, err = physical.open(idx, "r")
@@ -29,24 +30,24 @@ function M.format(idx, off, fs, lab, opts)
     local fs_lower = fs:lower()
 
     -- Strategy 1: Enhanced FAT32 (Lua implementation)
-    -- 如果是 FAT32 且 分区 > 32GB (Windows 限制)，优先使用 Lua 实现
     if fs_lower == "fat32" and p_size > 32*1024*1024*1024 then
         local ok, f_err = fat32.format_raw(idx, off, lab)
         if ok then return true, "Lua FAT32" end
-        -- 记录错误但继续尝试其他策略
-        -- print("Lua FAT32 failed: " .. tostring(f_err)) 
     end
     
     -- Strategy 2: VDS (Modern System API)
-    -- 最稳健，无需分配盘符，支持所有文件系统
     local ok_vds, msg_vds = vds.format(idx, off, fs, lab, true, 0, 0)
     if ok_vds then return true, "VDS" end
     
     -- Strategy 3: Legacy (Mount + FMIFS)
-    -- 如果 VDS 失败（例如服务不可用），回退到传统的挂载+API格式化
     local letter = mount.temp_mount(idx, off)
     if letter then
         local ok_fmifs, msg_fmifs = fmifs.format(letter, fs, lab)
+        
+        -- [Rufus Strategy] Post-Format Surgery: 强制设置卷标 (以防 FormatEx 漏掉)
+        if ok_fmifs and lab and lab ~= "" then
+            volume.set_label(letter, lab)
+        end
         
         -- NTFS 压缩支持
         if ok_fmifs and opts.compress and fs_lower == "ntfs" then

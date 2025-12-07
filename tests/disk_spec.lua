@@ -44,6 +44,36 @@ function TestDisk:tearDown()
     end
 end
 
+-- 辅助：带重试的卷标验证
+-- Rufus 策略：Windows 卷挂载和元数据刷新是异步的，必须轮询等待
+local function verify_volume_label(target_mount, expected_label, timeout_ms)
+    local start = kernel32.GetTickCount()
+    local limit = timeout_ms or 5000
+    
+    while true do
+        local vols = win.disk.volume.list()
+        if vols then
+            for _, v in ipairs(vols) do
+                for _, mp in ipairs(v.mount_points) do
+                    -- 路径匹配 (注意 API 可能返回长路径格式)
+                    if mp:lower():find(target_mount:lower(), 1, true) then
+                        if v.label == expected_label then
+                            return true, v.label -- Success
+                        end
+                        -- 如果找到了挂载点但 label 不匹配 (可能是 nil 或旧值)，继续等待
+                        if (kernel32.GetTickCount() - start) > limit then
+                            return false, v.label -- Timeout, return actual
+                        end
+                    end
+                end
+            end
+        end
+        
+        if (kernel32.GetTickCount() - start) > limit then return false, "Mount point not found" end
+        kernel32.Sleep(500)
+    end
+end
+
 -- =============================================================================
 -- [Integration Test] VHD 全生命周期与功能集成测试
 -- =============================================================================
@@ -79,16 +109,13 @@ function TestDisk:test_VHD_Integrated_Lifecycle()
     for _, d in ipairs(drives) do
         if d.index == drive_index then
             found_in_list = true
-            -- VHD 大小通常精确，或者按扇区对齐
             lu.assertTrue(d.size >= 510 * 1024 * 1024) 
-            -- print(string.format("         Found in list: %s (%s)", d.model, d.bus))
         end
     end
     lu.assertTrue(found_in_list, "Created VHD not found in win.disk.physical.list()")
 
     -- [Phase 2] 裸机操作 (Raw I/O)
-    -- [FIX] Use "exclusive" mode to ensure no other handles interfere with locking
-    -- This moves the wait logic to the open phase
+    -- [FIX] Use "exclusive" mode
     local drive = win.disk.physical.open(drive_index, "rw", "exclusive")
     lu.assertNotNil(drive, "Open drive failed")
     
@@ -99,18 +126,15 @@ function TestDisk:test_VHD_Integrated_Lifecycle()
     print("  [3/12] Testing Image Write/Read...")
     local f = io.open(self.img_src, "wb")
     local pattern = "WIN_UTILS_TEST_PATTERN"
-    for i=1, 1024 do f:write(string.rep(pattern, 4)) end -- ~90KB data
+    for i=1, 1024 do f:write(string.rep(pattern, 4)) end 
     f:close()
     
-    -- 写入镜像到磁盘开头
     local w_ok, w_err = win.disk.image.write(self.img_src, drive)
     lu.assertTrue(w_ok, "Image write failed: " .. tostring(w_err))
     
-    -- 从磁盘读回镜像
     local r_ok, r_err = win.disk.image.read(drive, self.img_dst)
     lu.assertTrue(r_ok, "Image read failed: " .. tostring(r_err))
     
-    -- 验证内容一致性
     local f1 = io.open(self.img_src, "rb"); local s1 = f1:read(1024)
     local f2 = io.open(self.img_dst, "rb"); local s2 = f2:read(1024)
     f1:close(); f2:close()
@@ -123,34 +147,13 @@ function TestDisk:test_VHD_Integrated_Lifecycle()
 
     -- [Phase 3] 分区管理
     print("  [5/12] Applying GPT Partition Layout...")
-    
-    -- [New Feature Verification] 手动调用 Pre-Wipe 防止干扰 (虽然 apply 内部现在也有)
     drive:wipe_layout() 
     
     local ONE_MB = 1024 * 1024
     local parts = {
-        -- Partition 1: ESP
-        { 
-            name = "EFI System",
-            gpt_type = win.disk.types.GPT.ESP,
-            offset = 1 * ONE_MB,
-            size = 100 * ONE_MB,
-            attr = win.disk.types.GPT.FLAGS.NO_DRIVE_LETTER
-        },
-        -- Partition 2: NTFS Data
-        {
-            name = "Data NTFS",
-            gpt_type = win.disk.types.GPT.DATA,
-            offset = 101 * ONE_MB,
-            size = 200 * ONE_MB
-        },
-        -- Partition 3: FAT32 Data
-        {
-            name = "Data FAT32",
-            gpt_type = win.disk.types.GPT.DATA,
-            offset = 302 * ONE_MB, 
-            size = 100 * ONE_MB
-        }
+        { name = "EFI System", gpt_type = win.disk.types.GPT.ESP, offset = 1 * ONE_MB, size = 100 * ONE_MB, attr = win.disk.types.GPT.FLAGS.NO_DRIVE_LETTER },
+        { name = "Data NTFS", gpt_type = win.disk.types.GPT.DATA, offset = 101 * ONE_MB, size = 200 * ONE_MB },
+        { name = "Data FAT32", gpt_type = win.disk.types.GPT.DATA, offset = 302 * ONE_MB, size = 100 * ONE_MB }
     }
     
     local layout_ok, layout_err = win.disk.layout.apply(drive, "GPT", parts)
@@ -162,24 +165,19 @@ function TestDisk:test_VHD_Integrated_Lifecycle()
     lu.assertNotNil(layout, "Layout get failed")
     lu.assertEquals(layout.style, "GPT")
     lu.assertEquals(#layout.parts, 3)
-    -- 验证分区偏移和大小
     lu.assertEquals(layout.parts[2].off, 101 * ONE_MB)
     lu.assertEquals(layout.parts[3].len, 100 * ONE_MB)
 
-    drive:close() -- 关闭句柄以允许系统刷新卷
-
-    -- [New Feature Verification] 强制 VDS 刷新，确保后续操作能找到卷
+    drive:close() 
     win.disk.vds.refresh_layout()
     kernel32.Sleep(1000)
 
     -- [Phase 4] 卷管理与格式化
     print("  [7/12] Formatting Partitions (NTFS & FAT32)...")
     
-    -- Format NTFS (Partition 2)
     local ok_fmt1, err_fmt1 = win.disk.format.format(drive_index, 101 * ONE_MB, "NTFS", "TEST_NTFS")
     lu.assertTrue(ok_fmt1, "Format NTFS failed: " .. tostring(err_fmt1))
     
-    -- Format FAT32 (Partition 3)
     local ok_fmt2, err_fmt2 = win.disk.format.format(drive_index, 302 * ONE_MB, "FAT32", "TEST_FAT")
     lu.assertTrue(ok_fmt2, "Format FAT32 failed: " .. tostring(err_fmt2))
 
@@ -195,29 +193,18 @@ function TestDisk:test_VHD_Integrated_Lifecycle()
     print(string.format("         Mounted at %s and %s", l1, l2))
 
     -- [Feature Test: Volume List] 验证卷列表
+    -- [FIX] Use polling for volume label check
     print("  [9/12] Verifying Volume List...")
-    local vols = win.disk.volume.list()
-    local found_l1, found_l2 = false, false
-    for _, v in ipairs(vols) do
-        for _, mp in ipairs(v.mount_points) do
-            -- 注意：API 返回的路径通常带反斜杠，比较时需注意
-            if mp:lower():find(l1:lower(), 1, true) then 
-                found_l1 = true 
-                lu.assertEquals(v.label, "TEST_NTFS")
-            end
-            if mp:lower():find(l2:lower(), 1, true) then 
-                found_l2 = true 
-                lu.assertEquals(v.label, "TEST_FAT")
-            end
-        end
-    end
-    lu.assertTrue(found_l1, "NTFS Volume not found in list")
-    lu.assertTrue(found_l2, "FAT32 Volume not found in list")
+    
+    local found_ntfs, label_ntfs = verify_volume_label(l1, "TEST_NTFS")
+    lu.assertTrue(found_ntfs, "NTFS Volume verify failed. Got label: " .. tostring(label_ntfs))
+    
+    local found_fat, label_fat = verify_volume_label(l2, "TEST_FAT")
+    lu.assertTrue(found_fat, "FAT32 Volume verify failed. Got label: " .. tostring(label_fat))
 
     -- [Feature Test: BitLocker] 验证加密状态
     print("  [10/12] Verifying BitLocker Status...")
     local bl_ntfs = win.disk.bitlocker.get_status(l1)
-    -- 新创建的 VHD 肯定没有加密
     lu.assertTrue(bl_ntfs == "None" or bl_ntfs == "Off", "Unexpected BitLocker status: " .. tostring(bl_ntfs))
 
     -- [Phase 5] 文件系统交互
@@ -245,13 +232,11 @@ function TestDisk:test_VHD_Integrated_Lifecycle()
     -- [Phase 6] 销毁与清理
     print("  [12/12] Cleaning (Unmount & VDS Clean)...")
     win.disk.mount.unmount_all_on_disk(drive_index)
-    self.mount_points = {} -- 已手动清理
+    self.mount_points = {} 
     
-    -- VDS Clean 测试
     local clean_ok, clean_err = win.disk.vds.clean(drive_index)
     lu.assertTrue(clean_ok, "VDS Clean failed: " .. tostring(clean_err))
     
-    -- 最终验证：磁盘应该是空的
     drive = win.disk.physical.open(drive_index, "r", true)
     local final_layout = win.disk.layout.get(drive)
     drive:close()
