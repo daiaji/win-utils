@@ -1,7 +1,7 @@
 local lu = require('luaunit')
 local win = require('win-utils')
 local ffi = require('ffi')
-local kernel32 = require('ffi.req') 'Windows.sdk.kernel32'
+local kernel32 = require('ffi.req' 'Windows.sdk.kernel32'
 
 TestDisk = {}
 
@@ -232,15 +232,24 @@ function TestDisk:test_VHD_Integrated_Lifecycle()
     verify_io(l1, "NTFS")
     verify_io(l2, "FAT32")
 
-    -- [Phase 6] 销毁与清理
-    print("  [12/12] Cleaning (Unmount & VDS Clean)...")
+    -- [Phase 6] 销毁与清理 (使用 Robust IOCTL Clean 替代 VDS Clean)
+    print("  [12/12] Cleaning (Unmount & IOCTL Clean)...")
     win.disk.mount.unmount_all(drive_index)
     self.mount_points = {} 
     
-    local clean_ok, clean_err = win.disk.vds.clean(drive_index)
-    lu.assertTrue(clean_ok, "VDS Clean failed: " .. tostring(clean_err))
+    -- [REPLACEMENT] Use IOCTL_DISK_CREATE_DISK (RAW) instead of VDS
+    drive = win.disk.physical.open(drive_index, "rw", true)
+    lu.assertNotNil(drive, "Re-open for clean failed")
     
-    drive = win.disk.physical.open(drive_index, "r", true)
+    local locked = drive:lock(true)
+    lu.assertTrue(locked, "Lock for clean failed")
+    
+    local clean_ok, clean_err = win.disk.layout.clean(drive)
+    lu.assertTrue(clean_ok, "Layout Clean failed: " .. tostring(clean_err))
+    
+    -- Wipe partition table area manually as well (Rufus strategy)
+    drive:wipe_layout()
+    
     local final_layout = win.disk.layout.get(drive)
     drive:close()
     

@@ -52,6 +52,20 @@ local function clean_ghost_regions(d, parts)
     end
 end
 
+-- [NEW] Reset disk layout to RAW (Uninitialized)
+-- This is the robust replacement for VDS Clean
+function M.clean(d)
+    local cr = ffi.new("CREATE_DISK")
+    cr.PartitionStyle = 2 -- PARTITION_STYLE_RAW
+    
+    -- IOCTL_DISK_CREATE_DISK with RAW style clears the kernel's partition table view
+    local ok, err = d:ioctl(defs.IOCTL.CREATE, cr)
+    if not ok then return false, "CreateDisk(RAW) failed: " .. tostring(err) end
+    
+    d:ioctl(defs.IOCTL.UPDATE)
+    return true
+end
+
 function M.apply(d, scheme, parts)
     -- 1. Pre-Wipe 防止 Ghost Volume
     clean_ghost_regions(d, parts)
