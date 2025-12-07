@@ -183,10 +183,12 @@ function M.format(idx, offset, fs, label, quick, cluster, rev)
     local wguid = util.to_wide(guid:sub(-1)=="\\" and guid or guid.."\\")
     local ret_ok = false
     local ret_msg = "Init"
-    local found_vol = false
     
     -- [Rufus Strategy] VDS Sync Retry Loop
     for attempt = 1, 5 do
+        -- [FIX] Declare 'found_vol' before any goto to prevent scope jumping error
+        local found_vol = false
+        
         local ctx = VdsContext()
         if not ctx.service then 
             return false, ctx.err or "VDS Service Init Failed"
