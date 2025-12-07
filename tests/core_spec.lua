@@ -28,6 +28,21 @@ function TestCore:test_Util_Path()
     lu.assertEquals(util.normalize_path("C:/Windows//System32/"), "C:\\Windows\\System32")
 end
 
+-- [Moved from fs_spec]
+function TestCore:test_Path_Conversion_NT()
+    local path_mod = require('win-utils.fs.path')
+    local nt = "\\??\\C:\\Windows"
+    local dos = path_mod.nt_path_to_dos(nt)
+    
+    -- This relies on C: existing, which is safe assumption
+    if dos then
+        lu.assertStrContains(dos, "Windows")
+        lu.assertStrContains(dos, ":")
+    else
+        print("[INFO] Path conversion returned nil (Non-standard drive map?)")
+    end
+end
+
 function TestCore:test_Registry_Full()
     local k, err = win.reg.open_key("HKCU", self.reg_key)
     lu.assertNotNil(k, "Failed to create/open key: " .. tostring(err))

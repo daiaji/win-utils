@@ -25,7 +25,7 @@ print("OS: " .. ffi.os .. " / Arch: " .. ffi.arch)
 
 -- Load Suites
 require 'win-utils.tests.core_spec'
-require 'win-utils.tests.fs_spec'
+-- require 'win-utils.tests.fs_spec' -- [DEPRECATED] Moved to VHD Integration Test
 require 'win-utils.tests.process_spec'
 require 'win-utils.tests.disk_spec'
 require 'win-utils.tests.net_spec'

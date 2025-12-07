@@ -210,27 +210,92 @@ function TestDisk:test_VHD_Integrated_Lifecycle()
     local bl_ntfs = win.disk.bitlocker.get_status(l1)
     lu.assertTrue(bl_ntfs == "None" or bl_ntfs == "Off", "Unexpected BitLocker status: " .. tostring(bl_ntfs))
 
-    -- [Phase 5] 文件系统交互
-    print("  [11/12] Verifying Filesystem I/O...")
+    -- [Phase 5] 文件系统交互与高级特性验证 (Moved from fs_spec for robustness)
+    print("  [11/12] Verifying Filesystem I/O & Advanced Features...")
     
-    local function verify_io(path, name)
+    local function verify_fs_features(path, fs_name)
+        print(string.format("         > Testing on %s (%s)", path, fs_name))
+        
+        -- 1. Basic I/O
         local p = path .. "test_io.txt"
         local f = io.open(p, "w")
-        lu.assertNotNil(f, name.." write open failed")
-        f:write("hello " .. name)
+        lu.assertNotNil(f, fs_name.." write open failed")
+        f:write("hello " .. fs_name)
         f:close()
         
         local info = win.fs.stat(p)
-        lu.assertNotNil(info, name.." stat failed")
+        lu.assertNotNil(info, fs_name.." stat failed")
+        -- "hello " + "NTFS"(4) = 10, "hello " + "FAT32"(5) = 11
+        lu.assertTrue(info.size > 0, "File size 0")
         
         local f2 = io.open(p, "r")
         local d = f2:read("*a")
         f2:close()
-        lu.assertEquals(d, "hello " .. name)
+        lu.assertEquals(d, "hello " .. fs_name)
+        
+        -- 2. Directory & Recursion
+        local subdir = path .. "sub_a\\sub_b"
+        lu.assertTrue(win.fs.mkdir(subdir, {p=true}), "Mkdir -p failed")
+        lu.assertTrue(win.fs.is_dir(subdir), "Is_dir failed")
+        
+        -- 3. Copy & Move
+        local src = p
+        local dst = subdir .. "\\moved.txt"
+        lu.assertTrue(win.fs.move(src, dst), "Move failed")
+        lu.assertFalse(win.fs.exists(src), "Source not gone")
+        lu.assertTrue(win.fs.exists(dst), "Dest not found")
+        
+        local cp_dst = path .. "copied.txt"
+        lu.assertTrue(win.fs.copy(dst, cp_dst), "Copy failed")
+        
+        -- 4. Timestamps
+        lu.assertTrue(win.fs.update_timestamps(cp_dst), "Touch failed")
+        
+        -- 5. Stats & Usage (Added for coverage completion)
+        local usage = win.fs.get_usage_info(path)
+        lu.assertIsTable(usage, "GetUsageInfo failed")
+        lu.assertTrue(usage.files > 0, "Usage files count 0")
+        
+        local space = win.fs.get_space_info(path)
+        lu.assertIsTable(space, "GetSpaceInfo failed")
+        lu.assertTrue(space.total_bytes > 0, "Total space 0")
+        lu.assertTrue(space.free_bytes > 0, "Free space 0")
+        
+        -- 6. NTFS Specifics (Links)
+        if fs_name == "NTFS" then
+            -- Hard Link
+            local hl = path .. "hardlink.txt"
+            local ok_hl, err_hl = win.fs.link(cp_dst, hl)
+            lu.assertTrue(ok_hl, "HardLink failed: " .. tostring(err_hl))
+            
+            local f_hl = io.open(hl, "r"); 
+            if f_hl then
+                local content = f_hl:read("*a"); f_hl:close()
+                lu.assertEquals(content, "hello " .. fs_name)
+            else
+                lu.fail("Could not read hardlink")
+            end
+            
+            -- Junction
+            local junc = path .. "JunctionPoint"
+            local ok_j, err_j = require('win-utils.fs.ntfs').mklink(junc, subdir, "junction")
+            lu.assertTrue(ok_j, "Junction failed: " .. tostring(err_j))
+            lu.assertTrue(win.fs.is_dir(junc))
+            
+            -- Symlink (File)
+            local sym = path .. "sym.txt"
+            local ok_s, err_s = win.fs.link(cp_dst, sym, {symbolic=true})
+            lu.assertTrue(ok_s, "Symlink failed: " .. tostring(err_s))
+            lu.assertTrue(win.fs.is_link(sym))
+        end
+        
+        -- 7. Wipe
+        lu.assertTrue(win.fs.wipe(cp_dst, {passes=1}), "Wipe failed")
+        lu.assertFalse(win.fs.exists(cp_dst))
     end
     
-    verify_io(l1, "NTFS")
-    verify_io(l2, "FAT32")
+    verify_fs_features(l1, "NTFS")
+    verify_fs_features(l2, "FAT32")
 
     -- [Phase 6] 销毁与清理 (使用 Robust IOCTL Clean 替代 VDS Clean)
     print("  [12/12] Cleaning (Unmount & IOCTL Clean)...")
