@@ -1,40 +1,10 @@
 local ffi = require 'ffi'
 local bit = require 'bit'
 local kernel32 = require 'ffi.req' 'Windows.sdk.kernel32'
+local winioctl = require 'ffi.req' 'Windows.sdk.winioctl'
 local util = require 'win-utils.core.util'
 local native = require 'win-utils.core.native'
 local Handle = require 'win-utils.core.handle'
-
-ffi.cdef[[
-    typedef struct _REPARSE_DATA_BUFFER_HEADER {
-        ULONG  ReparseTag;
-        USHORT ReparseDataLength;
-        USHORT Reserved;
-    } REPARSE_DATA_BUFFER_HEADER;
-
-    typedef struct _SYMBOLIC_LINK_REPARSE_BUFFER {
-        ULONG  ReparseTag;
-        USHORT ReparseDataLength;
-        USHORT Reserved;
-        USHORT SubstituteNameOffset;
-        USHORT SubstituteNameLength;
-        USHORT PrintNameOffset;
-        USHORT PrintNameLength;
-        ULONG  Flags;
-        WCHAR  PathBuffer[1];
-    } SYMBOLIC_LINK_REPARSE_BUFFER;
-
-    typedef struct _MOUNT_POINT_REPARSE_BUFFER {
-        ULONG  ReparseTag;
-        USHORT ReparseDataLength;
-        USHORT Reserved;
-        USHORT SubstituteNameOffset;
-        USHORT SubstituteNameLength;
-        USHORT PrintNameOffset;
-        USHORT PrintNameLength;
-        WCHAR  PathBuffer[1];
-    } MOUNT_POINT_REPARSE_BUFFER;
-]]
 
 local M = {}
 

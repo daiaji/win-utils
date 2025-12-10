@@ -8,15 +8,6 @@ local C = require 'win-utils.core.ffi_defs'
 local table_new = require 'table.new'
 local table_ext = require 'ext.table'
 
--- [RESTORED] Shrink IOCTL Structure
-ffi.cdef[[
-    typedef struct _SHRINK_VOLUME_INFORMATION {
-        int ShrinkRequestType; // 1=Prepare, 2=Commit, 3=Abort
-        long long Flags;
-        long long NewSize;
-    } SHRINK_VOLUME_INFORMATION;
-]]
-
 local M = {}
 
 local DRIVE_TYPES = {

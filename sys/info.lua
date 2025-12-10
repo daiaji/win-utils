@@ -23,4 +23,21 @@ function M.is_winpe()
     return false
 end
 
+-- [API] 获取系统内存状态
+-- @return: table { total_mb, avail_mb, load_percent }
+function M.get_memory_info()
+    local ms = ffi.new("MEMORYSTATUSEX")
+    ms.dwLength = ffi.sizeof(ms)
+    
+    if kernel32.GlobalMemoryStatusEx(ms) == 0 then 
+        return nil, util.last_error("GlobalMemoryStatusEx failed")
+    end
+    
+    return {
+        total_mb = tonumber(ms.ullTotalPhys / 1048576),
+        avail_mb = tonumber(ms.ullAvailPhys / 1048576),
+        load = tonumber(ms.dwMemoryLoad)
+    }
+end
+
 return M

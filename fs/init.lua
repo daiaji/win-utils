@@ -119,7 +119,7 @@ local function scandir_bulk(path_or_handle)
     end
 end
 
--- [RESTORED] Get File Version String (e.g., "1.0.0.0")
+-- [Legacy] Get File Version String (e.g., "1.0.0.0")
 function M.get_version(path)
     local wpath = util.to_wide(path)
     local dummy = ffi.new("DWORD[1]")
@@ -138,6 +138,70 @@ function M.get_version(path)
     return string.format("%d.%d.%d.%d",
         bit.rshift(vi.dwFileVersionMS, 16), bit.band(vi.dwFileVersionMS, 0xFFFF),
         bit.rshift(vi.dwFileVersionLS, 16), bit.band(vi.dwFileVersionLS, 0xFFFF))
+end
+
+-- [Internal] 获取语言和代码页 ID
+local function get_translation_id(ver_data)
+    local trans_ptr = ffi.new("struct { uint16_t lang; uint16_t cp; } *[1]")
+    local len = ffi.new("UINT[1]")
+    
+    -- 查询翻译表
+    if version.VerQueryValueW(ver_data, util.to_wide("\\VarFileInfo\\Translation"), ffi.cast("void**", trans_ptr), len) == 0 then
+        -- 默认英语 (US)
+        return "040904b0" 
+    end
+    
+    -- 格式化为 8位十六进制字符串，例如 040904B0 (LangID + CodePage)
+    return string.format("%04x%04x", trans_ptr[0].lang, trans_ptr[0].cp)
+end
+
+-- [API] 获取文件详细版本信息 (高级版)
+-- 对标 PECMD FVER 命令
+-- @return: table { file_ver, product_ver, company, description, product_name, copyright, original_name }
+function M.get_version_info(path)
+    local wpath = util.to_wide(path)
+    local dummy = ffi.new("DWORD[1]")
+    local size = version.GetFileVersionInfoSizeW(wpath, dummy)
+    if size == 0 then return nil end
+
+    local buf = ffi.new("uint8_t[?]", size)
+    if version.GetFileVersionInfoW(wpath, 0, size, buf) == 0 then return nil end
+
+    -- 1. 获取固定文件版本 (数字)
+    local res = {}
+    local fi = ffi.new("VS_FIXEDFILEINFO*[1]")
+    local len = ffi.new("UINT[1]")
+    
+    if version.VerQueryValueW(buf, util.to_wide("\\"), ffi.cast("void**", fi), len) ~= 0 then
+        local v = fi[0]
+        res.file_ver = string.format("%d.%d.%d.%d", 
+            bit.rshift(v.dwFileVersionMS, 16), bit.band(v.dwFileVersionMS, 0xFFFF),
+            bit.rshift(v.dwFileVersionLS, 16), bit.band(v.dwFileVersionLS, 0xFFFF))
+        res.product_ver = string.format("%d.%d.%d.%d", 
+            bit.rshift(v.dwProductVersionMS, 16), bit.band(v.dwProductVersionMS, 0xFFFF),
+            bit.rshift(v.dwProductVersionLS, 16), bit.band(v.dwProductVersionLS, 0xFFFF))
+    end
+
+    -- 2. 获取字符串信息
+    local trans_id = get_translation_id(buf)
+    local keys = {
+        company      = "CompanyName",
+        description  = "FileDescription",
+        product_name = "ProductName",
+        copyright    = "LegalCopyright",
+        original_name= "OriginalFilename"
+    }
+    
+    local val_ptr = ffi.new("wchar_t*[1]")
+    for k, v in pairs(keys) do
+        -- 构造查询路径: \StringFileInfo\LangIDCodePage\KeyName
+        local query = string.format("\\StringFileInfo\\%s\\%s", trans_id, v)
+        if version.VerQueryValueW(buf, util.to_wide(query), ffi.cast("void**", val_ptr), len) ~= 0 then
+            res[k] = util.from_wide(val_ptr[0])
+        end
+    end
+
+    return res
 end
 
 function M.mkdir(path, opts)

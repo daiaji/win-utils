@@ -13,9 +13,11 @@ local sub_modules = {
     io       = 'win-utils.sys.io',
     path     = 'win-utils.sys.path',
     env      = 'win-utils.sys.env',
-    
-    -- [RESTORED]
-    pagefile = 'win-utils.sys.pagefile'
+    pagefile = 'win-utils.sys.pagefile',
+    dism     = 'win-utils.sys.dism',
+    inf      = 'win-utils.sys.inf',
+    dev_info = 'win-utils.sys.dev_info',
+    font     = 'win-utils.sys.font'
 }
 
 setmetatable(M, {

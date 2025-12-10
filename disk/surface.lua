@@ -1,10 +1,7 @@
 local ffi = require 'ffi'
 local kernel32 = require 'ffi.req' 'Windows.sdk.kernel32'
 local util = require 'win-utils.core.util'
-
-ffi.cdef [[
-    int memcmp(const void *ptr1, const void *ptr2, size_t num);
-]]
+local c_string = require 'ffi.req' 'c.string'
 
 local M = {}
 
@@ -78,7 +75,7 @@ function M.scan(drive, cb, mode, patterns, opts)
                         block_fail = true
                         if stop_on_error then success = false; msg = util.last_error("Read back error at " .. pos); break end
                     else
-                        if ffi.C.memcmp(buf, buf_v, chunk) ~= 0 then
+                        if c_string.memcmp(buf, buf_v, chunk) ~= 0 then
                             stats.corrupt_errors = stats.corrupt_errors + 1
                             stats.bad_blocks = stats.bad_blocks + 1
                             block_fail = true

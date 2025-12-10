@@ -5,7 +5,7 @@ local bit = require 'bit'
 local util = require 'win-utils.core.util'
 local M = {}
 
--- [RESTORED] 设置分辨率
+-- [API] 设置分辨率
 -- @param w: 宽度
 -- @param h: 高度
 -- @param hz: 刷新率 (可选)
@@ -42,11 +42,33 @@ function M.set_topology(mode)
     if mode=="clone" then f=bit.bor(f,2) -- SDC_TOPOLOGY_CLONE
     elseif mode=="extend" then f=bit.bor(f,4) -- SDC_TOPOLOGY_EXTEND
     elseif mode=="external" then f=bit.bor(f,8) -- SDC_TOPOLOGY_EXTERNAL
-    else f=bit.bor(f,1) end -- SDC_TOPOLOGY_INTERNAL
+    else f=bit.bor(f,1) -- SDC_TOPOLOGY_INTERNAL
+    end 
     
     local res = ccd.SetDisplayConfig(0, nil, 0, nil, f)
     if res ~= 0 then return false, "SetDisplayConfig failed code: " .. res end
     return true
+end
+
+-- [API] 获取支持的显示模式列表
+-- @return: table list of { w, h, hz, bpp }
+function M.get_modes()
+    local modes = {}
+    local i = 0
+    local dm = ffi.new("DEVMODEW")
+    dm.dmSize = ffi.sizeof(dm)
+    
+    -- 枚举主显示器 (DeviceName=nil)
+    while user32.EnumDisplaySettingsW(nil, i, dm) ~= 0 do
+        table.insert(modes, {
+            w = tonumber(dm.dmPelsWidth),
+            h = tonumber(dm.dmPelsHeight),
+            hz = tonumber(dm.dmDisplayFrequency),
+            bpp = tonumber(dm.dmBitsPerPel)
+        })
+        i = i + 1
+    end
+    return modes
 end
 
 return M

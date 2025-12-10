@@ -1,6 +1,7 @@
 local lu = require('luaunit')
 local win = require('win-utils')
 local util = require('win-utils.core.util')
+local ffi = require('ffi')
 
 TestSys = {}
 
@@ -116,11 +117,14 @@ function TestSys:test_Shell_Browse_Exists()
     end
 end
 
-function TestSys:test_Service_List_And_Query()
+-- [Enhanced] 服务高级测试 (List, Query, Config, Lifecycle)
+function TestSys:test_Service_Advanced()
+    -- 1. List
     local list, err = win.sys.service.list()
     lu.assertNotNil(list, "Service list failed: " .. tostring(err))
     lu.assertTrue(#list > 0)
     
+    -- 2. Query Details (Updated for expanded fields)
     local _, found = list:findiIf(function(s) 
         local n = s.name:lower()
         return n == "lanmanserver" or n == "eventlog" or n == "schedule"
@@ -131,15 +135,47 @@ function TestSys:test_Service_List_And_Query()
         local detail, q_err = win.sys.service.query(found.name)
         lu.assertNotNil(detail, "Service query failed: " .. tostring(q_err))
         lu.assertIsNumber(detail.status)
+        -- Verify new fields from PECMD alignment
+        lu.assertIsNumber(detail.type)
+        lu.assertIsNumber(detail.flags)
+        lu.assertIsNumber(detail.checkpoint)
+        lu.assertIsNumber(detail.wait_hint)
+        
         local deps = win.sys.service.get_dependents(found.name)
         lu.assertIsTable(deps)
     end
-end
-
-function TestSys:test_Service_Config()
-    local ok, err = win.sys.service.set_config("NonExistentService_12345", 3)
-    lu.assertFalse(ok)
-    lu.assertNotNil(err) -- Should return error message now
+    
+    -- 3. Configuration & Lifecycle (Requires Admin)
+    if win.process.token.is_elevated() then
+        local svc_name = "LuaWinUtilsTestSvc_" .. os.time()
+        -- 使用 svchost 作为虚假服务宿主
+        local bin = "C:\\Windows\\System32\\svchost.exe -k LocalService"
+        
+        -- Test: Create with Group & Tag
+        local ok_c, tag = win.sys.service.create(svc_name, bin, {
+            display_name = "Lua Win Utils Test Service",
+            start = 4, -- Disabled
+            group = "UIGroup",
+            get_tag = true
+        })
+        lu.assertTrue(ok_c, "Create service failed")
+        -- tag 可能是 nil 或数字，取决于系统，这里只打印
+        if tag then print("  [INFO] Service Tag: " .. tag) end
+        
+        -- Test: Delayed Auto Start
+        local ok_cfg, err_cfg = win.sys.service.set_start_mode(svc_name, "delayed-auto")
+        lu.assertTrue(ok_cfg, "Set delayed-auto failed: " .. tostring(err_cfg))
+        
+        -- Test: Delete
+        local ok_d, err_d = win.sys.service.delete(svc_name)
+        lu.assertTrue(ok_d, "Delete service failed: " .. tostring(err_d))
+    else
+        print("  [SKIP] Admin required for Service Create/Config/Delete tests")
+        
+        -- Non-admin config test (should fail)
+        local ok, err = win.sys.service.set_start_mode("NonExistentService_12345", "auto")
+        lu.assertFalse(ok)
+    end
 end
 
 function TestSys:test_Driver_API()
@@ -157,7 +193,7 @@ function TestSys:test_Power()
         print("  [FATAL] boot_to_firmware caused a Lua panic: " .. tostring(err))
         lu.fail("API Crash Detected")
     end
-    -- It likely returns false in test env, but shouldn't crash
+    -- It likely returns false in test env due to privileges/environment, but shouldn't crash
     if not ok then print("  [INFO] boot_to_firmware result: " .. tostring(err)) end
 end
 
