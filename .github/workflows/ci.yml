@@ -16,97 +16,69 @@ env:
   LUAJIT_BIN_DIR: ${{ github.workspace }}\luajit_build
 
 jobs:
-  # ===========================================================================
-  # Job 1: Build Keeper
-  # ===========================================================================
-  build-luajit:
-    name: Ensure LuaJIT Cache
+  test:
+    name: Build & Test
     runs-on: windows-latest
-    steps:
-      - name: Check Cache
-        id: cache-luajit
-        uses: actions/cache@v3
-        with:
-          path: ${{ env.LUAJIT_BIN_DIR }}
-          key: ${{ env.LUAJIT_CACHE_KEY }}
-          lookup-only: true
 
-      - name: Checkout (Only on Miss)
-        if: steps.cache-luajit.outputs.cache-hit != 'true'
+    steps:
+      - name: Checkout
         uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      - name: Setup MSVC (Only on Miss)
-        if: steps.cache-luajit.outputs.cache-hit != 'true'
+      - name: Setup MSVC
         uses: ilammy/msvc-dev-cmd@v1
 
-      - name: Build LuaJIT (Only on Miss)
+      - name: Cache LuaJIT
+        id: cache-luajit
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.LUAJIT_BIN_DIR }}
+          key: ${{ env.LUAJIT_CACHE_KEY }}
+
+      - name: Build LuaJIT (cache miss only)
         if: steps.cache-luajit.outputs.cache-hit != 'true'
         shell: cmd
         run: |
           echo "::notice ::Cache miss! Compiling LuaJIT (5.2 Compat)..."
-          cd vendor/luajit/src
+          cd vendor\luajit\src
           call msvcbuild.bat lua52compat
           if %errorlevel% neq 0 exit /b %errorlevel%
-          
+
           if not exist "%LUAJIT_BIN_DIR%\bin" mkdir "%LUAJIT_BIN_DIR%\bin"
           copy luajit.exe "%LUAJIT_BIN_DIR%\bin\"
           copy lua51.dll "%LUAJIT_BIN_DIR%\bin\"
-          
+
           if not exist "%LUAJIT_BIN_DIR%\jit" mkdir "%LUAJIT_BIN_DIR%\jit"
           copy jit\*.lua "%LUAJIT_BIN_DIR%\jit\"
-
-  # ===========================================================================
-  # Job 2: Test Suite
-  # ===========================================================================
-  test-suite:
-    name: Run Tests
-    needs: build-luajit
-    runs-on: windows-latest
-    
-    steps:
-      - name: Checkout Source Code
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
-      - name: Restore LuaJIT from Cache
-        uses: actions/cache/restore@v3
-        with:
-          path: ${{ env.LUAJIT_BIN_DIR }}
-          key: ${{ env.LUAJIT_CACHE_KEY }}
-          fail-on-cache-miss: true
 
       - name: Assemble Test Environment
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          
+
           $stage = New-Item -ItemType Directory -Path "stage" -Force
           $bin   = New-Item -ItemType Directory -Path "stage/bin" -Force
           $lua   = New-Item -ItemType Directory -Path "stage/lua" -Force
-          
+
           # 1. Binaries
           Copy-Item "${{ env.LUAJIT_BIN_DIR }}\bin\*" $bin
           Copy-Item "${{ env.LUAJIT_BIN_DIR }}\jit" "$lua/jit" -Recurse
-          
+
           # 2. Dependencies
-          # lua-ext -> stage/lua/ext/
           if (Test-Path "vendor/lua-ext") {
               $extDest = New-Item -ItemType Directory -Path "$lua/ext" -Force
               Copy-Item "vendor/lua-ext/*.lua" $extDest
           }
-          
-          # lua-ffi-bindings -> stage/lua/ffi/
+
           if (Test-Path "vendor/lua-ffi-bindings") {
               $ffiDest = New-Item -ItemType Directory -Path "$lua/ffi" -Force
               Copy-Item "vendor/lua-ffi-bindings/*" $ffiDest -Recurse -Exclude ".git"
           }
-          
+
           # 3. Package (Win-Utils)
           $pkgDest = New-Item -ItemType Directory -Path "$lua/win-utils" -Force
-          
+
           if (Test-Path "win-utils\init.lua") {
               Write-Host "Detected nested structure."
               Copy-Item "win-utils\*" $pkgDest -Recurse
@@ -116,20 +88,21 @@ jobs:
           } else {
               Write-Error "Cannot locate init.lua"
           }
-          
-          # 4. LuaUnit
-          Invoke-WebRequest "https://raw.githubusercontent.com/bluebird75/luaunit/master/luaunit.lua" -OutFile "$lua/luaunit.lua"
-          
+
+          # 4. LuaUnit (download with fallback)
+          $luaunitUrl = "https://raw.githubusercontent.com/bluebird75/luaunit/master/luaunit.lua"
+          try {
+              Invoke-WebRequest $luaunitUrl -OutFile "$lua/luaunit.lua"
+          } catch {
+              Write-Host "::warning::LuaUnit download failed, tests requiring luaunit will be skipped"
+          }
+
           echo "STAGE_PATH=$($stage.FullName)" >> $env:GITHUB_ENV
 
       - name: Run Tests
         shell: cmd
         env:
-          # LUA_PATH 指向 Stage 目录，确保所有 require 都能找到
           LUA_PATH: ${{ env.STAGE_PATH }}\lua\?.lua;${{ env.STAGE_PATH }}\lua\?\init.lua;;
         run: |
           echo Running tests...
-          
-          REM [Fix] 直接使用 Stage 目录下的绝对路径运行测试脚本
-          REM 这样无论源码是扁平还是嵌套结构，脚本位置在 Stage 中是固定的
           "${{ env.STAGE_PATH }}\bin\luajit.exe" "${{ env.STAGE_PATH }}\lua\win-utils\tests\run_tests.lua" -v
