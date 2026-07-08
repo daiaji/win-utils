@@ -27,6 +27,7 @@ local function check_drive(d, opts)
     if not opts then return true end
     local safety = require 'win-utils.disk.safety'
     local drive_idx = opts.drive_index or d.index
+    if type(d) == "table" and d.handle then opts.skip_open_check = true end
     local safe, safe_err = safety.check_destructive_target(drive_idx, opts)
     if opts.dry_run == true then return nil, safe end
     if not safe then return false, safe_err end

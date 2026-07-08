@@ -30,6 +30,7 @@ function M.write(img_path, drive, cb, opts)
 
     local safety = require 'win-utils.disk.safety'
     local drive_index = opts.drive_index or (type(drive) == "table" and drive.index)
+    if type(drive) == "table" and drive.handle then opts.skip_open_check = true end
     local safe, safe_err = safety.check_destructive_target(drive_index, opts)
     if opts.dry_run == true then return true, safe end
     if not safe then return false, safe_err end

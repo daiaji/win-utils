@@ -121,11 +121,11 @@ function M.check_destructive_target(drive_idx, opts)
         add_block(blockers, "confirm_required", "destructive disk operation requires confirm = true")
     end
 
-    if valid_target then
+    if valid_target and not opts.skip_open_check then
         local physical = require 'win-utils.disk.physical'
-        local drive, open_err = physical.open(drive_idx, "r", false)
-        if not drive then
-            add_block(blockers, "open_failed", "failed to open target disk: " .. tostring(open_err))
+        local ok_open, drive = pcall(physical.open, drive_idx, "r", false)
+        if not ok_open or not drive then
+            add_block(blockers, "open_failed", "failed to open target disk: " .. tostring(drive))
         else
             if drive.media_type == 12 and opts.allow_fixed ~= true then
                 add_block(blockers, "fixed_disk", "target disk is fixed media; pass allow_fixed = true to override")

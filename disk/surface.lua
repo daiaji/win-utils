@@ -23,6 +23,7 @@ function M.scan(drive, cb, mode, patterns, opts)
     if is_write and opts then
         local safety = require 'win-utils.disk.safety'
         local drive_index = opts.drive_index or drive.index
+        if type(drive) == "table" and drive.handle then opts.skip_open_check = true end
         local safe, safe_err = safety.check_destructive_target(drive_index, opts)
         if opts.dry_run == true then return true, safe, { dry_run = true } end
         if not safe then return false, safe_err, { bad_blocks = 0, read_errors = 0, write_errors = 0, corrupt_errors = 0 } end
