@@ -9,9 +9,10 @@ require 'ffi.req' 'Windows.sdk.winioctl'
 
 local M = {}
 
-local GPT_ATTR_READONLY = ffi.new("uint64_t", "0x1000000000000000")
-local GPT_ATTR_HIDDEN = ffi.new("uint64_t", "0x4000000000000000")
-local GPT_ATTR_NODRIVE = ffi.new("uint64_t", "0x8000000000000000")
+-- 64-bit GPT attribute constants (use ULL literals for full precision)
+local GPT_ATTR_READONLY = 0x1000000000000000ULL
+local GPT_ATTR_HIDDEN = 0x4000000000000000ULL
+local GPT_ATTR_NODRIVE = 0x8000000000000000ULL
 
 local function set_flag_64(val64, flag64, enable)
     local has_flag = (val64 % (flag64 * 2)) >= flag64
