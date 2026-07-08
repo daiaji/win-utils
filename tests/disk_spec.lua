@@ -70,6 +70,15 @@ local function verify_volume_label(target_mount, expected_label, timeout_ms)
     end
 end
 
+function TestDisk:test_Type_Constants()
+    lu.assertEquals(win.disk.types.MBR.NTFS, 0x07)
+    lu.assertEquals(win.disk.types.GPT.ESP, "{C12A7328-F81F-11D2-BA4B-00A0C93EC93B}")
+    lu.assertEquals(win.disk.types.MEDIA_TYPE.FixedMedia, 12)
+    lu.assertEquals(win.disk.types.media_type_name(11), "RemovableMedia")
+    lu.assertEquals(win.disk.types.BUS_TYPE.Usb, 7)
+    lu.assertEquals(win.disk.types.bus_type_name(17), "Nvme")
+end
+
 -- =============================================================================
 -- [Integration Test] VHD 全生命周期与功能集成测试
 -- =============================================================================
@@ -124,7 +133,10 @@ function TestDisk:test_VHD_Integrated_Lifecycle()
     for i=1, 1024 do f:write(string.rep(pattern, 4)) end 
     f:close()
     
-    local w_ok, w_err = win.disk.image.write(self.img_src, drive)
+    local w_ok, w_err = win.disk.image.write(self.img_src, drive, {
+        confirm = true,
+        allow_fixed = true,
+    })
     lu.assertTrue(w_ok, "Image write failed: " .. tostring(w_err))
     
     local r_ok, r_err = win.disk.image.read(drive, self.img_dst)
@@ -137,7 +149,10 @@ function TestDisk:test_VHD_Integrated_Lifecycle()
 
     -- [Feature Test: Surface Scan]
     print("  [4/12] Running Surface Scan (Write Mode)...")
-    local scan_ok, scan_msg = win.disk.surface.scan(drive, function(p) return true end, "write", { 0x55, 0xAA })
+    local scan_ok, scan_msg = win.disk.surface.scan(drive, function(p) return true end, "write", { 0x55, 0xAA }, {
+        confirm = true,
+        allow_fixed = true,
+    })
     lu.assertTrue(scan_ok, "Surface scan failed: " .. tostring(scan_msg))
 
     -- [Phase 3] 分区管理
@@ -151,7 +166,10 @@ function TestDisk:test_VHD_Integrated_Lifecycle()
         { name = "Data FAT32", gpt_type = win.disk.types.GPT.DATA, offset = 302 * ONE_MB, size = 100 * ONE_MB }
     }
     
-    local layout_ok, layout_err = win.disk.layout.apply(drive, "GPT", parts)
+    local layout_ok, layout_err = win.disk.layout.apply(drive, "GPT", parts, {
+        confirm = true,
+        allow_fixed = true,
+    })
     lu.assertTrue(layout_ok, "Layout apply failed: " .. tostring(layout_err))
 
     -- [Feature Test: Layout IOCTL]
@@ -172,10 +190,16 @@ function TestDisk:test_VHD_Integrated_Lifecycle()
     -- [Phase 4] 卷管理与格式化
     print("  [7/12] Formatting Partitions (NTFS & FAT32)...")
     
-    local ok_fmt1, err_fmt1 = win.disk.format.format(drive_index, 101 * ONE_MB, "NTFS", "TEST_NTFS")
+    local ok_fmt1, err_fmt1 = win.disk.format.format(drive_index, 101 * ONE_MB, "NTFS", "TEST_NTFS", {
+        confirm = true,
+        allow_fixed = true,
+    })
     lu.assertTrue(ok_fmt1, "Format NTFS failed: " .. tostring(err_fmt1))
     
-    local ok_fmt2, err_fmt2 = win.disk.format.format(drive_index, 302 * ONE_MB, "FAT32", "TEST_FAT")
+    local ok_fmt2, err_fmt2 = win.disk.format.format(drive_index, 302 * ONE_MB, "FAT32", "TEST_FAT", {
+        confirm = true,
+        allow_fixed = true,
+    })
     lu.assertTrue(ok_fmt2, "Format FAT32 failed: " .. tostring(err_fmt2))
 
     print("  [8/12] Mounting Volumes...")
@@ -326,7 +350,10 @@ function TestDisk:test_VHD_Integrated_Lifecycle()
     local locked = drive:lock(true)
     lu.assertTrue(locked, "Lock for clean failed")
     
-    local clean_ok, clean_err = win.disk.layout.clean(drive)
+    local clean_ok, clean_err = win.disk.layout.clean(drive, {
+        confirm = true,
+        allow_fixed = true,
+    })
     lu.assertTrue(clean_ok, "Layout Clean failed: " .. tostring(clean_err))
     
     drive:wipe_layout()

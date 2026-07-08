@@ -12,7 +12,11 @@ function TestNet:test_Adapter()
         lu.assertIsString(a.name)
         lu.assertIsTable(a.ips)
         lu.assertIsTable(a.gateways)
-        
+        lu.assertIsTable(a.dns)
+        lu.assertIsNumber(a.if_index)
+        lu.assertIsNumber(a.mtu)
+        lu.assertIsString(a.type)
+
         if #a.ips > 0 then
             print(string.format("  [INFO] Adapter: %s | IP: %s", a.name, a.ips[1]))
         end
@@ -55,4 +59,24 @@ end
 function TestNet:test_DNS()
     local ok, err = win.net.dns.flush()
     lu.assertTrue(ok, "Flush DNS failed: " .. tostring(err))
+end
+
+function TestNet:test_Network_Config_DryRun()
+    local ip_plan = win.net.adapter.set_ipv4("Ethernet", {
+        dhcp = true,
+        dry_run = true,
+    })
+    lu.assertIsTable(ip_plan)
+    lu.assertTrue(ip_plan.dry_run)
+    lu.assertStrContains(ip_plan.command, "netsh")
+
+    local dns_plan = win.net.dns.set_servers("Ethernet", { "1.1.1.1", "8.8.8.8" }, {
+        dry_run = true,
+    })
+    lu.assertIsTable(dns_plan)
+    lu.assertTrue(dns_plan.dry_run)
+
+    local ntp_plan = win.net.ntp.sync("time.windows.com", { dry_run = true })
+    lu.assertIsTable(ntp_plan)
+    lu.assertTrue(ntp_plan.dry_run)
 end

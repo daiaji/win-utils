@@ -9,7 +9,14 @@ local M = {}
 local function pad(s, l) return s..string.rep(" ", l-#s) end
 
 -- [RESTORED] Added cluster_size parameter
-function M.format_raw(drive_idx, offset, label, cluster_size)
+function M.format_raw(drive_idx, offset, label, cluster_size, opts)
+    opts = opts or {}
+    local safety = require 'win-utils.disk.safety'
+
+    local safe, safe_err = safety.check_destructive_target(drive_idx, opts)
+    if opts.dry_run == true then return true, safe end
+    if not safe then return false, safe_err end
+
     local phys, err = physical.open(drive_idx, "rw", true)
     if not phys then return false, "Open failed: " .. tostring(err) end
     

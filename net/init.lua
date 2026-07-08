@@ -4,7 +4,8 @@ local sub_modules = {
     adapter = 'win-utils.net.adapter',
     dns     = 'win-utils.net.dns',
     icmp    = 'win-utils.net.icmp',
-    stat    = 'win-utils.net.stat'
+    stat    = 'win-utils.net.stat',
+    ntp     = 'win-utils.net.ntp'
 }
 
 setmetatable(M, {

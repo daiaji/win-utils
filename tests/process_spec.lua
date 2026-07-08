@@ -202,6 +202,81 @@ function TestProcess:test_Static_Wait_Helpers()
     p:close()
 end
 
+function TestProcess:test_Exec_Table_Options()
+    local p, err = win.process.exec({
+        file = "cmd.exe",
+        args = { "/c", "exit", "0" },
+        env = { WIN_UTILS_EXEC_TABLE_TEST = "1" },
+        show = 0,
+        timeout = 2000,
+    })
+    lu.assertNotNil(p, "exec table options failed: " .. tostring(err))
+    lu.assertEquals(win.process.exists(p.pid), 0, "short process should have exited")
+    p:close()
+
+    local p2, status = win.process.exec({
+        file = "cmd.exe",
+        args = { "/c", "ping", "-n", "30", "127.0.0.1", ">", "NUL" },
+        show = 0,
+        timeout = 100,
+        kill_tree_on_timeout = true,
+    })
+    lu.assertNotNil(p2)
+    lu.assertEquals(status, "timeout")
+    ffi.C.Sleep(200)
+    lu.assertEquals(win.process.exists(p2.pid), 0, "timed out process should be killed")
+    p2:close()
+end
+
+function TestProcess:test_Popen_Timeout()
+    lu.assertIsTable(win.process.popen)
+    local out, code, status = win.process.popen.run("cmd.exe /c ping -n 30 127.0.0.1 > NUL", {
+        timeout = 100,
+        kill_on_timeout = true,
+    })
+    lu.assertIsString(out)
+    lu.assertIsNumber(code)
+    lu.assertEquals(status, "timeout")
+end
+
+function TestProcess:test_Exec_Capture()
+    local res, err = win.process.exec({
+        file = "cmd.exe",
+        args = { "/c", "echo stdout-line" },
+        show = 0,
+        capture_stdout = true,
+        timeout = 2000,
+    })
+    lu.assertNotNil(res, tostring(err))
+    lu.assertEquals(res.exit_code, 0)
+    lu.assertEquals(res.status, "exit")
+    lu.assertStrContains(res.stdout, "stdout-line")
+
+    local res2, err2 = win.process.exec({
+        cmd = "cmd.exe /c echo stderr-line 1>&2",
+        show = 0,
+        capture_stdout = true,
+        capture_stderr = true,
+        timeout = 2000,
+    })
+    lu.assertNotNil(res2, tostring(err2))
+    lu.assertEquals(res2.exit_code, 0)
+    lu.assertStrContains(res2.stderr, "stderr-line")
+end
+
+function TestProcess:test_Exec_Capture_Timeout()
+    local res, err = win.process.exec({
+        cmd = "cmd.exe /c ping -n 30 127.0.0.1 > NUL",
+        show = 0,
+        capture_stdout = true,
+        timeout = 100,
+        kill_on_timeout = true,
+    })
+    lu.assertNotNil(res, tostring(err))
+    lu.assertTrue(res.timed_out)
+    lu.assertEquals(res.status, "timeout")
+end
+
 -- 10. 内存区域 (Memory Regions)
 function TestProcess:test_Memory_Regions()
     local p = win.process.current()

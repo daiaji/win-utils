@@ -52,7 +52,9 @@ function TestVhdStress:test_Rapid_Lifecycle()
         -- 这步如果失败，通常是因为“设备被占用”或“卷未刷新”
         local prep_ok, plan = win.disk.prepare_drive(drive_idx, "GPT", {
             create_esp = true, -- 强制创建 ESP，增加复杂性
-            label = "STRESS_"..i
+            label = "STRESS_"..i,
+            confirm = true,
+            allow_fixed = true,
         })
         lu.assertTrue(prep_ok, "Prepare failed: " .. tostring(plan)) -- plan 在失败时包含错误信息
         
@@ -60,7 +62,10 @@ function TestVhdStress:test_Rapid_Lifecycle()
         -- prepare_drive 结束后，逻辑卷应该已经就绪
         -- 我们尝试格式化数据分区 (通常是最后一个分区)
         local data_part = plan[#plan]
-        local fmt_ok, fmt_msg = win.disk.format.format(drive_idx, data_part.offset, "NTFS", "DATA_"..i)
+        local fmt_ok, fmt_msg = win.disk.format.format(drive_idx, data_part.offset, "NTFS", "DATA_"..i, {
+            confirm = true,
+            allow_fixed = true,
+        })
         
         if not fmt_ok then
             print("\n    [FAIL] Format failed: " .. tostring(fmt_msg))

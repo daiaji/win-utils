@@ -32,13 +32,95 @@ setmetatable(M, mt)
 local function get_ntfs() return M.ntfs end
 local function get_raw() return M.native end
 
+local crc32_table
+
+local function init_crc32_table()
+    if crc32_table then return crc32_table end
+    crc32_table = {}
+    for i = 0, 255 do
+        local c = i
+        for _ = 1, 8 do
+            if bit.band(c, 1) ~= 0 then c = bit.bxor(0xEDB88320, bit.rshift(c, 1))
+            else c = bit.rshift(c, 1) end
+        end
+        crc32_table[i] = c
+    end
+    return crc32_table
+end
+
+local function crc32_update(crc, data)
+    local tbl = init_crc32_table()
+    crc = bit.bnot(crc or 0)
+    for i = 1, #data do
+        crc = bit.bxor(tbl[bit.band(bit.bxor(crc, data:byte(i)), 0xff)], bit.rshift(crc, 8))
+    end
+    return bit.bnot(crc)
+end
+
 local FILE_ATTRIBUTE_DIRECTORY     = 0x10
 local FILE_ATTRIBUTE_REPARSE_POINT = 0x400
 local FILE_ATTRIBUTE_READONLY      = 0x01
 local INVALID_FILE_ATTRIBUTES      = 0xFFFFFFFF
+local MOVEFILE_REPLACE_EXISTING    = 0x1
+local MOVEFILE_COPY_ALLOWED        = 0x2
+local MOVEFILE_WRITE_THROUGH       = 0x8
 
 local function is_link_attr(attr) return bit.band(attr, FILE_ATTRIBUTE_REPARSE_POINT) ~= 0 end
 local function is_dir_attr(attr) return bit.band(attr, FILE_ATTRIBUTE_DIRECTORY) ~= 0 end
+
+local function normalize_encoding(enc)
+    if not enc then return nil end
+    enc = tostring(enc):lower():gsub("_", "-")
+    if enc == "utf8" then enc = "utf-8" end
+    if enc == "utf16" then enc = "utf-16le" end
+    return enc
+end
+
+local function decode_text(data, encoding)
+    encoding = normalize_encoding(encoding)
+    if not encoding or encoding == "utf-8" then return data end
+    local text = require 'win-utils.text'
+    if encoding == "acp" or encoding == "ansi" then return text.to_utf8(data, text.CP_ACP) end
+    if encoding == "gbk" then return text.to_utf8(data, text.CP_GBK) end
+    if encoding == "big5" then return text.to_utf8(data, text.CP_BIG5) end
+    if encoding == "utf-16le" or encoding == "utf-16" then
+        if #data % 2 ~= 0 then return nil, "Invalid UTF-16LE byte length" end
+        return util.from_wide(ffi.cast("const wchar_t*", data), #data / 2)
+    end
+    return nil, "Unsupported encoding: " .. tostring(encoding)
+end
+
+local function encode_text(data, encoding)
+    encoding = normalize_encoding(encoding)
+    if not encoding or encoding == "utf-8" then return data end
+    local text = require 'win-utils.text'
+    if encoding == "acp" or encoding == "ansi" then return text.from_utf8(data, text.CP_ACP) end
+    if encoding == "gbk" then return text.from_utf8(data, text.CP_GBK) end
+    if encoding == "big5" then return text.from_utf8(data, text.CP_BIG5) end
+    if encoding == "utf-16le" or encoding == "utf-16" then
+        local wide = util.to_wide(data)
+        local len = 0
+        while wide[len] ~= 0 do len = len + 1 end
+        return ffi.string(wide, len * ffi.sizeof("wchar_t"))
+    end
+    return nil, "Unsupported encoding: " .. tostring(encoding)
+end
+
+local function atomic_replace(path, data)
+    local tmp = path .. ".tmp." .. tostring(kernel32.GetCurrentProcessId()) .. "." .. tostring(kernel32.GetTickCount())
+    local f, err = io.open(tmp, "wb")
+    if not f then return false, err end
+    local ok, write_err = f:write(data or "")
+    f:close()
+    if not ok then os.remove(tmp); return false, write_err end
+    local flags = bit.bor(MOVEFILE_REPLACE_EXISTING, MOVEFILE_COPY_ALLOWED, MOVEFILE_WRITE_THROUGH)
+    if kernel32.MoveFileExW(util.to_wide(tmp), util.to_wide(path), flags) == 0 then
+        local move_err = util.last_error("MoveFileEx failed")
+        os.remove(tmp)
+        return false, move_err
+    end
+    return true
+end
 
 -- [OPTIMIZATION] Batch Enumeration (64KB Buffer)
 -- Returns iterator yielding (name, attributes, size_bytes)
@@ -281,6 +363,62 @@ local function cp_r(src, dst, opts)
 end
 
 function M.copy(src, dst, opts) return cp_r(src, dst, opts or {}) end
+
+function M.read(path, opts)
+    opts = opts or {}
+    local f, err = io.open(path, opts.text and "r" or "rb")
+    if not f then return nil, err end
+    if opts.offset then f:seek("set", opts.offset) end
+    local size = opts.length or opts.bytes or "*a"
+    local data, read_err = f:read(size)
+    f:close()
+    if not data then return nil, read_err end
+    return decode_text(data, opts.encoding)
+end
+
+function M.write(path, data, opts)
+    opts = opts or {}
+    local encoded, enc_err = encode_text(data or "", opts.encoding)
+    if not encoded then return false, enc_err end
+
+    if opts.atomic then
+        if opts.append or opts.offset then return false, "atomic write does not support append or offset" end
+        return atomic_replace(path, encoded)
+    end
+
+    local mode
+    if opts.offset then mode = opts.text and "r+" or "r+b"
+    else mode = opts.append and (opts.text and "a" or "ab") or (opts.text and "w" or "wb") end
+    local f, err = io.open(path, mode)
+    if not f and opts.offset then f, err = io.open(path, opts.text and "w+" or "w+b") end
+    if not f then return false, err end
+    if opts.offset then f:seek("set", opts.offset) end
+    local ok, write_err = f:write(encoded)
+    f:close()
+    if not ok then return false, write_err end
+    return true
+end
+
+function M.hash(data, alg)
+    alg = (alg or "crc32"):lower()
+    if alg ~= "crc32" then return nil, "Unsupported hash: " .. tostring(alg) end
+    return bit.tohex(crc32_update(0, data or ""))
+end
+
+function M.hash_file(path, alg)
+    alg = (alg or "crc32"):lower()
+    if alg ~= "crc32" then return nil, "Unsupported hash: " .. tostring(alg) end
+    local f, err = io.open(path, "rb")
+    if not f then return nil, err end
+    local crc = 0
+    while true do
+        local chunk = f:read(1024 * 1024)
+        if not chunk then break end
+        crc = crc32_update(crc, chunk)
+    end
+    f:close()
+    return bit.tohex(crc)
+end
 
 -- [OPTIMIZATION] Recursive Delete using Relative Handles where possible
 local function rm_rf_optimized(path)

@@ -13,11 +13,20 @@ local sub_modules = {
     io       = 'win-utils.sys.io',
     path     = 'win-utils.sys.path',
     env      = 'win-utils.sys.env',
+    autorun  = 'win-utils.sys.autorun',
     pagefile = 'win-utils.sys.pagefile',
+    recycle  = 'win-utils.sys.recycle',
+    time     = 'win-utils.sys.time',
     dism     = 'win-utils.sys.dism',
     inf      = 'win-utils.sys.inf',
     dev_info = 'win-utils.sys.dev_info',
-    font     = 'win-utils.sys.font'
+    font     = 'win-utils.sys.font',
+
+    -- [NEW] 用户管理 (预留)
+    user     = 'win-utils.sys.user',
+
+    -- [NEW] 设备控制 (DEVI Enable/Disable)
+    dev_ctrl = 'win-utils.sys.dev_ctrl'
 }
 
 setmetatable(M, {
@@ -28,14 +37,14 @@ setmetatable(M, {
             rawset(t, key, mod)
             return mod
         end
-        
+
         -- [Shortcut] sys.tee
         if key == "tee" then
             local mod = require('win-utils.sys.io')
             rawset(t, "tee", mod.tee)
             return mod.tee
         end
-        
+
         -- [Shortcut] sys.which
         if key == "which" then
             local mod = require('win-utils.sys.path')

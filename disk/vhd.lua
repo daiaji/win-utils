@@ -9,18 +9,36 @@ local M = {}
 local C = virtdisk
 local VENDOR_MS = ffi.new("GUID", {0xEC984AEC, 0xA0F9, 0x47e9, {0x90, 0x1F, 0x71, 0x41, 0x5A, 0x66, 0x34, 0x5B}})
 
-function M.create(path, size_bytes, opts)
-    opts = opts or {}
+-- Helper: 判断虚拟存储类型
+local function init_vst(path)
     local vst = ffi.new("VIRTUAL_STORAGE_TYPE")
     vst.VendorId = VENDOR_MS
-    vst.DeviceId = path:lower():match("%.vhdx$") and 3 or 2
+    
+    local ext = path:match("%.([^%.]+)$"):lower()
+    if ext == "vhdx" then
+        vst.DeviceId = 3 -- VIRTUAL_STORAGE_TYPE_DEVICE_VHDX
+    elseif ext == "iso" then
+        vst.DeviceId = 1 -- VIRTUAL_STORAGE_TYPE_DEVICE_ISO
+    else
+        vst.DeviceId = 2 -- VIRTUAL_STORAGE_TYPE_DEVICE_VHD
+    end
+    return vst
+end
 
+function M.create(path, size_bytes, opts)
+    opts = opts or {}
+    
+    -- ISO 不支持创建
+    if path:lower():match("%.iso$") then
+        return nil, "Cannot create ISO files"
+    end
+
+    local vst = init_vst(path)
     local params = ffi.new("CREATE_VIRTUAL_DISK_PARAMETERS")
     params.Version = 2
     params.Version2.MaximumSize = size_bytes
     
     -- [Rufus Strategy] 默认使用 Full Physical Allocation (0x08)
-    -- 这会预先分配文件空间，防止在大负载写入（如格式化）时因文件系统扩展导致的 I/O 挂起。
     local flags = 0
     if opts.dynamic == true then
         flags = 0
@@ -36,21 +54,27 @@ function M.create(path, size_bytes, opts)
 end
 
 function M.open(path)
-    local vst = ffi.new("VIRTUAL_STORAGE_TYPE")
-    vst.DeviceId = 0
-    vst.VendorId = VENDOR_MS
+    local vst = init_vst(path)
     
     local h = ffi.new("HANDLE[1]")
-    local res = C.OpenVirtualDisk(vst, util.to_wide(path), 0x30000, 0, nil, h)
+    
+    -- VIRTUAL_DISK_ACCESS_ALL (0x30000)
+    -- 注意：ISO 实际上只需要 READ，但 Win8+ API 会自动处理
+    local access_mask = 0x30000
+    
+    -- 对于 ISO，如果只读打开失败，可以尝试降低权限，但此处保持通用
+    local res = C.OpenVirtualDisk(vst, util.to_wide(path), access_mask, 0, nil, h)
     
     if res ~= 0 then return nil, "OpenVirtualDisk failed: " .. res end
     return Handle(h[0])
 end
 
 function M.attach(h) 
-    -- [Rufus Strategy] NO_DRIVE_LETTER (0x02)
-    -- 我们希望手动控制挂载点，防止 Windows 自动分配干扰
+    -- [Rufus Strategy] NO_DRIVE_LETTER (0x02) | PERMANENT_LIFETIME (0x04)?
+    -- 我们使用 NO_DRIVE_LETTER 以便于后续自动挂载逻辑控制
     local flags = 0x00000002 
+    
+    -- 注意：ISO Attach flags 略有不同，但 0x2 (NO_DRIVE_LETTER) 依然通用
     local res = C.AttachVirtualDisk(h:get(), nil, flags, 0, nil, nil)
     if res ~= 0 then return false, "Attach failed: " .. res end
     return true

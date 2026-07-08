@@ -20,7 +20,20 @@ end
 -- @param img_path: 源镜像文件路径
 -- @param drive: 已打开并锁定的 PhysicalDrive 对象
 -- @param cb: 进度回调 function(percentage) -> bool (返回 false 取消)
-function M.write(img_path, drive, cb)
+function M.write(img_path, drive, cb, opts)
+    if type(cb) == "table" then
+        opts = cb
+        cb = opts.progress_cb
+    else
+        opts = opts or {}
+    end
+
+    local safety = require 'win-utils.disk.safety'
+    local drive_index = opts.drive_index or (type(drive) == "table" and drive.index)
+    local safe, safe_err = safety.check_destructive_target(drive_index, opts)
+    if opts.dry_run == true then return true, safe end
+    if not safe then return false, safe_err end
+
     local hDisk = get_raw_handle(drive)
     if not hDisk then return false, "Invalid drive handle" end
 

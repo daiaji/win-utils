@@ -4,6 +4,7 @@ local shell32 = require 'ffi.req' 'Windows.sdk.shell32'
 local ole32 = require 'ffi.req' 'Windows.sdk.ole32'
 local user32 = require 'ffi.req' 'Windows.sdk.user32'
 local util = require 'win-utils.core.util'
+local fs = require 'win-utils.fs.init'
 
 local M = {}
 
@@ -27,7 +28,6 @@ local function parse_hotkey(str)
     if s:find("ALT")   then mod = bit.bor(mod, 4) end -- HOTKEYF_ALT
     
     -- 提取最后一个字符或键码
-    -- 匹配最后一个单词或数字
     local last = s:match("[%w]+$")
     if last then
         if #last == 1 then
@@ -139,6 +139,83 @@ function M.create(path, opts)
     -- ole32.CoUninitialize() 
     
     return res, err
+end
+
+-- [新增] 解析快捷方式
+-- @param lnk_path: .lnk 文件路径
+-- @return: table info { target, args, work_dir, desc, icon, icon_idx, show_cmd, hotkey }
+function M.parse(lnk_path)
+    if not util.check_bool(fs.exists(lnk_path), "File not found") then return nil end
+
+    ole32.CoInitialize(nil)
+    
+    local ppObj = ffi.new("void*[1]")
+    local hr = ole32.CoCreateInstance(shell32.CLSID_ShellLink, nil, 1, shell32.IID_IShellLinkW, ppObj)
+    if hr < 0 then 
+        ole32.CoUninitialize()
+        return nil, string.format("CoCreateInstance failed: 0x%X", hr)
+    end
+    
+    local sl = ffi.cast("IShellLinkW*", ppObj[0])
+    local info = {}
+    local success = false
+    
+    -- 1. 加载文件 (IPersistFile::Load)
+    local ppPf = ffi.new("void*[1]")
+    if sl.lpVtbl.QueryInterface(sl, shell32.IID_IPersistFile, ppPf) >= 0 then
+        local pf = ffi.cast("IPersistFile*", ppPf[0])
+        if pf.lpVtbl.Load(pf, util.to_wide(lnk_path), 0) >= 0 then
+            success = true
+        end
+        pf.lpVtbl.Release(pf)
+    end
+    
+    if success then
+        local buf = ffi.new("wchar_t[1024]") -- Safe size
+        
+        -- Get Path
+        local fd = ffi.new("WIN32_FIND_DATAW") 
+        if sl.lpVtbl.GetPath(sl, buf, 1024, fd, 0) == 0 then
+            info.target = util.from_wide(buf)
+        end
+        
+        -- Get Arguments
+        if sl.lpVtbl.GetArguments(sl, buf, 1024) == 0 then
+            info.args = util.from_wide(buf)
+        end
+        
+        -- Get Working Dir
+        if sl.lpVtbl.GetWorkingDirectory(sl, buf, 1024) == 0 then
+            info.work_dir = util.from_wide(buf)
+        end
+        
+        -- Get Description
+        if sl.lpVtbl.GetDescription(sl, buf, 1024) == 0 then
+            info.desc = util.from_wide(buf)
+        end
+        
+        -- Get Icon
+        local idx = ffi.new("int[1]")
+        if sl.lpVtbl.GetIconLocation(sl, buf, 1024, idx) == 0 then
+            info.icon = util.from_wide(buf)
+            info.icon_idx = idx[0]
+        end
+        
+        -- Get ShowCmd
+        local show = ffi.new("int[1]")
+        if sl.lpVtbl.GetShowCmd(sl, show) == 0 then
+            info.show_cmd = show[0]
+        end
+        
+        -- Get Hotkey
+        local hk = ffi.new("WORD[1]")
+        if sl.lpVtbl.GetHotkey(sl, hk) == 0 then
+            info.hotkey_raw = hk[0]
+        end
+    end
+    
+    sl.lpVtbl.Release(sl)
+    return success and info or nil
 end
 
 return M

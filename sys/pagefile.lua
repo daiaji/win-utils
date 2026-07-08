@@ -3,8 +3,87 @@ local ntext = require 'ffi.req' 'Windows.sdk.ntext'
 local native = require 'win-utils.core.native'
 local token = require 'win-utils.process.token'
 local util = require 'win-utils.core.util'
+local reg = require 'win-utils.reg.init'
 
 local M = {}
+
+local MM_ROOT = "HKLM"
+local MM_KEY = [[SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management]]
+local MM_VALUE = "PagingFiles"
+
+local function open_memory_key(access)
+    return reg.open_existing_key(MM_ROOT, MM_KEY, access)
+end
+
+local function parse_entry(entry)
+    local path, min_mb, max_mb = tostring(entry):match("^(.-)%s+(%d+)%s+(%d+)$")
+    return {
+        raw = entry,
+        path = path or entry,
+        min_mb = min_mb and tonumber(min_mb) or nil,
+        max_mb = max_mb and tonumber(max_mb) or nil,
+    }
+end
+
+local function format_entry(item)
+    if type(item) == "string" then return item end
+    if type(item) ~= "table" then return nil end
+    if not item.path then return nil end
+    return string.format("%s %d %d", item.path, tonumber(item.min_mb or item.size_mb or 0), tonumber(item.max_mb or item.size_mb or 0))
+end
+
+function M.list()
+    local key, err = open_memory_key()
+    if not key then return nil, err end
+    local values, read_err = key:read(MM_VALUE, { expand = false })
+    key:close()
+    if values == nil then return {}, read_err end
+
+    local out = {}
+    if type(values) == "table" then
+        for _, item in ipairs(values) do out[#out + 1] = parse_entry(item) end
+    elseif type(values) == "string" and values ~= "" then
+        out[#out + 1] = parse_entry(values)
+    end
+    return out
+end
+
+function M.set(entries, opts)
+    opts = opts or {}
+    if type(entries) ~= "table" then return false, "entries table required" end
+
+    local data = {}
+    for _, item in ipairs(entries) do
+        local entry = format_entry(item)
+        if not entry then return false, "invalid pagefile entry" end
+        data[#data + 1] = entry
+    end
+
+    if opts.dry_run then return { ok = true, dry_run = true, entries = data } end
+
+    local key, err = reg.open_key(MM_ROOT, MM_KEY)
+    if not key then return false, err end
+    local ok, write_err = key:write(MM_VALUE, data, "multi_sz")
+    key:close()
+    return ok, write_err
+end
+
+function M.disable(opts)
+    return M.set({}, opts)
+end
+
+function M.delete_config(path, opts)
+    if not path or path == "" then return false, "path required" end
+    local current, err = M.list()
+    if not current then return false, err end
+
+    local keep = {}
+    local needle = path:lower()
+    for _, item in ipairs(current) do
+        if item.path:lower() ~= needle then keep[#keep + 1] = item end
+    end
+    return M.set(keep, opts)
+end
 
 -- 创建/修改系统页面文件
 -- @param path: 完整 DOS 路径 (例如 "C:\pagefile.sys")

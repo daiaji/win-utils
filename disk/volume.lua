@@ -103,6 +103,45 @@ function M.open(path, write)
     return Handle(h)
 end
 
+function M.flush(path)
+    local h, err = M.open(path, true)
+    if not h then return false, err end
+
+    local ok = kernel32.FlushFileBuffers(h:get()) ~= 0
+    local flush_err = nil
+    if not ok then flush_err = util.last_error("FlushFileBuffers failed") end
+    h:close()
+    return ok, flush_err
+end
+
+function M.dismount(path)
+    local h, err = M.open(path, true)
+    if not h then return false, err end
+
+    local ok, ioctl_err = util.ioctl(h:get(), defs.IOCTL.DISMOUNT)
+    h:close()
+    return ok, ioctl_err
+end
+
+function M.flush_and_dismount(path)
+    local h, err = M.open(path, true)
+    if not h then return false, err end
+
+    local flushed = kernel32.FlushFileBuffers(h:get()) ~= 0
+    local flush_err = nil
+    if not flushed then flush_err = util.last_error("FlushFileBuffers failed") end
+
+    local dismounted, dismount_err = util.ioctl(h:get(), defs.IOCTL.DISMOUNT)
+    h:close()
+
+    return flushed and dismounted, {
+        flushed = flushed,
+        flush_error = flush_err,
+        dismounted = dismounted,
+        dismount_error = dismount_err,
+    }
+end
+
 function M.find_guid_by_partition(drive_index, partition_offset)
     local vols = M.list()
     if not vols then return nil end
@@ -192,7 +231,22 @@ end
 
 -- [RESTORED] Extend Volume to fill partition
 -- This requires the underlying partition to be larger than the volume first (resize via layout.lua)
-function M.extend(path)
+function M.extend(path, opts)
+    opts = opts or {}
+    local safety = require 'win-utils.disk.safety'
+    local target_drive = opts.drive_index
+    if not target_drive then
+        local h_read = M.open(path)
+        if h_read then
+            local ext = util.ioctl(h_read:get(), defs.IOCTL.GET_VOL_EXTENTS, nil, 0, "VOLUME_DISK_EXTENTS")
+            h_read:close()
+            if ext and ext.NumberOfDiskExtents > 0 then target_drive = ext.Extents[0].DiskNumber end
+        end
+    end
+    local safe, safe_err = safety.check_destructive_target(target_drive, opts)
+    if opts.dry_run == true then return true, safe end
+    if not safe then return false, safe_err end
+
     local h = M.open(path, true) -- Need Write Access
     if not h then return false, "Open failed" end
     
@@ -205,7 +259,22 @@ end
 
 -- [RESTORED] Shrink Volume (NTFS only)
 -- @param size_mb: Size to remove in MB
-function M.shrink(path, size_mb)
+function M.shrink(path, size_mb, opts)
+    opts = opts or {}
+    local safety = require 'win-utils.disk.safety'
+    local target_drive = opts.drive_index
+    if not target_drive then
+        local h_read = M.open(path)
+        if h_read then
+            local ext = util.ioctl(h_read:get(), defs.IOCTL.GET_VOL_EXTENTS, nil, 0, "VOLUME_DISK_EXTENTS")
+            h_read:close()
+            if ext and ext.NumberOfDiskExtents > 0 then target_drive = ext.Extents[0].DiskNumber end
+        end
+    end
+    local safe, safe_err = safety.check_destructive_target(target_drive, opts)
+    if opts.dry_run == true then return true, safe end
+    if not safe then return false, safe_err end
+
     local h = M.open(path, true)
     if not h then return false, "Open failed" end
     

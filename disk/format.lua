@@ -10,6 +10,11 @@ function M.format(idx, off, fs, lab, opts)
     local ntfs = require 'win-utils.fs.ntfs'
     local volume = require 'win-utils.disk.volume'
     local kernel32 = require 'ffi.req' 'Windows.sdk.kernel32'
+    local safety = require 'win-utils.disk.safety'
+
+    local safe, safe_err = safety.check_destructive_target(idx, opts)
+    if opts.dry_run == true then return true, safe end
+    if not safe then return false, safe_err end
 
     -- 1. Identify partition size
     local drive, err = physical.open(idx, "r")
@@ -32,7 +37,7 @@ function M.format(idx, off, fs, lab, opts)
 
     -- [Strategy 1] Enhanced Lua FAT32 (For >32GB partitions where Windows limits FAT32)
     if fs_lower == "fat32" and p_size > 32*1024*1024*1024 then
-        local ok, f_err = fat32.format_raw(idx, off, lab, cluster)
+        local ok, f_err = fat32.format_raw(idx, off, lab, cluster, opts)
         if ok then return true, "Lua FAT32" end
     end
     

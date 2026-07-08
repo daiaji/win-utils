@@ -20,6 +20,14 @@ function M.scan(drive, cb, mode, patterns, opts)
     }
     
     local is_write = (mode == "write")
+    if is_write and opts then
+        local safety = require 'win-utils.disk.safety'
+        local drive_index = opts.drive_index or drive.index
+        local safe, safe_err = safety.check_destructive_target(drive_index, opts)
+        if opts.dry_run == true then return true, safe, { dry_run = true } end
+        if not safe then return false, safe_err, { bad_blocks = 0, read_errors = 0, write_errors = 0, corrupt_errors = 0 } end
+    end
+
     local buf_size = 1024 * 1024 
     
     local buf = kernel32.VirtualAlloc(nil, buf_size, 0x1000, 4)

@@ -82,11 +82,17 @@ end
 -- @param scheme: "MBR" 或 "GPT"
 -- @param opts: 分区选项 (create_esp, create_msr, cluster_size 等)
 function M.prepare_drive(drive_index, scheme, opts)
+    opts = opts or {}
     local mount = require 'win-utils.disk.mount'
     local physical = require 'win-utils.disk.physical'
     local layout = require 'win-utils.disk.layout'
     local device = require 'win-utils.device'
     local defs = require 'win-utils.disk.defs'
+    local safety = require 'win-utils.disk.safety'
+
+    local safe, safe_err = safety.check_destructive_target(drive_index, opts)
+    if opts.dry_run == true then return true, safe end
+    if not safe then return false, safe_err end
 
     -- 1. 卸载该磁盘上所有已挂载的卷以释放句柄
     mount.unmount_all_on_disk(drive_index)
@@ -116,7 +122,7 @@ function M.prepare_drive(drive_index, scheme, opts)
     
     -- 发送 IOCTL_DISK_CREATE_DISK (RAW)，通知内核磁盘已变为 RAW 状态
     -- 这替代了 VDS Clean 命令，更底层且稳定
-    local clean_ok, clean_err = layout.clean(drive) 
+    local clean_ok, clean_err = layout.clean(drive, opts)
     if not clean_ok then
         drive:close()
         return false, "Layout Clean failed: " .. tostring(clean_err)
@@ -124,7 +130,7 @@ function M.prepare_drive(drive_index, scheme, opts)
     
     -- 4. 应用新布局
     local plan = layout.calculate_partition_plan(drive, scheme, opts)
-    local ok, apply_err = layout.apply(drive, scheme, plan)
+    local ok, apply_err = layout.apply(drive, scheme, plan, opts)
     
     -- 5. 提交更改并强制刷新
     drive:flush()
@@ -145,6 +151,13 @@ end
 function M.clean_all(drive_index, cb)
     local mount = require 'win-utils.disk.mount'
     local physical = require 'win-utils.disk.physical'
+    local safety = require 'win-utils.disk.safety'
+    local opts = type(cb) == "table" and cb or {}
+
+    local safe, safe_err = safety.check_destructive_target(drive_index, opts)
+    if opts.dry_run == true then return true, safe end
+    if not safe then return false, safe_err end
+    if type(cb) == "table" then cb = cb.progress_cb end
     
     mount.unmount_all_on_disk(drive_index)
     local drive, err = physical.open(drive_index, "rw", true)
@@ -163,10 +176,18 @@ function M.clean_all(drive_index, cb)
 end
 
 -- [API] 磁盘健康检查 (表面扫描)
-function M.check_health(drive_index, cb, write_test)
+function M.check_health(drive_index, cb, write_test, opts)
     local mount = require 'win-utils.disk.mount'
     local physical = require 'win-utils.disk.physical'
     local surface = require 'win-utils.disk.surface'
+    opts = opts or {}
+
+    if write_test then
+        local safety = require 'win-utils.disk.safety'
+        local safe, safe_err = safety.check_destructive_target(drive_index, opts)
+        if opts.dry_run == true then return true, safe end
+        if not safe then return false, safe_err end
+    end
     
     -- 如果是写入测试，必须卸载卷以获得独占访问
     if write_test then mount.unmount_all_on_disk(drive_index) end
@@ -182,7 +203,7 @@ function M.check_health(drive_index, cb, write_test)
     end
     
     local patterns = write_test and {0x55, 0xAA, 0x00, 0xFF} or nil
-    local ok, msg, stats = surface.scan(drive, cb, write_test and "write" or "read", patterns)
+    local ok, msg, stats = surface.scan(drive, cb, write_test and "write" or "read", patterns, opts)
     drive:close()
     return ok, msg, stats
 end

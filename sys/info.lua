@@ -40,4 +40,33 @@ function M.get_memory_info()
     }
 end
 
+function M.get_power_status()
+    local status = ffi.new("SYSTEM_POWER_STATUS")
+
+    if kernel32.GetSystemPowerStatus(status) == 0 then
+        return nil, util.last_error("GetSystemPowerStatus failed")
+    end
+
+    return {
+        ac_line_status = tonumber(status.ACLineStatus),
+        battery_flag = tonumber(status.BatteryFlag),
+        battery_life_percent = tonumber(status.BatteryLifePercent),
+        system_status_flag = tonumber(status.SystemStatusFlag),
+        battery_life_time = tonumber(status.BatteryLifeTime),
+        battery_full_life_time = tonumber(status.BatteryFullLifeTime),
+    }
+end
+
+function M.is_laptop()
+    local status = M.get_power_status()
+    if not status then return false end
+
+    -- BatteryFlag 0x80 means no system battery; 0xFF means unknown status.
+    return status.battery_flag ~= 0x80 and status.battery_flag ~= 0xFF
+end
+
+function M.get_arch()
+    return ffi.arch
+end
+
 return M

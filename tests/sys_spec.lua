@@ -22,6 +22,76 @@ function TestSys:test_Env()
     lu.assertNil(win.sys.env.get(key))
 end
 
+function TestSys:test_Time_Api()
+    lu.assertIsTable(win.sys.time)
+    lu.assertIsNumber(win.sys.time.now())
+    lu.assertIsTable(win.sys.time.date())
+    local plan = win.sys.time.sync_ntp("time.windows.com", { dry_run = true })
+    lu.assertIsTable(plan)
+    lu.assertTrue(plan.dry_run)
+    local tz_plan = win.sys.time.set_timezone("UTC", { dry_run = true })
+    lu.assertIsTable(tz_plan)
+    lu.assertTrue(tz_plan.dry_run)
+    local set_plan = win.sys.time.set_local_time({ year = 2026, month = 1, day = 2 }, { dry_run = true })
+    lu.assertIsTable(set_plan)
+    lu.assertTrue(set_plan.dry_run)
+end
+
+function TestSys:test_Autorun_DryRun()
+    lu.assertIsTable(win.sys.autorun)
+    local set_plan = win.sys.autorun.set("LuaWinUtilsTest", "cmd.exe /c exit 0", { dry_run = true })
+    lu.assertIsTable(set_plan)
+    lu.assertTrue(set_plan.dry_run)
+    local del_plan = win.sys.autorun.delete("LuaWinUtilsTest", { dry_run = true })
+    lu.assertIsTable(del_plan)
+    lu.assertTrue(del_plan.dry_run)
+end
+
+function TestSys:test_Pagefile_DryRun()
+    lu.assertIsTable(win.sys.pagefile)
+    local set_plan = win.sys.pagefile.set({
+        { path = "C:\\pagefile.sys", min_mb = 512, max_mb = 1024 },
+    }, { dry_run = true })
+    lu.assertIsTable(set_plan)
+    lu.assertTrue(set_plan.dry_run)
+    lu.assertEquals(set_plan.entries[1], "C:\\pagefile.sys 512 1024")
+
+    local disable_plan = win.sys.pagefile.disable({ dry_run = true })
+    lu.assertIsTable(disable_plan)
+    lu.assertTrue(disable_plan.dry_run)
+end
+
+function TestSys:test_Recycle_DryRun()
+    lu.assertIsTable(win.sys.recycle)
+    local del_plan = win.sys.recycle.delete("C:\\temp\\old.txt", { dry_run = true })
+    lu.assertIsTable(del_plan)
+    lu.assertTrue(del_plan.dry_run)
+    local empty_plan = win.sys.recycle.empty(nil, { dry_run = true })
+    lu.assertIsTable(empty_plan)
+    lu.assertTrue(empty_plan.dry_run)
+end
+
+function TestSys:test_User_Module()
+    lu.assertIsTable(win.sys.user)
+    lu.assertIsFunction(win.sys.user.name)
+    lu.assertIsFunction(win.sys.user.computer_name)
+    local info = win.sys.user.info()
+    lu.assertIsTable(info)
+    lu.assertIsBoolean(info.elevated)
+end
+
+function TestSys:test_Input_Window_API()
+    lu.assertIsTable(win.vk)
+    lu.assertEquals(win.vk.normalize("enter"), 0x0D)
+    lu.assertEquals(win.vk.F12, 0x7B)
+    lu.assertIsFunction(win.input.send_key)
+    lu.assertIsFunction(win.input.send_text)
+    lu.assertIsFunction(win.input.get_key_state)
+    lu.assertIsFunction(win.window.list)
+    lu.assertIsFunction(win.window.find)
+    lu.assertIsFunction(win.window.wait)
+end
+
 function TestSys:test_Path_Which()
     local cmd = win.sys.path.which("cmd.exe")
     lu.assertNotNil(cmd)
@@ -29,6 +99,11 @@ function TestSys:test_Path_Which()
     
     local nothing = win.sys.path.which("NonExistentFile_XYZ.exe")
     lu.assertNil(nothing)
+
+    lu.assertIsTable(win.sys.path.split_path("C:\\A;D:\\B"))
+    lu.assertTrue(win.sys.path.contains_path("C:\\A\\", "C:\\A;D:\\B"))
+    lu.assertEquals(win.sys.path.add_path("E:\\C", { value = "C:\\A;D:\\B" }), "C:\\A;D:\\B;E:\\C")
+    lu.assertEquals(win.sys.path.remove_path("C:\\A\\", { value = "C:\\A;D:\\B" }), "D:\\B")
 end
 
 function TestSys:test_Shortcut_Full()

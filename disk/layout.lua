@@ -1,4 +1,5 @@
 local ffi = require 'ffi'
+local bit = require 'bit'
 local defs = require 'win-utils.disk.defs'
 local types = require 'win-utils.disk.types'
 local util = require 'win-utils.core.util'
@@ -7,6 +8,30 @@ local kernel32 = require 'ffi.req' 'Windows.sdk.kernel32'
 require 'ffi.req' 'Windows.sdk.winioctl'
 
 local M = {}
+
+local GPT_ATTR_READONLY = ffi.new("uint64_t", "0x1000000000000000")
+local GPT_ATTR_HIDDEN = ffi.new("uint64_t", "0x4000000000000000")
+local GPT_ATTR_NODRIVE = ffi.new("uint64_t", "0x8000000000000000")
+
+local function set_flag_64(val64, flag64, enable)
+    local has_flag = (val64 % (flag64 * 2)) >= flag64
+    if enable then
+        if not has_flag then return val64 + flag64 end
+    else
+        if has_flag then return val64 - flag64 end
+    end
+    return val64
+end
+
+local function check_drive(d, opts)
+    if not opts then return true end
+    local safety = require 'win-utils.disk.safety'
+    local drive_idx = opts.drive_index or d.index
+    local safe, safe_err = safety.check_destructive_target(drive_idx, opts)
+    if opts.dry_run == true then return nil, safe end
+    if not safe then return false, safe_err end
+    return true
+end
 
 local function get_raw(d)
     local sz = ffi.sizeof("DRIVE_LAYOUT_INFORMATION_EX_FULL")
@@ -54,7 +79,11 @@ end
 
 -- [NEW] Reset disk layout to RAW (Uninitialized)
 -- This is the robust replacement for VDS Clean
-function M.clean(d)
+function M.clean(d, opts)
+    local safe, safe_err = check_drive(d, opts)
+    if opts and opts.dry_run == true then return true, safe_err end
+    if not safe then return false, safe_err end
+
     local cr = ffi.new("CREATE_DISK")
     cr.PartitionStyle = 2 -- PARTITION_STYLE_RAW
     
@@ -66,7 +95,11 @@ function M.clean(d)
     return true
 end
 
-function M.apply(d, scheme, parts)
+function M.apply(d, scheme, parts, opts)
+    local safe, safe_err = check_drive(d, opts)
+    if opts and opts.dry_run == true then return true, safe_err end
+    if not safe then return false, safe_err end
+
     -- 1. Pre-Wipe 防止 Ghost Volume
     clean_ghost_regions(d, parts)
 
@@ -149,7 +182,11 @@ function M.calculate_partition_plan(drive, scheme, opts)
     return parts
 end
 
-function M.set_active(d, idx, act)
+function M.set_active(d, idx, act, opts)
+    local safe, safe_err = check_drive(d, opts)
+    if opts and opts.dry_run == true then return true, safe_err end
+    if not safe then return false, safe_err end
+
     local l, sz = get_raw(d)
     if not l then return false, "GetLayout failed" end
     if l.PartitionStyle ~= 0 then return false, "Not MBR" end
@@ -164,7 +201,11 @@ function M.set_active(d, idx, act)
     return set_raw(d, l, sz)
 end
 
-function M.set_partition_attributes(d, idx, attr)
+function M.set_partition_attributes(d, idx, attr, opts)
+    local safe, safe_err = check_drive(d, opts)
+    if opts and opts.dry_run == true then return true, safe_err end
+    if not safe then return false, safe_err end
+
     local l, sz = get_raw(d)
     if not l then return false, "GetLayout failed" end
     if l.PartitionStyle ~= 1 then return false, "Not GPT" end
@@ -179,7 +220,11 @@ function M.set_partition_attributes(d, idx, attr)
     return set_raw(d, l, sz)
 end
 
-function M.set_partition_type(d, idx, tid)
+function M.set_partition_type(d, idx, tid, opts)
+    local safe, safe_err = check_drive(d, opts)
+    if opts and opts.dry_run == true then return true, safe_err end
+    if not safe then return false, safe_err end
+
     local l, sz = get_raw(d)
     if not l then return false, "GetLayout failed" end
     
@@ -191,6 +236,58 @@ function M.set_partition_type(d, idx, tid)
             p.RewritePartition = 1
         end
     end
+    return set_raw(d, l, sz)
+end
+
+function M.set_hidden(d, idx, hidden, opts)
+    local safe, safe_err = check_drive(d, opts)
+    if opts and opts.dry_run == true then return true, safe_err end
+    if not safe then return false, safe_err end
+
+    local l, sz = get_raw(d)
+    if not l then return false, "GetLayout failed" end
+
+    for i = 0, l.PartitionCount - 1 do
+        local p = l.PartitionEntry[i]
+        if p.PartitionNumber == idx then
+            if l.PartitionStyle == 1 then
+                local attr = ffi.cast("uint64_t", p.Gpt.Attributes)
+                attr = set_flag_64(attr, GPT_ATTR_HIDDEN, hidden)
+                attr = set_flag_64(attr, GPT_ATTR_NODRIVE, hidden)
+                p.Gpt.Attributes = attr
+            else
+                local current_id = p.Mbr.PartitionType
+                if hidden then
+                    if bit.band(current_id, 0x10) == 0 then p.Mbr.PartitionType = bit.bor(current_id, 0x10) end
+                else
+                    if bit.band(current_id, 0x10) ~= 0 then p.Mbr.PartitionType = bit.band(current_id, bit.bnot(0x10)) end
+                end
+            end
+            p.RewritePartition = 1
+        end
+    end
+
+    return set_raw(d, l, sz)
+end
+
+function M.set_readonly(d, idx, readonly, opts)
+    local safe, safe_err = check_drive(d, opts)
+    if opts and opts.dry_run == true then return true, safe_err end
+    if not safe then return false, safe_err end
+
+    local l, sz = get_raw(d)
+    if not l then return false, "GetLayout failed" end
+    if l.PartitionStyle ~= 1 then return false, "Read-only attribute is GPT only" end
+
+    for i = 0, l.PartitionCount - 1 do
+        local p = l.PartitionEntry[i]
+        if p.PartitionNumber == idx then
+            local attr = ffi.cast("uint64_t", p.Gpt.Attributes)
+            p.Gpt.Attributes = set_flag_64(attr, GPT_ATTR_READONLY, readonly)
+            p.RewritePartition = 1
+        end
+    end
+
     return set_raw(d, l, sz)
 end
 

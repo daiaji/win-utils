@@ -1,7 +1,7 @@
 local M = {}
 
 -- [Lua-Ext Integration]
--- 确保基础扩展被加载
+-- 确保基础扩展被加载 (这些是 win-utils 依赖的基础)
 require 'ext.table'
 require 'ext.string'
 require 'ext.math'
@@ -20,7 +20,16 @@ local modules = {
     
     -- [Standalone Modules]
     wim      = 'win-utils.wim',
-    device   = 'win-utils.device'
+    device   = 'win-utils.device',
+    crypto   = 'win-utils.crypto',
+    log      = 'win-utils.log',
+    ini      = 'win-utils.ini',
+    vk       = 'win-utils.vk',
+    input    = 'win-utils.input',
+    window   = 'win-utils.window',
+
+    -- [NEW] Text Encoding (CODE)
+    text     = 'win-utils.text'
 }
 
 setmetatable(M, {

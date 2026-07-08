@@ -42,6 +42,18 @@ function M.basename(path)
     return p:match(".*[\\/](.*)") or p
 end
 
+function M.stem(path)
+    local base = M.basename(path)
+    if not base then return nil end
+    local name = base:match("^(.+)%.[^%.%/\\]+$")
+    return name or base
+end
+
+function M.extension(path)
+    local _, ext = M.splitext(path)
+    return ext
+end
+
 function M.dirname(path)
     if not path then return nil end
     local p = path:gsub("[\\/]+$", "")
@@ -70,6 +82,11 @@ function M.splitext(path)
     if not path then return nil, nil end
     local base, ext = path:match("^(.+)(%.[^\\/]+)$")
     return (base or path), (ext or "")
+end
+
+function M.drive(path)
+    if not path then return nil end
+    return path:match("^(%a:)") or path:match("^(\\\\[^\\]+\\[^\\]+)")
 end
 
 return M

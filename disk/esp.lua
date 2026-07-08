@@ -10,7 +10,14 @@ local REG_KEY = "Software\\LuaWinUtils\\EspToggle"
 
 local function guid_eq(a, b) return ffi.string(a, 16) == ffi.string(b, 16) end
 
-function M.toggle(drive_idx, offset)
+function M.toggle(drive_idx, offset, opts)
+    opts = opts or {}
+    local safety = require 'win-utils.disk.safety'
+
+    local safe, safe_err = safety.check_destructive_target(drive_idx, opts)
+    if opts.dry_run == true then return true, safe end
+    if not safe then return false, safe_err end
+
     local drive, err = physical.open(drive_idx, "rw", true)
     if not drive then return false, "Open failed: " .. tostring(err) end
     
@@ -68,7 +75,7 @@ function M.toggle(drive_idx, offset)
         for _, part in ipairs(parts) do
             if part.off == offset then part.type = new_type_id end
         end
-        local ok, apply_err = layout.apply(drive, info.style, parts)
+        local ok, apply_err = layout.apply(drive, info.style, parts, opts)
         if ok then res = true
         else msg = apply_err end
     else

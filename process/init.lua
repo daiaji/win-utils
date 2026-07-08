@@ -1,4 +1,5 @@
 local ffi = require 'ffi'
+local bit = require 'bit'
 local kernel32 = require 'ffi.req' 'Windows.sdk.kernel32'
 local ntdll = require 'ffi.req' 'Windows.sdk.ntdll'
 local user32 = require 'ffi.req' 'Windows.sdk.user32'
@@ -19,7 +20,8 @@ local sub_modules = {
     job     = 'win-utils.process.job',
     memory  = 'win-utils.process.memory',
     module  = 'win-utils.process.module',
-    handles = 'win-utils.process.handles'
+    handles = 'win-utils.process.handles',
+    popen   = 'win-utils.process.popen'
 }
 
 setmetatable(M, {
@@ -46,6 +48,85 @@ local INVALID_HANDLE = ffi.cast("HANDLE", -1)
 local PRIORITY_MAP = {
     L = 0x40, B = 0x4000, N = 0x20, A = 0x8000, H = 0x80, R = 0x100
 }
+
+local STARTF_USESHOWWINDOW = 0x00000001
+local CREATE_UNICODE_ENVIRONMENT = 0x00000400
+
+local function quote_arg(arg)
+    arg = tostring(arg)
+    if arg == "" then return '""' end
+    if not arg:find('[%s"]') then return arg end
+    local bs = 0
+    local out = {'"'}
+    for i = 1, #arg do
+        local ch = arg:sub(i, i)
+        if ch == "\\" then
+            bs = bs + 1
+        elseif ch == '"' then
+            table.insert(out, string.rep("\\", bs * 2 + 1))
+            table.insert(out, ch)
+            bs = 0
+        else
+            if bs > 0 then
+                table.insert(out, string.rep("\\", bs))
+                bs = 0
+            end
+            table.insert(out, ch)
+        end
+    end
+    if bs > 0 then table.insert(out, string.rep("\\", bs * 2)) end
+    table.insert(out, '"')
+    return table.concat(out)
+end
+
+local function build_cmdline(opts)
+    if opts.cmd then return opts.cmd end
+    if opts.command then return opts.command end
+    if opts.file then
+        local parts = { quote_arg(opts.file) }
+        for _, arg in ipairs(opts.args or {}) do table.insert(parts, quote_arg(arg)) end
+        return table.concat(parts, " ")
+    end
+    return nil
+end
+
+local function current_environment()
+    local block = kernel32.GetEnvironmentStringsW()
+    if not block then return {} end
+
+    local env = {}
+    local p = block
+    while p[0] ~= 0 do
+        local entry_start = p
+        while p[0] ~= 0 do p = p + 1 end
+        local entry = util.from_wide(entry_start)
+        local eq = entry:find("=", 2, true)
+        if eq then env[entry:sub(1, eq - 1)] = entry:sub(eq + 1) end
+        p = p + 1
+    end
+    kernel32.FreeEnvironmentStringsW(block)
+    return env
+end
+
+local function build_env_block(env, inherit)
+    if not env then return nil end
+    local merged = inherit == false and {} or current_environment()
+    for k, v in pairs(env) do
+        if v == false then merged[k] = nil
+        elseif v ~= nil then merged[k] = tostring(v) end
+    end
+
+    local keys = {}
+    for k in pairs(merged) do table.insert(keys, k) end
+    table.sort(keys, function(a, b) return a:upper() < b:upper() end)
+
+    local parts = {}
+    for _, k in ipairs(keys) do
+        local v = merged[k]
+        if v ~= nil then table.insert(parts, tostring(k) .. "=" .. tostring(v)) end
+    end
+    return util.to_wide(table.concat(parts, "\0") .. "\0")
+end
 
 local function get_cmd_line(pid)
     local hProc = kernel32.OpenProcess(0x410, false, pid)
@@ -157,14 +238,103 @@ end
 
 function Process:kill(mode) return M.kill(self.pid, mode) end
 
-function M.exec(cmd, workdir, show)
-    local si = ffi.new("STARTUPINFOW"); si.cb = ffi.sizeof(si); si.dwFlags = 1; si.wShowWindow = show or 1
+local function exec_with_opts(opts)
+    if opts.capture or opts.capture_stdout or opts.capture_stderr then
+        local popen = require 'win-utils.process.popen'
+        local cmd = build_cmdline(opts)
+        if not cmd or cmd == "" then return nil, "cmd or file required" end
+        if opts.env then return nil, "env is not supported with capture yet" end
+        if opts.priority then return nil, "priority is not supported with capture yet" end
+        if opts.job or opts.kill_on_close then return nil, "job is not supported with capture yet" end
+        if opts.wait_input_idle then return nil, "wait_input_idle is not supported with capture yet" end
+        local out, code, status, err_out = popen.run(cmd, {
+            work_dir = opts.cwd or opts.workdir or opts.work_dir,
+            show = opts.show,
+            timeout = opts.timeout,
+            kill_tree_on_timeout = opts.kill_tree_on_timeout,
+            kill_on_timeout = opts.kill_on_timeout,
+            timeout_exit_code = opts.timeout_exit_code,
+            separate_stderr = opts.capture_stderr and opts.capture_stdout ~= false,
+            include_stderr = opts.capture_stderr ~= false,
+        })
+        if not out then return nil, code end
+        return {
+            stdout = out,
+            stderr = err_out,
+            exit_code = code,
+            status = status or "exit",
+            timed_out = status == "timeout",
+        }
+    end
+
+    local cmd = build_cmdline(opts)
+    if not cmd or cmd == "" then return nil, "cmd or file required" end
+
+    local si = ffi.new("STARTUPINFOW")
+    si.cb = ffi.sizeof(si)
+    si.dwFlags = STARTF_USESHOWWINDOW
+    si.wShowWindow = opts.show or 1
     local pi = ffi.new("PROCESS_INFORMATION")
-    if kernel32.CreateProcessW(nil, util.to_wide(cmd), nil, nil, false, 0, nil, util.to_wide(workdir), si, pi) == 0 then 
+
+    local flags = opts.flags or 0
+    local env_block = build_env_block(opts.env, opts.inherit_env)
+    if env_block then flags = bit.bor(flags, CREATE_UNICODE_ENVIRONMENT) end
+
+    local wcmd = util.to_wide(cmd)
+    local wdir = opts.cwd or opts.workdir or opts.work_dir
+    local wdir_buf = wdir and util.to_wide(wdir) or nil
+    local keepalive = { wcmd, wdir_buf, env_block }
+
+    if kernel32.CreateProcessW(nil, wcmd, nil, nil, false, flags, env_block, wdir_buf, si, pi) == 0 then
         return nil, util.last_error()
     end
+    local _ = keepalive
     kernel32.CloseHandle(pi.hThread)
-    return Process(tonumber(pi.dwProcessId), pi.hProcess)
+
+    local proc = Process(tonumber(pi.dwProcessId), pi.hProcess)
+
+    if opts.priority then proc:set_priority(opts.priority) end
+
+    if opts.job or opts.kill_on_close then
+        local job = require('win-utils.process.job').create(opts.job_name)
+        if not job then
+            proc:terminate(1)
+            proc:close()
+            return nil, "CreateJobObject failed"
+        end
+        if opts.kill_on_close then
+            local ok, err = job:set_kill_on_close()
+            if not ok then
+                proc:terminate(1)
+                proc:close()
+                return nil, err
+            end
+        end
+        local ok, err = job:assign(proc:handle())
+        if not ok then
+            proc:terminate(1)
+            proc:close()
+            return nil, err
+        end
+        proc.job = job
+    end
+
+    if opts.wait_input_idle then proc:wait_input(opts.wait_input_idle == true and -1 or opts.wait_input_idle) end
+
+    if opts.timeout then
+        if not proc:wait(opts.timeout) then
+            if opts.kill_tree_on_timeout then M.kill(proc.pid, "tree")
+            elseif opts.kill_on_timeout ~= false then proc:terminate(opts.timeout_exit_code or 1) end
+            return proc, "timeout"
+        end
+    end
+
+    return proc
+end
+
+function M.exec(cmd, workdir, show)
+    if type(cmd) == "table" then return exec_with_opts(cmd) end
+    return exec_with_opts({ cmd = cmd, workdir = workdir, show = show })
 end
 
 function M.open(pid, access)
@@ -329,6 +499,10 @@ function M.wait_close(name_or_pid, timeout)
     local res = kernel32.WaitForSingleObject(h, timeout or -1)
     kernel32.CloseHandle(h)
     return res == 0
+end
+
+function M.sleep(ms)
+    kernel32.Sleep(ms or 0)
 end
 
 return M
